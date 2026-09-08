@@ -264,7 +264,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # --- Platform-specific (target tables) ---
 libc = "0.2"
 objc2 = "0.6"
-wmi = "0.16"
+wmi = "0.18"
 
 # --- Test-only ---
 proptest = "1"
