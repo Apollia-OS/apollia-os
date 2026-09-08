@@ -1,0 +1,34 @@
+[package]
+name = "apollia-oria"
+version = "0.1.0-preview"
+edition.workspace = true
+rust-version.workspace = true
+description = "Apollia OS - ORIA Engine (Observer-Reasoner-Actor, StepBudget enforcement, ResilienceLayer)"
+license.workspace = true
+
+[dependencies]
+apollia-core      = { workspace = true }
+apollia-prompts   = { workspace = true }
+apollia-tools     = { workspace = true }
+apollia-memory    = { workspace = true }
+apollia-llm       = { workspace = true, features = ["cloud"] }
+apollia-workspace = { workspace = true }
+tokio          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+uuid           = { workspace = true }
+rand           = { workspace = true }
+rusqlite       = { workspace = true }
+sha2           = { workspace = true }
+async-trait    = { workspace = true }
+chrono         = { workspace = true }
+futures        = { workspace = true }
+
+[dev-dependencies]
+tempfile       = { workspace = true }
+proptest       = { workspace = true }
+
+[lints]
+workspace = true

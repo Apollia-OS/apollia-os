@@ -1,0 +1,416 @@
+//! OpenAPI document assembly and the `GET /api/v1/openapi.json` handler.
+//!
+//! The spec is derived from the code: `#[utoipa::path]` attributes on the
+//! handlers and `#[derive(ToSchema)]` on the request/response types. It cannot
+//! drift from the wire contract because it is generated from the same types the
+//! handlers serialize.
+//!
+//! `utoipa` lives in this crate only; cross-crate body types are represented
+//! with `#[schema(value_type = Object)]` at the field so the dependency never
+//! spreads to `apollia-core` and the other crates.
+//!
+//! Stability: `/api/v1` is a versioned, stable contract. A breaking change ships
+//! as `/api/v2`; `v1` is never mutated in an incompatible way.
+//!
+//! `info.version` is deliberately not written here. `utoipa` fills it from
+//! `CARGO_PKG_VERSION`, so the document carries the version of the runtime that
+//! serves it. It used to be pinned to the literal `1.0.0` while every other
+//! surface of the product read `0.1.0-preview`, and an integrator reading the
+//! reference took a stability guarantee nobody had given. The path prefix, not
+//! this field, is what carries the contract's compatibility promise.
+
+use axum::Json;
+use serde::Serialize;
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::{Modify, OpenApi, ToSchema};
+
+/// Name of the single security scheme the contract declares.
+///
+/// Generated clients derive an identifier from this string, so it is part of
+/// the published surface and is not renamed without regenerating them.
+const BEARER_SCHEME: &str = "bearerAuth";
+
+/// Declares the Bearer token the TCP listener enforces.
+///
+/// `utoipa` builds the document from the handler annotations, which say nothing
+/// about authentication; this modifier is where the transport-level rule of
+/// `crates/apollia-runtime/src/api/middleware.rs` enters the spec. Without it
+/// the document describes an API that needs no credential, which is what every
+/// generated client and the published reference then say.
+struct BearerToken;
+
+impl Modify for BearerToken {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            BEARER_SCHEME,
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some(
+                        "Token read from `<data_dir>/api-token`, generated on first start \
+                         and sent as `Authorization: Bearer <token>`. Enforced on the TCP \
+                         listener by `TokenAuthLayer`, on every route except \
+                         `POST /webhooks/{id}`, which authenticates its caller with an \
+                         HMAC-SHA256 signature instead. Requests arriving on the Unix \
+                         socket bypass the check: the socket file is mode 0600, so its \
+                         permissions carry the same rule. Setting `[api] require_token = \
+                         false` in `apollia.toml` removes the layer from the TCP listener \
+                         altogether.",
+                    ))
+                    .build(),
+            ),
+        );
+    }
+}
+
+/// Canonical error body for every non-2xx response in the spec.
+///
+/// Matches the wire shape of the per-module `ErrorResponse { error }` used
+/// across the route handlers.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiErrorBody {
+    /// Human-readable error description.
+    pub error: String,
+}
+
+/// The generated OpenAPI document for the `/api/v1` driving contract.
+///
+/// The document-level `security` applies [`BearerToken`] to every operation.
+/// One operation opts out, `POST /webhooks/{id}`, and does so at its own
+/// annotation.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Apollia OS Runtime API",
+        description = "Host driving contract for the Apollia OS sovereign agent runtime. Stable under /api/v1; breaking changes ship under /api/v2."
+    ),
+    modifiers(&BearerToken),
+    security(("bearerAuth" = [])),
+    tags(
+        (name = "health", description = "Liveness and lifecycle"),
+        (name = "tasks", description = "Submit and drive autonomous agent tasks"),
+        (name = "chat", description = "Conversational chat sessions"),
+        (name = "agents", description = "Agent inventory and lifecycle"),
+        (name = "a2a", description = "Agent-to-agent skill invocation"),
+        (name = "audit", description = "Signed audit trail and verification"),
+        (name = "governance", description = "Approvals, hooks, plan cache"),
+        (name = "tools", description = "Native tool catalogue"),
+        (name = "triggers", description = "Scheduled and event triggers"),
+        (name = "notifications", description = "Notification channels and events"),
+        (name = "stt", description = "Local speech to text"),
+        (name = "llm", description = "LLM backends, routing, and cost"),
+        (name = "model_hub", description = "Hardware profiling and model registry"),
+        (name = "resilience", description = "Circuit breakers"),
+        (name = "mcp", description = "MCP servers and resources"),
+        (name = "webhooks", description = "Inbound webhooks")
+    ),
+    paths(
+        crate::api::server::router::health_handler,
+        crate::api::server::router::shutdown_handler,
+        crate::api::routes_tasks::list_tasks,
+        crate::api::routes_tasks::submit_task,
+        crate::api::routes_tasks::get_task,
+        crate::api::routes_tasks::cancel_task,
+        crate::api::routes_tasks::resume_task,
+        crate::api::routes_tasks::submit_plan_decision,
+        crate::api::routes_agents::list_agents,
+        crate::api::routes_agents::start_agent,
+        crate::api::routes_agents::get_agent,
+        crate::api::routes_agents::stop_agent,
+        crate::api::routes_messages::list_agent_messages,
+        crate::api::routes_messages::inject_agent_message,
+        crate::api::routes_messages::stream_mailbox,
+        crate::api::routes_a2a::list_a2a_agents,
+        crate::api::routes_a2a::delegate,
+        crate::api::routes_a2a::list_a2a_skills,
+        crate::api::routes_a2a::invoke_by_skill,
+        crate::api::routes_a2a::get_task_sidechains,
+        crate::api::routes_chat::list_sessions,
+        crate::api::routes_chat::create_session,
+        crate::api::routes_chat::list_recent_sessions,
+        crate::api::routes_chat::get_session,
+        crate::api::routes_chat::close_session,
+        crate::api::routes_chat::send_message,
+        crate::api::routes_chat::authorize_tool,
+        crate::api::routes_chat::stream_session,
+        crate::api::routes_chat::get_session_todo,
+        crate::api::routes_chat::resume_session,
+        crate::api::routes_chat::fork_session,
+        crate::api::routes_chat::list_session_children,
+        crate::api::routes_sse::stream_task,
+        crate::api::routes_audit::list_audit,
+        crate::api::routes_audit::get_audit_stats,
+        crate::api::routes_audit::verify_audit_run,
+        crate::api::routes_audit::verify_audit_journal,
+        crate::api::routes_audit::get_audit_anchor,
+        crate::api::routes_audit::show_audit_run,
+        crate::api::routes_audit::list_audit_journal,
+        crate::api::routes_audit::post_replay_run,
+        crate::api::routes_trace::get_task_trace,
+        crate::api::routes_timeline::get_task_timeline,
+        crate::api::routes_hooks::list_hooks,
+        crate::api::routes_review::post_review,
+        crate::api::routes_plan_cache::get_plan_cache_stats,
+        crate::api::routes_plan_cache::clear_plan_cache,
+        crate::api::routes_approvals::list_pending_approvals,
+        crate::api::routes_approvals::list_resolved_approvals,
+        crate::api::routes_tools::list_tools,
+        crate::api::routes_tools::describe_tool,
+        crate::api::routes_triggers::list_triggers,
+        crate::api::routes_triggers::create_trigger,
+        crate::api::routes_triggers::reload_triggers,
+        crate::api::routes_triggers::get_trigger_by_id,
+        crate::api::routes_triggers::update_trigger,
+        crate::api::routes_triggers::delete_trigger,
+        crate::api::routes_triggers::fire_trigger,
+        crate::api::routes_triggers::enable_trigger,
+        crate::api::routes_triggers::disable_trigger,
+        crate::api::routes_triggers::get_trigger_logs,
+        crate::api::routes_notifications::list_channels,
+        crate::api::routes_notifications::create_channel,
+        crate::api::routes_notifications::update_channel,
+        crate::api::routes_notifications::delete_channel,
+        crate::api::routes_notifications::get_events,
+        crate::api::routes_notifications::set_events,
+        crate::api::routes_notifications::probe::test_channels,
+        crate::api::routes_notifications::logs::notification_logs,
+        crate::api::routes_stt::stt_status,
+        crate::api::routes_stt::transcribe_audio,
+        crate::api::routes_stt::list_transcriptions,
+        crate::api::routes_stt::delete_transcription,
+        crate::api::routes_stt::list_models,
+        crate::api::routes_stt::get_stt_config,
+        crate::api::routes_stt::update_stt_config,
+        crate::api::routes_stt::reload_stt_engine,
+        crate::api::routes_webhooks::handle_webhook,
+        crate::api::routes_llm::get_llm_status,
+        crate::api::routes_llm::ping_llm_backend,
+        crate::api::routes_llm::llm_chat,
+        crate::api::routes_llm::llm_complete,
+        crate::api::routes_llm::costs::get_llm_costs,
+        crate::api::routes_llm::costs::get_llm_daily_costs,
+        crate::api::routes_llm::backends::list_llm_backends,
+        crate::api::routes_llm::backends::create_llm_backend,
+        crate::api::routes_llm::backends::get_llm_backend,
+        crate::api::routes_llm::backends::update_llm_backend,
+        crate::api::routes_llm::backends::delete_llm_backend,
+        crate::api::routes_llm::backends::set_default_llm_backend,
+        crate::api::routes_llm::backends::reload_llm_router,
+        crate::api::routes_model_hub::get_hardware,
+        crate::api::routes_model_hub::search_registry,
+        crate::api::routes_model_hub::get_registry_model,
+        crate::api::routes_resilience::list_breakers,
+        crate::api::routes_resilience::get_breaker,
+        crate::api::routes_resilience::reset_breaker,
+        crate::api::routes_mcp::list_servers,
+        crate::api::routes_mcp::add_server,
+        crate::api::routes_mcp::list_resources,
+        crate::api::routes_mcp::test_connection,
+        crate::api::routes_mcp::test_live_server,
+        crate::api::routes_mcp::get_server_detail,
+        crate::api::routes_mcp::remove_server,
+        crate::api::routes_mcp::get_server_raw_config,
+        crate::api::routes_mcp::restart_server,
+        crate::api::routes_mcp::update_server_config,
+        crate::api::routes_mcp::set_server_approval,
+    ),
+    components(schemas(
+        ApiErrorBody,
+        crate::api::server::router::HealthResponse,
+        crate::api::server::router::ShutdownResponse,
+        crate::api::routes_tasks::SubmitTaskRequest,
+        crate::api::routes_tasks::TaskResponse,
+        crate::api::routes_tasks::TaskListResponse,
+        crate::api::routes_tasks::TaskListItem,
+        crate::api::routes_tasks::ResumeRequest,
+        crate::api::routes_tasks::ResumeResponse,
+        crate::api::routes_tasks::PlanDecisionRequest,
+        crate::api::routes_tasks::PlanDecisionResponse,
+        crate::api::routes_agents::SkillDto,
+        crate::api::routes_agents::StartAgentRequest,
+        crate::api::routes_agents::AgentResponse,
+        crate::api::routes_agents::AgentListResponse,
+        crate::api::routes_messages::AgentMessagesResponse,
+        crate::api::routes_messages::AgentMessageDto,
+        crate::api::routes_messages::InjectMessageBody,
+        crate::api::routes_messages::InjectMessageResponse,
+        crate::api::routes_messages::SseMailboxEvent,
+        crate::api::routes_a2a::A2aSkillDto,
+        crate::api::routes_a2a::A2aAgentDto,
+        crate::api::routes_a2a::A2aAgentsResponse,
+        crate::api::routes_a2a::DelegateRequest,
+        crate::api::routes_a2a::A2aSkillsResponse,
+        crate::api::routes_a2a::InvokeRequest,
+        crate::a2a::invoker::A2AInvocationResult,
+        crate::a2a::invoker::SkillListing,
+        crate::a2a::A2aDelegateResult,
+        crate::a2a::SidechainRow,
+        crate::api::routes_chat::CreateSessionRequest,
+        crate::api::routes_chat::SendMessageRequest,
+        crate::api::routes_chat::SendMessageResponse,
+        crate::api::routes_chat::AuthorizeToolRequest,
+        crate::api::routes_chat::ForkSessionRequest,
+        crate::api::routes_chat::TodoReadResponse,
+        crate::api::routes_sse::SseTaskEvent,
+        crate::api::routes_audit::AuditEventResponse,
+        crate::api::routes_audit::AuditListResponse,
+        crate::api::routes_audit::AuditStatsResponse,
+        crate::api::routes_audit::AuditJournalResponse,
+        crate::api::routes_audit::AuditJournalPageResponse,
+        crate::api::routes_trace::TraceResponse,
+        crate::api::routes_timeline::TimelineEvent,
+        crate::api::routes_timeline::TimelineResponse,
+        crate::api::routes_plan_cache::PlanCacheStatsResponse,
+        crate::api::routes_plan_cache::ClearCacheResponse,
+        crate::api::routes_approvals::PendingApprovalResponse,
+        crate::api::routes_approvals::ResolvedApprovalResponse,
+        crate::audit_journal::verify::VerifyChainReport,
+        crate::audit_journal::verify::BrokenLink,
+        crate::audit_journal::verify::BrokenLinkReason,
+        crate::audit_journal::verify::VerifyJournalReport,
+        crate::audit_journal::verify::JournalBreak,
+        crate::audit_journal::verify::JournalBreakReason,
+        crate::audit_journal::verify::JournalAnchor,
+        crate::api::routes_tools::ToolListResponse,
+        crate::api::routes_triggers::CreateTriggerRequest,
+        crate::api::routes_triggers::TriggerSourceInput,
+        crate::api::routes_triggers::UpdateTriggerRequest,
+        crate::api::routes_triggers::TriggerDefinitionResponse,
+        crate::api::routes_triggers::DeleteResponse,
+        crate::api::routes_triggers::ReloadResponse,
+        crate::api::routes_triggers::FireResponse,
+        crate::api::routes_triggers::OkResponse,
+        crate::api::routes_triggers::LogsResponse,
+        crate::api::routes_notifications::CreateChannelRequest,
+        crate::api::routes_notifications::UpdateChannelRequest,
+        crate::api::routes_notifications::SetEventsRequest,
+        crate::api::routes_notifications::ChannelResponse,
+        crate::api::routes_notifications::EventsResponse,
+        crate::api::routes_notifications::DeleteResponse,
+        crate::api::routes_stt::SttStatusResponse,
+        crate::api::routes_stt::TranscriptionsListResponse,
+        crate::api::routes_stt::ModelInfo,
+        crate::api::routes_stt::ModelsListResponse,
+        crate::api::routes_stt::SttReloadResponse,
+        crate::api::routes_llm::LlmStatusResponse,
+        crate::api::routes_llm::PingRequest,
+        crate::api::routes_llm::PingResponse,
+        crate::api::routes_llm::TokenUsageResponse,
+        crate::api::routes_llm::ChatRequest,
+        crate::api::routes_llm::ChatResponse,
+        crate::api::routes_llm::MessageDto,
+        crate::api::routes_llm::CompleteRequest,
+        crate::api::routes_llm::costs::CostSummaryRow,
+        crate::api::routes_llm::costs::CostsResponse,
+        crate::api::routes_llm::costs::DailyCostEntry,
+        crate::api::routes_llm::costs::DailyCostsResponse,
+        crate::api::routes_llm::backends::CreateLlmBackendRequest,
+        crate::api::routes_llm::backends::UpdateLlmBackendRequest,
+        crate::api::routes_llm::backends::LlmBackendResponse,
+        crate::api::routes_llm::backends::LlmBackendsListResponse,
+        crate::api::routes_llm::backends::DeleteBackendResponse,
+        crate::api::routes_llm::backends::SetDefaultResponse,
+        crate::api::routes_llm::backends::ReloadRouterResponse,
+        crate::api::routes_model_hub::HardwareResponse,
+        crate::api::routes_resilience::ResilienceStatusResponse,
+        crate::api::routes_resilience::ResetResponse,
+        crate::api::routes_mcp::TestLiveRequest,
+        crate::api::routes_mcp::SetApprovalBody,
+    ))
+)]
+pub struct ApiDoc;
+
+/// `GET /api/v1/openapi.json` - serve the generated OpenAPI document.
+///
+/// Non-generic so it merges cleanly into the backend-generic `build_router`.
+pub(crate) async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openapi_doc_serializes_and_covers_core_paths() {
+        // GIVEN the generated OpenAPI document
+        let doc = ApiDoc::openapi();
+
+        // WHEN serialized to JSON
+        let json = doc.to_json().expect("openapi document must serialize");
+
+        // THEN it declares the driving-contract core paths and its identity
+        for path in [
+            "/api/v1/health",
+            "/api/v1/tasks",
+            "/api/v1/tasks/{id}",
+            "/api/v1/tasks/{id}/resume",
+            "/api/v1/agents/{name}/messages",
+            "/api/v1/mailbox/stream",
+        ] {
+            assert!(json.contains(path), "spec is missing path {path}");
+        }
+        // The mailbox inject endpoint and its schemas are part of the contract.
+        assert!(
+            json.contains("InjectMessageBody"),
+            "spec is missing InjectMessageBody"
+        );
+        assert!(json.contains("Apollia OS Runtime API"));
+    }
+
+    #[test]
+    fn openapi_doc_declares_the_bearer_token_the_tcp_listener_enforces() {
+        // GIVEN the generated OpenAPI document, read as the JSON a client sees
+        let json = ApiDoc::openapi()
+            .to_json()
+            .expect("openapi document must serialize");
+        let doc: serde_json::Value =
+            serde_json::from_str(&json).expect("the serialized document must parse");
+
+        // WHEN its security surface is read
+        let scheme = &doc["components"]["securitySchemes"][BEARER_SCHEME];
+        let global = doc["security"]
+            .as_array()
+            .expect("the document must carry a global security requirement");
+        let mut opted_out: Vec<String> = doc["paths"]
+            .as_object()
+            .expect("the document must carry a path map")
+            .iter()
+            .flat_map(|(path, item)| {
+                item.as_object()
+                    .expect("a path item is a map of operations")
+                    .iter()
+                    .filter(|(_, op)| op.get("security").is_some())
+                    .map(move |(verb, _)| format!("{} {path}", verb.to_uppercase()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        opted_out.sort();
+
+        // THEN the scheme is HTTP bearer and every operation requires it
+        assert_eq!(scheme["type"], "http", "the scheme must be HTTP auth");
+        assert_eq!(scheme["scheme"], "bearer", "the scheme must be bearer");
+        assert_eq!(global.len(), 1, "one document-level requirement, no more");
+        assert!(
+            global[0].get(BEARER_SCHEME).is_some(),
+            "the document-level requirement must name the bearer scheme"
+        );
+
+        // THEN the HMAC-authenticated webhook route, and it alone, opts out
+        assert_eq!(opted_out, vec!["POST /webhooks/{id}".to_owned()]);
+    }
+
+    #[test]
+    fn openapi_doc_carries_the_runtime_version_not_a_pinned_one() {
+        // GIVEN the generated OpenAPI document
+        let doc = ApiDoc::openapi();
+
+        // WHEN its declared version is read
+        let version = doc.info.version.as_str();
+
+        // THEN it is the version of the crate that serves it
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert_ne!(version, "1.0.0", "the spec must not promise a 1.0 contract");
+    }
+}

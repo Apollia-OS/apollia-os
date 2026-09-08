@@ -1,0 +1,34 @@
+{
+  "logo.alt": {
+    "message": "Apollia OS",
+    "description": "The alt text of navbar logo"
+  },
+  "title": {
+    "message": "Apollia OS",
+    "description": "The title in the navbar"
+  },
+  "item.label.Docs": {
+    "message": "Documentation",
+    "description": "Navbar item with label Docs"
+  },
+  "item.label.Reference": {
+    "message": "Référence",
+    "description": "Navbar item with label Reference"
+  },
+  "item.label.GitHub": {
+    "message": "GitHub",
+    "description": "Navbar item with label GitHub"
+  },
+  "item.label.Help center": {
+    "message": "Guide utilisateur",
+    "description": "Navbar item with label Help center"
+  },
+  "item.label.Product": {
+    "message": "Le produit",
+    "description": "Navbar item with label Product"
+  },
+  "item.label.Download": {
+    "message": "Télécharger",
+    "description": "Navbar item with label Download"
+  }
+}

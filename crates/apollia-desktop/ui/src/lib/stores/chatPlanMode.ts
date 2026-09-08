@@ -1,0 +1,389 @@
+// Session-keyed conversational plan-mode store.
+//
+// Distinct from `planMode.ts`, which tracks the run-keyed ORIA approval gate
+// (category "plan-approval"). This store tracks the chat-native soft gate
+// (category "plan-mode" events), scoped to a single chat session.
+//
+// The runtime bridge re-emits every `RuntimeEvent` as a `runtime-event` Tauri
+// event with `{ category, event_type, payload }`, where `payload` is the
+// externally tagged enum (`{ PlanSubmitted: { session_id, plan } }`). This
+// store subscribes to that channel, ignores any event for another session, and
+// projects the gate events onto a small phase machine. Components read this
+// store and submit decisions through `$lib/ipc/planMode`; they never call
+// `invoke` directly.
+
+import { writable } from "svelte/store";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { PlanPhase } from "$lib/types";
+import type { StepOrigin } from "$lib/ipc/plan";
+import { getChatPlan } from "$lib/ipc/planMode";
+
+/** A single step of a session plan (the unified `apollia_core::plan::PlanStep`). */
+export interface SessionPlanStep {
+  step_id: string;
+  title: string;
+  description: string;
+  status: string;
+  depends_on: string[];
+  tool_hint: string | null;
+  model_hint: string | null;
+  rationale: string | null;
+  provenance: SessionStepProvenance;
+}
+
+/** Provenance of a plan step (origin + reason + timestamp). */
+export interface SessionStepProvenance {
+  /** Structured origin (`replan` keeps its revision number). */
+  origin: StepOrigin;
+  reason: string | null;
+  at: number;
+}
+
+/** A session plan (the unified `apollia_core::plan::Plan`). */
+export interface SessionPlan {
+  plan_id: string;
+  revision: number;
+  status: string;
+  steps: SessionPlanStep[];
+}
+
+/** Last mutation applied to the session plan (kind + concerned step). */
+export interface SessionPlanMutation {
+  kind: string;
+  step_id: string | null;
+  reason: string | null;
+}
+
+/** Lifecycle status of the session review card. */
+export type ChatPlanStatus =
+  | "idle"
+  | "pending_approval"
+  | "approved"
+  | "rejected"
+  | "error";
+
+/** Shared state of the conversational plan gate for the tracked session. */
+export interface ChatPlanState {
+  status: ChatPlanStatus;
+  /** Chat session currently tracked, `null` when no listener is active. */
+  sessionId: string | null;
+  /** Current plan-mode phase of the session. */
+  phase: PlanPhase;
+  /** Latest plan for the session (`null` until a plan is produced). */
+  plan: SessionPlan | null;
+  /** Last mutation carried by a `PlanUpdated` event (`null` until one lands). */
+  lastMutation: SessionPlanMutation | null;
+  errorMessage: string | null;
+}
+
+function initialState(): ChatPlanState {
+  return {
+    status: "idle",
+    sessionId: null,
+    phase: "done",
+    plan: null,
+    lastMutation: null,
+    errorMessage: null,
+  };
+}
+
+function toMutation(value: unknown): SessionPlanMutation | null {
+  if (!value || typeof value !== "object") return null;
+  const m = value as Record<string, unknown>;
+  if (typeof m.kind !== "string") return null;
+  return {
+    kind: m.kind,
+    step_id: asOptionalString(m.step_id),
+    reason: asOptionalString(m.reason),
+  };
+}
+
+export const chatPlanState = writable<ChatPlanState>(initialState());
+
+/** Shape of the bridge envelope (`TauriRuntimeEvent`). */
+interface TauriRuntimeEvent {
+  category: string;
+  event_type: string;
+  payload: Record<string, unknown>;
+}
+
+/** Extracts the inner object of an externally tagged enum variant. */
+function variantPayload(
+  payload: Record<string, unknown>,
+  variant: string,
+): Record<string, unknown> {
+  const inner = payload[variant];
+  if (inner && typeof inner === "object") {
+    return inner as Record<string, unknown>;
+  }
+  return payload;
+}
+
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asOptionalString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Narrows the wire `origin` (string for the unit variants, `{ replan: n }` for
+ * a replan) onto the typed {@link StepOrigin}. Unknown shapes fall back to
+ * `"initial"` so the chip is never blank.
+ */
+function toOrigin(value: unknown): StepOrigin {
+  if (value && typeof value === "object" && "replan" in value) {
+    const revision = (value as { replan: unknown }).replan;
+    return { replan: typeof revision === "number" ? revision : 0 };
+  }
+  if (
+    value === "initial" ||
+    value === "user_inject" ||
+    value === "agent_edit"
+  ) {
+    return value;
+  }
+  return "initial";
+}
+
+function toProvenance(value: unknown): SessionStepProvenance {
+  const p = (value && typeof value === "object" ? value : {}) as Record<
+    string,
+    unknown
+  >;
+  return {
+    origin: toOrigin(p.origin),
+    reason: asOptionalString(p.reason),
+    at: typeof p.at === "number" ? p.at : 0,
+  };
+}
+
+function toPlanStep(value: unknown): SessionPlanStep {
+  const s = (value && typeof value === "object" ? value : {}) as Record<
+    string,
+    unknown
+  >;
+  return {
+    step_id: asString(s.step_id),
+    title: asString(s.title),
+    description: asString(s.description),
+    status: asString(s.status, "pending"),
+    depends_on: Array.isArray(s.depends_on)
+      ? s.depends_on.map((d) => asString(d))
+      : [],
+    tool_hint: asOptionalString(s.tool_hint),
+    model_hint: asOptionalString(s.model_hint),
+    rationale: asOptionalString(s.rationale),
+    provenance: toProvenance(s.provenance),
+  };
+}
+
+function toSessionPlan(value: unknown): SessionPlan | null {
+  if (!value || typeof value !== "object") return null;
+  const p = value as Record<string, unknown>;
+  const rawSteps = Array.isArray(p.steps) ? p.steps : [];
+  return {
+    plan_id: asString(p.plan_id),
+    revision: typeof p.revision === "number" ? p.revision : 0,
+    status: asString(p.status, "draft"),
+    steps: rawSteps.map(toPlanStep),
+  };
+}
+
+const KNOWN_PHASES: readonly PlanPhase[] = [
+  "discovery",
+  "drafting",
+  "awaiting_approval",
+  "executing",
+  "done",
+];
+
+function toPhase(value: unknown, fallback: PlanPhase): PlanPhase {
+  return KNOWN_PHASES.includes(value as PlanPhase)
+    ? (value as PlanPhase)
+    : fallback;
+}
+
+/**
+ * Projects one bridge envelope onto the store for `activeSessionId`.
+ *
+ * Events for any other session are ignored. Exported for unit tests.
+ */
+export function dispatchChatPlan(
+  event: TauriRuntimeEvent,
+  activeSessionId: string,
+): void {
+  if (event.category !== "plan-mode") return;
+
+  const inner = variantPayload(event.payload, event.event_type);
+  if (asString(inner.session_id) !== activeSessionId) return;
+
+  switch (event.event_type) {
+    case "PlanUpdated": {
+      const plan = toSessionPlan(inner.plan);
+      const mutation = toMutation(inner.mutation);
+      chatPlanState.update((s) => ({
+        ...s,
+        sessionId: activeSessionId,
+        plan: plan ?? s.plan,
+        lastMutation: mutation ?? s.lastMutation,
+      }));
+      break;
+    }
+    case "PlanSubmitted": {
+      const plan = toSessionPlan(inner.plan);
+      chatPlanState.update((s) => ({
+        ...s,
+        status: "pending_approval",
+        sessionId: activeSessionId,
+        phase: "awaiting_approval",
+        plan: plan ?? s.plan,
+        errorMessage: null,
+      }));
+      break;
+    }
+    case "ChatPlanApproved":
+      chatPlanState.update((s) => ({
+        ...s,
+        status: "approved",
+        phase: "executing",
+      }));
+      break;
+    case "ChatPlanRejected":
+      chatPlanState.update((s) => ({ ...s, status: "rejected" }));
+      break;
+    case "ChatPlanPhaseChanged": {
+      const phase = toPhase(inner.phase, "done");
+      chatPlanState.update((s) => ({
+        ...s,
+        sessionId: activeSessionId,
+        phase,
+        // Keep the awaiting card up only while the phase says so.
+        status:
+          phase === "awaiting_approval"
+            ? "pending_approval"
+            : s.status === "pending_approval"
+              ? "idle"
+              : s.status,
+      }));
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+// One shared listener per active session, ref-counted across the components
+// that consume the store (the approval host and the plan DAG panel). Resetting
+// the store on every mount made the approval card vanish when a second consumer
+// (the plan tab) mounted; this binds the listener once and resets only on a
+// genuine session change.
+let activeListenerSession: string | null = null;
+let activeUnlisten: UnlistenFn | null = null;
+let listenerRefCount = 0;
+
+/**
+ * Subscribes to the runtime bridge for one chat session's plan-mode events.
+ *
+ * Idempotent and ref-counted: the first consumer for a session resets the store
+ * and binds the single shared listener (and hydrates from runtime state); later
+ * consumers for the same session just attach without resetting, so the approval
+ * card survives a second mount. Returns a release function; call it from the
+ * component `$effect` cleanup. The listener is torn down only when the last
+ * consumer of the current session releases.
+ */
+export async function startChatPlanListener(
+  activeSessionId: string,
+): Promise<() => void> {
+  if (activeListenerSession !== activeSessionId) {
+    activeUnlisten?.();
+    activeUnlisten = null;
+    activeListenerSession = activeSessionId;
+    listenerRefCount = 0;
+    chatPlanState.set({ ...initialState(), sessionId: activeSessionId });
+    activeUnlisten = await listen<TauriRuntimeEvent>(
+      "runtime-event",
+      (event) => dispatchChatPlan(event.payload, activeSessionId),
+    );
+    // Hydrate from authoritative runtime state so a plan produced before this
+    // listener mounted still renders. Fire-and-forget: live events refine it.
+    void hydrateChatPlan(activeSessionId);
+  }
+  listenerRefCount += 1;
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    // Only consumers of the session that is still active decrement it; a stale
+    // release from a previous session (after a switch) is a no-op, so it can
+    // never tear down the freshly bound listener.
+    if (activeListenerSession !== activeSessionId) return;
+    listenerRefCount -= 1;
+    if (listenerRefCount <= 0) {
+      activeUnlisten?.();
+      activeUnlisten = null;
+      activeListenerSession = null;
+    }
+  };
+}
+
+/**
+ * Loads the current plan snapshot and seeds the store for `activeSessionId`.
+ *
+ * Best-effort and idempotent: it never clobbers a live update that already
+ * landed, and ignores its result if the listener has since switched sessions.
+ */
+async function hydrateChatPlan(activeSessionId: string): Promise<void> {
+  let snapshot: { plan: unknown; phase: string };
+  try {
+    snapshot = await getChatPlan(activeSessionId);
+  } catch {
+    return;
+  }
+  const plan = toSessionPlan(snapshot.plan);
+  if (!plan || plan.steps.length === 0) return;
+  // The session phase is the authoritative gate state: an executed plan keeps
+  // its `awaiting_approval` status on the plan object, so the approval card is
+  // shown only when the *phase* still says awaiting, never from the plan status.
+  const phase = toPhase(snapshot.phase, "done");
+  const awaiting = phase === "awaiting_approval";
+  chatPlanState.update((s) => {
+    if (s.sessionId !== activeSessionId || s.plan) return s;
+    return {
+      ...s,
+      plan,
+      phase,
+      status: awaiting ? "pending_approval" : "idle",
+    };
+  });
+}
+
+/** Records a successful approval (optimistic, before the event confirms it). */
+export function setChatPlanApproved(): void {
+  chatPlanState.update((s) => ({
+    ...s,
+    status: "approved",
+    phase: "executing",
+  }));
+}
+
+/** Records a successful rejection (optimistic, before the event confirms it). */
+export function setChatPlanRejected(): void {
+  chatPlanState.update((s) => ({ ...s, status: "rejected" }));
+}
+
+/** Records a failed decision: the gate stays open, the error is surfaced. */
+export function setChatPlanError(message: string): void {
+  chatPlanState.update((s) => ({
+    ...s,
+    status: "error",
+    errorMessage: message,
+  }));
+}
+
+/** Resets the store to its idle state (test helper + session teardown). */
+export function resetChatPlan(): void {
+  chatPlanState.set(initialState());
+}

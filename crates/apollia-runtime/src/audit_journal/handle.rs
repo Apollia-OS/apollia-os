@@ -1,0 +1,294 @@
+//! Clonable async handle to the journal actor.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use apollia_auth::SecretStore;
+
+use crate::audit_journal::actor::{JournalActor, JournalMessage, MIGRATIONS, SCHEMA_VERSION};
+use crate::audit_journal::entry::{JournalEntry, JournalEntryDraft};
+use crate::audit_journal::error::AuditJournalError;
+use crate::audit_journal::signer::{
+    HmacSigner, JournalSigner, SignerError, SignerUnavailablePolicy,
+};
+use crate::audit_journal::verify::{JournalAnchor, VerifyChainReport, VerifyJournalReport};
+
+/// Capacity of the channel between the handle and the actor.
+const CHANNEL_CAPACITY: usize = 1024;
+
+/// Clonable handle to the append-only hash-chained audit journal.
+///
+/// Created via [`AuditJournalHandle::open`]. Several handles may coexist and
+/// append to the same actor; the actor serializes writes and owns the chain.
+#[derive(Clone)]
+pub struct AuditJournalHandle {
+    sender: tokio::sync::mpsc::Sender<JournalMessage>,
+}
+
+impl AuditJournalHandle {
+    /// Open the journal database without signing and start the actor.
+    ///
+    /// Creates the file if absent, enables WAL mode, and applies the schema and
+    /// migrations idempotently (`CREATE ... IF NOT EXISTS`, additive
+    /// `ALTER TABLE`), so reopening an existing store is a no-op on the schema.
+    pub async fn open(db_path: &Path) -> Result<Self, AuditJournalError> {
+        Self::spawn_actor(db_path, None, false).await
+    }
+
+    /// Open the journal with a signer loaded from `SecretStore`.
+    ///
+    /// Reads the HMAC key once under service `apollia-audit` and the given
+    /// `label` (scope local-only). When the key is absent, `policy` decides:
+    /// [`SignerUnavailablePolicy::WarnAndContinue`] opens an unsigned journal
+    /// that warns on each append, while [`SignerUnavailablePolicy::FailHard`]
+    /// returns [`AuditJournalError::SignerUnavailable`].
+    pub async fn open_with_signer(
+        db_path: &Path,
+        store: &dyn SecretStore,
+        label: &str,
+        policy: SignerUnavailablePolicy,
+    ) -> Result<Self, AuditJournalError> {
+        let (signer, warn_unsigned): (Option<Arc<dyn JournalSigner>>, bool) =
+            match HmacSigner::from_secret_store(store, label) {
+                Ok(s) => (Some(Arc::new(s)), false),
+                Err(e) => match policy {
+                    SignerUnavailablePolicy::WarnAndContinue => {
+                        tracing::warn!(error = %e, label = %label, "audit.journal.signer_degraded");
+                        (None, true)
+                    }
+                    SignerUnavailablePolicy::FailHard => {
+                        return Err(map_signer_error(e));
+                    }
+                },
+            };
+        Self::spawn_actor(db_path, signer, warn_unsigned).await
+    }
+
+    /// Open the journal signed with an HMAC signer built from raw `key` bytes.
+    ///
+    /// Used with a local key file (scope local-only) to avoid an OS keychain
+    /// prompt at boot: reading a keychain entry written by a different binary
+    /// signature (every dev rebuild) blocks on a `SecurityAgent` dialog.
+    pub async fn open_with_key_bytes(
+        db_path: &Path,
+        key: Vec<u8>,
+    ) -> Result<Self, AuditJournalError> {
+        let signer = HmacSigner::from_key_bytes(key).map_err(map_signer_error)?;
+        Self::spawn_actor(db_path, Some(Arc::new(signer)), false).await
+    }
+
+    /// Shared open path: connection, schema, migrations, and actor spawn.
+    async fn spawn_actor(
+        db_path: &Path,
+        signer: Option<Arc<dyn JournalSigner>>,
+        warn_unsigned: bool,
+    ) -> Result<Self, AuditJournalError> {
+        let db_path = db_path.to_path_buf();
+        let (sender, receiver) = tokio::sync::mpsc::channel::<JournalMessage>(CHANNEL_CAPACITY);
+        let (init_tx, init_rx) = tokio::sync::oneshot::channel::<Result<(), AuditJournalError>>();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = match rusqlite::Connection::open(&db_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = init_tx.send(Err(AuditJournalError::Open(e.to_string())));
+                    return;
+                }
+            };
+            if let Err(e) = conn.execute_batch("PRAGMA journal_mode=WAL;") {
+                let _ = init_tx.send(Err(AuditJournalError::SchemaInit(e.to_string())));
+                return;
+            }
+            if let Err(e) = apollia_core::schema::open_versioned(
+                &conn,
+                apollia_core::paths::DataFile::AuditJournal.file_name(),
+                SCHEMA_VERSION,
+                &MIGRATIONS,
+            ) {
+                let _ = init_tx.send(Err(AuditJournalError::SchemaInit(e.to_string())));
+                return;
+            }
+            let _ = init_tx.send(Ok(()));
+            JournalActor::new(conn, receiver, signer, warn_unsigned).run();
+        });
+
+        init_rx
+            .await
+            .map_err(|_| AuditJournalError::Open("init channel disconnected".to_string()))??;
+        Ok(Self { sender })
+    }
+
+    /// Append a drafted entry (fire-and-forget).
+    ///
+    /// Returns immediately. The actor assigns `seq`, links `prev_hash`, and
+    /// computes `hash`. On a saturated channel the draft is dropped with a warn.
+    pub fn append(&self, draft: JournalEntryDraft) {
+        match self
+            .sender
+            .try_send(JournalMessage::Append(Box::new(draft)))
+        {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("audit.journal.channel_full");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!("audit.journal.actor_disconnected");
+            }
+        }
+    }
+
+    /// Return all entries of a run, ordered by ascending `seq`.
+    pub async fn query_run(&self, run_id: &str) -> Vec<JournalEntry> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(JournalMessage::QueryRun {
+                run_id: run_id.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        reply_rx.await.unwrap_or_default()
+    }
+
+    /// Return one page of entries across every run, newest global position
+    /// first.
+    ///
+    /// This is the only read of the journal that does not require a run id
+    /// up front: `query_run` answers a run that the caller already knows.
+    pub async fn query_page(&self, limit: usize, offset: usize) -> Vec<JournalEntry> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(JournalMessage::QueryPage {
+                limit,
+                offset,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        reply_rx.await.unwrap_or_default()
+    }
+
+    /// Return the distinct run ids present in the journal.
+    ///
+    /// Used to resolve a short run-id prefix to a full id (and to detect an
+    /// ambiguous prefix) before a replay.
+    pub async fn run_ids(&self) -> Vec<String> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(JournalMessage::ListRunIds { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        reply_rx.await.unwrap_or_default()
+    }
+
+    /// Return the last hash of a run, if the run has any entry.
+    pub async fn last_hash(&self, run_id: &str) -> Option<String> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(JournalMessage::LastHash {
+                run_id: run_id.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        reply_rx.await.unwrap_or(None)
+    }
+
+    /// Verify the hash chain and signatures of a run.
+    ///
+    /// The actor recomputes every hash, checks the `prev_hash` linkage, and
+    /// verifies signatures with its own configured key, so the secret never
+    /// leaves the actor. Returns [`AuditJournalError::ActorUnavailable`] if the
+    /// actor is gone, and the underlying read error when the entries could not
+    /// be read at all. A report with `entries_checked == 0` means the run has
+    /// no entries (unknown run), which is why the read error may not collapse
+    /// into it.
+    pub async fn verify_chain(&self, run_id: &str) -> Result<VerifyChainReport, AuditJournalError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(JournalMessage::VerifyChain {
+                run_id: run_id.to_string(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| AuditJournalError::ActorUnavailable)?;
+        reply_rx
+            .await
+            .map_err(|_| AuditJournalError::ActorUnavailable)?
+    }
+
+    /// Verify the whole journal: the global chain, every per-run chain, and the
+    /// head anchor.
+    ///
+    /// Detects interior deletion and whole-run deletion (a `global_seq` gap or a
+    /// broken global link) and, against the persisted head anchor, truncation of
+    /// the global tail. Returns [`AuditJournalError::ActorUnavailable`] if the
+    /// actor is gone, and the underlying read error when the journal could not
+    /// be read: an empty journal is itself a valid `ok: true`, so a failed read
+    /// may not be reported as one.
+    pub async fn verify_journal(&self) -> Result<VerifyJournalReport, AuditJournalError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(JournalMessage::VerifyJournal { reply: reply_tx })
+            .await
+            .map_err(|_| AuditJournalError::ActorUnavailable)?;
+        reply_rx
+            .await
+            .map_err(|_| AuditJournalError::ActorUnavailable)?
+    }
+
+    /// Return the exportable head anchor of the global chain, if any entry has
+    /// been recorded.
+    ///
+    /// Storing this off-machine is the only defense against truncation of the
+    /// global tail once the signing key can be compromised.
+    pub async fn journal_anchor(&self) -> Result<Option<JournalAnchor>, AuditJournalError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(JournalMessage::Anchor { reply: reply_tx })
+            .await
+            .map_err(|_| AuditJournalError::ActorUnavailable)?;
+        reply_rx
+            .await
+            .map_err(|_| AuditJournalError::ActorUnavailable)
+    }
+
+    /// Send the shutdown signal and await the actor's drain acknowledgement.
+    ///
+    /// The actor processes its mailbox in FIFO order, so by the time it dequeues
+    /// `Shutdown` every append enqueued earlier is already committed. It then
+    /// acks and exits, which makes shutdown deterministic (no fixed-duration
+    /// sleep to "wait for propagation").
+    pub async fn shutdown(self) {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(JournalMessage::Shutdown { ack: ack_tx })
+            .await
+            .is_ok()
+        {
+            let _ = ack_rx.await;
+        }
+    }
+}
+
+/// Maps a signer build failure to the fail-hard journal error.
+fn map_signer_error(e: SignerError) -> AuditJournalError {
+    AuditJournalError::SignerUnavailable(e.to_string())
+}

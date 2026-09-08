@@ -1,0 +1,33 @@
+# apollia-runner
+
+Sidecar runner for Apollia OS local speech-to-text (STT) inference.
+
+Child process spawned by the `apollia-os` daemon at boot. Bundles `whisper-rs` compiled with a single GPU backend at a time (CUDA, ROCm, Vulkan, Metal, or CPU). Communicates with the daemon over HTTP/JSON on a loopback TCP port. Local LLM inference no longer runs here; it goes through the embedded `llama-server` (upstream llama.cpp), which the daemon supervises and speaks to over its OpenAI-compatible HTTP API.
+
+## Build
+
+The crate produces a different binary per Cargo feature:
+
+```sh
+cargo build --release -p apollia-runner --features local-cpu
+cargo build --release -p apollia-runner --features local-cuda
+cargo build --release -p apollia-runner --features local-rocm
+cargo build --release -p apollia-runner --features local-vulkan
+cargo build --release -p apollia-runner --features local-metal   # macOS only
+```
+
+The produced binary is named `apollia-runner` (no suffix). Final packaging (`release.yml`) renames it to `apollia-runner-{backend}` according to the feature.
+
+## Standalone test
+
+```sh
+cargo run --release -p apollia-runner --features local-cpu
+# stdout: "READY 38492\n"
+# stderr: JSON Lines logs
+
+curl http://127.0.0.1:38492/handshake | jq .
+```
+
+## References
+
+- Crate source: `crates/apollia-runner/src/`

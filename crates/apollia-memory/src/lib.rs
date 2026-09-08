@@ -1,0 +1,32 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+//! Apollia OS: Memory Engine.
+//!
+//! Sovereign, local-first memory persistence via SQLite + FTS5.
+//! One `.db` file per agent namespace: `~/.apollia/memory/<namespace>.db`
+//!
+//! Components:
+//! - `MemoryStore`: SQLite schema and versioned migrations.
+//! - `EpisodicMemory`: event record with TTL and importance scoring.
+//! - `SemanticMemory`: key/value with confidence and TTL.
+//! - `ProceduralMemory`: trigger-to-steps patterns with success tracking.
+//! - FTS5 full-text search with `unicode61` tokenizer for French.
+//! - `MemoryManager`: namespace isolation and cross-namespace access control.
+//!
+//! The `unicode61` tokenizer is mandatory so that accent-insensitive search
+//! works: "réunion" must match "reunion".
+
+pub mod episodic;
+pub mod export;
+pub mod file_timestamp_cache;
+pub mod injection_tracker;
+pub mod manager;
+pub mod plan_choice_store;
+pub mod procedural;
+pub mod profile_schema;
+pub mod search;
+pub mod semantic;
+pub mod store;
+pub mod user_memory;
+
+pub use file_timestamp_cache::{FileTimestampCache, FileTimestampCacheError, FileTimestampEntry};
+pub use manager::PurgeReport;

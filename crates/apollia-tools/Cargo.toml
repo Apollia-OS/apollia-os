@@ -1,0 +1,65 @@
+[package]
+name = "apollia-tools"
+version = "0.1.0-preview"
+edition.workspace = true
+rust-version.workspace = true
+description = "Apollia OS - Tool Registry, native tools (bash, python, file_io, http, mcp), and Linux namespace sandbox"
+license.workspace = true
+
+[dependencies]
+apollia-core        = { workspace = true }
+apollia-llm         = { workspace = true, features = ["cloud"] }
+apollia-permissions = { workspace = true }
+tokio        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+rusqlite     = { workspace = true }
+uuid         = { workspace = true }
+sha2         = { workspace = true }
+async-trait  = { workspace = true }
+futures      = { workspace = true }
+glob         = { workspace = true }
+regex        = { workspace = true }
+aes-gcm      = { workspace = true }
+rand         = { workspace = true }
+url          = { workspace = true }
+
+# Optional - feature-gated to keep the default build lean
+reqwest        = { workspace = true, optional = true }
+apollia-memory = { workspace = true, optional = true }
+scraper        = { workspace = true, optional = true }
+dom_smoothie   = { workspace = true, optional = true }
+
+# POSIX setrlimit for per-process resource limits on tool child processes.
+# The leanest path for the syscall (already transitive in the lock).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[features]
+default       = ["http", "web-search", "brave-search", "web-read"]
+http          = ["dep:reqwest", "apollia-core/net"]
+web-search    = ["http", "dep:scraper"]
+brave-search  = ["web-search"]
+web-read      = ["http", "dep:dom_smoothie", "dep:scraper"]
+memory-search = ["dep:apollia-memory"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true }
+
+[lints.rust]
+# Two documented sites: the libc rlimit calls in `tools/rlimits.rs`, plus
+# test-only `std::env::set_var` blocks. See the note in `src/lib.rs`.
+unsafe_code = "allow"
+# `fuzzing` is set by cargo-fuzz to gate the `#[cfg(fuzzing)]` harness shims.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(kani)'] }
+
+# Cargo does not merge this table with the workspace one: declaring [lints] at
+# all replaces the inheritance wholesale. Restating the workspace clippy lint is
+# therefore not redundant, it is the only way to keep it. Dropping these three
+# lines silently removes `unwrap()` enforcement from this crate, which is how it
+# was lost here in the first place.
+[lints.clippy]
+unwrap_used = "deny"

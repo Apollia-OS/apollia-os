@@ -1,0 +1,52 @@
+[package]
+name = "apollia-llm"
+version = "0.1.0-preview"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["cloud"]
+
+# Local inference backends (llama-cpp) live in the `apollia-runner` crate
+# (sidecar process). This crate only ships the cloud HTTP clients and the
+# shared types (CompletionModel, LlmRouter, etc.).
+
+# Cloud backends (HTTP API: Anthropic, OpenAI-compatible, Vertex)
+cloud            = ["dep:async-openai", "dep:reqwest"]
+
+[dependencies]
+apollia-core   = { workspace = true, features = ["net"] }
+tokio          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+futures        = { workspace = true }
+async-trait    = { workspace = true }
+rusqlite       = { workspace = true }
+uuid           = { workspace = true }
+# cloud backends [feature = "cloud"]
+async-openai   = { workspace = true, optional = true }
+reqwest        = { workspace = true, optional = true }
+tokio-util     = { workspace = true }
+chrono         = { workspace = true }
+# MetaLlmOrchestrator
+lru            = { workspace = true }
+sha2           = { workspace = true }
+# tool_performance_hints
+toml           = { workspace = true }
+# Hardware detection (RAM, CPU, GPU, always available)
+sysinfo        = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Junction proof: every interval unit parse_automation can emit must be
+# accepted by apollia_triggers::parse_interval (tests/interval_junction.rs).
+apollia-triggers = { workspace = true }
+# Already a dev-dependency of apollia-connectors, so this adds no package to
+# Cargo.lock. Used to prove the OpenAI-compatible client hits the URL it claims.
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

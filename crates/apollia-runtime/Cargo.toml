@@ -1,0 +1,85 @@
+[package]
+name = "apollia-runtime"
+version = "0.1.0-preview"
+edition.workspace = true
+rust-version.workspace = true
+description = "Apollia OS - Runtime Core (Supervisor, AgentRegistry, TaskRouter, EventBus, APIServer axum)"
+license.workspace = true
+
+[features]
+# Multi-runner: the local inference backends (llama-cpp, whisper) are hosted
+# by the `apollia-runner` crate, as a child process. The daemon exposes no
+# `local-*` feature: the local inference layer is no longer compiled here
+# directly.
+default = ["cloud", "web-search", "brave-search", "web-read"]
+## Turns on the cloud backends (Anthropic, OpenAI-compatible, and so on).
+cloud = ["apollia-llm/cloud"]
+## Native web search tool.
+web-search = ["apollia-tools/web-search"]
+## Brave Search backend for web_search - requires BRAVE_SEARCH_API_KEY at runtime.
+brave-search = ["web-search", "apollia-tools/brave-search"]
+## Native web_read tool (fetch + Readability extraction).
+web-read = ["apollia-tools/web-read"]
+
+[dependencies]
+apollia-core          = { workspace = true, features = ["net"] }
+apollia-prompts       = { workspace = true }
+apollia-llm           = { workspace = true, features = ["cloud"] }
+apollia-workspace     = { workspace = true }
+apollia-stt           = { workspace = true }
+apollia-memory        = { workspace = true }
+apollia-notifications = { workspace = true }
+apollia-oria          = { workspace = true }
+apollia-mcp           = { workspace = true }
+apollia-tools         = { workspace = true, features = ["http", "memory-search"] }
+apollia-permissions   = { workspace = true }
+apollia-triggers      = { workspace = true }
+apollia-auth          = { workspace = true }
+apollia-connectors    = { workspace = true }
+async-trait           = { workspace = true }
+futures            = { workspace = true }
+chrono             = { workspace = true }
+hmac               = { workspace = true }
+sha2               = { workspace = true }
+hex                = { workspace = true }
+constant_time_eq   = { workspace = true }
+rand               = { workspace = true }
+tokio              = { workspace = true }
+# CancellationToken for cooperative pause/resume of the chat ReAct loop.
+tokio-util         = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+axum               = { workspace = true }
+utoipa             = { workspace = true }
+tokio-stream       = { workspace = true }
+hyper-util         = { workspace = true }
+# Native TLS termination on the API TCP listener. Pinned to the ring
+# provider (already vendored via reqwest/hyper-rustls) with default features
+# off, so the aws-lc-rs default provider is not pulled and no new crate enters
+# the tree.
+tokio-rustls       = { workspace = true }
+tower              = { workspace = true }
+uuid               = { workspace = true }
+rusqlite           = { workspace = true }
+toml               = { workspace = true }
+hound              = { workspace = true }
+base64             = { workspace = true }
+# HTTP client for RunnerProxy.
+reqwest            = { workspace = true, features = ["json", "stream"] }
+# Temporary WAV for RunnerSttBackend (serialises the PCM buffers before
+# sending them to the runner through /stt/transcribe).
+tempfile           = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wmi = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tempfile = { workspace = true }
+http-body-util = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

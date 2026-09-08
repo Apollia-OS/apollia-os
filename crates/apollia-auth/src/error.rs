@@ -1,0 +1,58 @@
+//! Error types for `apollia-auth`.
+
+use thiserror::Error;
+
+/// Errors that can occur during the OAuth2 PKCE authentication flow.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum AuthError {
+    /// The `state` parameter in the callback does not match the expected value.
+    ///
+    /// This indicates a possible CSRF attack and the flow must be aborted.
+    #[error("state mismatch - possible CSRF")]
+    StateMismatch,
+
+    /// The callback URL did not contain an authorization code.
+    #[error("missing code in the callback")]
+    MissingCode,
+
+    /// The authorization server returned an error in the callback or token response.
+    #[error("provider error: {0}")]
+    ProviderError(String),
+
+    /// The token exchange endpoint returned an error or an unexpected response.
+    #[error("token exchange failed: {0}")]
+    TokenExchangeFailed(String),
+
+    /// An HTTP transport error occurred.
+    #[error("HTTP error: {0}")]
+    HttpError(String),
+
+    /// The local callback HTTP server encountered an error.
+    #[error("serveur callback: {0}")]
+    CallbackServer(String),
+
+    /// An OS keyring operation failed.
+    #[error("keyring: {0}")]
+    Keyring(String),
+
+    /// JSON serialization or deserialization failed.
+    #[error("serialisation: {0}")]
+    Serialization(String),
+
+    /// A remote response exceeded the byte cap before it could be read.
+    ///
+    /// OAuth authorization servers and MCP protected-resource metadata are
+    /// untrusted; this bounds memory when a peer returns an oversized body.
+    /// The value is the byte ceiling that was exceeded.
+    #[error("response exceeds the {0}-byte ceiling")]
+    ResponseTooLarge(u64),
+
+    /// A refresh was requested but no refresh token is stored.
+    #[error("no refresh token available")]
+    NoRefreshToken,
+
+    /// The requested provider name is not supported.
+    #[error("unknown provider: {0}")]
+    UnknownProvider(String),
+}

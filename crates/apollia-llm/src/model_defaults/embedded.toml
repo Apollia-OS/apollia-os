@@ -1,0 +1,119 @@
+# Sampling defaults for the popular model families.
+#
+# Sources: the official `generation_config.json` each publisher ships on the
+# HuggingFace Hub. The values are FACTS (the hyperparameters the publisher
+# recommends), not copyrightable under Feist (US) or directive 96/9/EC (EU).
+# No model is redistributed here; only the recommended parameters.
+#
+# Matching: `arch_pattern` is tested against `general.architecture` of the GGUF
+# (lower-case, exact OR a prefix ending in `*`). `name_pattern` is tested
+# against `general.name` or the GGUF filename (lower-case, substring).
+#
+# Precedence at resolution: entries higher in the list win. Keep the most
+# specific patterns at the top (Qwen3-Thinking before generic Qwen3, Llama-3.1
+# before generic Llama).
+#
+# Updating: when an entry changes or is added, cite the source in the commit
+# (the URL of the HF `generation_config.json`).
+
+# ── Qwen ────────────────────────────────────────────────────────
+[[entry]]
+name = "Qwen3 (thinking)"
+arch_pattern = "qwen3"
+name_pattern = "thinking"
+temperature = 0.6
+top_p = 0.95
+top_k = 20
+# Source: https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507/blob/main/generation_config.json
+
+[[entry]]
+name = "Qwen3 (instruct)"
+arch_pattern = "qwen3"
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+# Source: https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/generation_config.json
+
+[[entry]]
+name = "Qwen2.5"
+arch_pattern = "qwen2"
+temperature = 0.7
+top_p = 0.8
+top_k = 20
+repetition_penalty = 1.05
+# Source: https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/generation_config.json
+
+# ── Llama ───────────────────────────────────────────────────────
+[[entry]]
+name = "Llama 3.1+"
+arch_pattern = "llama"
+name_pattern = "llama-3"
+temperature = 0.6
+top_p = 0.9
+# Source: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/blob/main/generation_config.json
+
+[[entry]]
+name = "Llama 2"
+arch_pattern = "llama"
+name_pattern = "llama-2"
+temperature = 0.6
+top_p = 0.9
+# Meta defaults docs
+
+# ── Mistral / Mixtral ───────────────────────────────────────────
+[[entry]]
+name = "Mistral Instruct"
+arch_pattern = "llama"
+name_pattern = "mistral"
+temperature = 0.7
+top_p = 0.95
+# Source: https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3 model card
+
+[[entry]]
+name = "Mixtral"
+arch_pattern = "llama"
+name_pattern = "mixtral"
+temperature = 0.7
+top_p = 0.95
+
+# ── Phi ─────────────────────────────────────────────────────────
+[[entry]]
+name = "Phi-3"
+arch_pattern = "phi3"
+temperature = 0.5
+top_p = 0.95
+top_k = 40
+# Source: https://huggingface.co/microsoft/Phi-3-mini-4k-instruct model card
+
+# ── Gemma ───────────────────────────────────────────────────────
+[[entry]]
+name = "Gemma 2"
+arch_pattern = "gemma2"
+temperature = 0.95
+top_p = 0.95
+top_k = 64
+# Source: https://huggingface.co/google/gemma-2-9b-it/blob/main/generation_config.json
+
+[[entry]]
+name = "Gemma 3"
+arch_pattern = "gemma3"
+temperature = 1.0
+top_p = 0.95
+top_k = 64
+# Source: Google Gemma 3 Technical Report
+
+# ── DeepSeek ────────────────────────────────────────────────────
+[[entry]]
+name = "DeepSeek R1"
+arch_pattern = "deepseek2"
+name_pattern = "r1"
+temperature = 0.6
+top_p = 0.95
+# Source: https://huggingface.co/deepseek-ai/DeepSeek-R1 model card
+
+[[entry]]
+name = "DeepSeek V3"
+arch_pattern = "deepseek2"
+temperature = 0.7
+top_p = 0.95
+# Source: https://huggingface.co/deepseek-ai/DeepSeek-V3 model card

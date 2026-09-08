@@ -1,0 +1,953 @@
+//! EventBus subscriber that captures run-scoped events into the audit journal.
+//!
+//! Maps each significant, run-correlated `RuntimeEvent` to a [`JournalEntryDraft`]
+//! and appends it, so the hash chain covers the lifecycle of a run without a
+//! silent hole. The mapping is explicit (see [`map_event`]):
+//!
+//! | RuntimeEvent variant                       | JournalEntryKind        |
+//! |--------------------------------------------|-------------------------|
+//! | ToolCallStarted (run_id = Some)            | ToolCallStarted         |
+//! | ToolCallCompleted (run_id = Some)          | ToolCallCompleted       |
+//! | LlmCallStarted (run_id = Some)             | LlmCallStarted          |
+//! | LlmCallCompleted (run_id = Some)           | LlmCallCompleted        |
+//! | ChatResponseStarted / Completed (Some)     | Unknown { raw_kind }    |
+//! | PlanApprovalRequired/Approved/Rejected/... | Unknown { raw_kind }    |
+//! | any other run-scoped variant               | Unknown { raw_kind } + warn |
+//! | events without a run_id                     | not appended (debug)   |
+//!
+//! Entries with no `run_id` are skipped (system events such as `RuntimeStarted`
+//! are not part of any run). The subscriber owns no hashing logic: it only
+//! translates events and delegates chaining and signing to the actor.
+
+use std::collections::HashMap;
+
+use apollia_core::events::{resilient, ResilientReceiver, RuntimeEvent};
+
+use crate::audit_journal::entry::{
+    JournalEntryDraft, JournalEntryKind, MessageSnapshot, PlanMutationSnapshot,
+};
+use crate::audit_journal::handle::AuditJournalHandle;
+use crate::replay::{LlmCompletionSnapshot, ToolOutputSnapshot};
+
+/// Per-run step-ordinal counters for captured replay inputs.
+///
+/// Each captured input type owns a contiguous 0-based sequence within a run, so
+/// the replay cursors can validate the no-gap invariant. Counters are dropped
+/// when the run ends.
+#[derive(Debug, Default)]
+struct RunOrdinals {
+    /// Next ordinal for `LlmCompletion` captures.
+    llm: u32,
+    /// Next ordinal for `ToolOutput` captures.
+    tool: u32,
+    /// Next ordinal for `PlanMutation` captures.
+    plan: u32,
+}
+
+/// Background subscriber draining `RuntimeEvent`s into the audit journal.
+pub struct AuditJournalSubscriber {
+    handle: AuditJournalHandle,
+    receiver: ResilientReceiver,
+    /// Per-run capture ordinals, owned by this actor (no shared lock).
+    ordinals: HashMap<String, RunOrdinals>,
+    /// Resolution of a chat `session_id` to its currently open `run_id`.
+    ///
+    /// Populated from `ChatResponseStarted` (which carries both) and cleared when
+    /// the run ends, so a session-keyed `PlanUpdated` can be attributed to the
+    /// run in flight. Owned by this actor: no shared lock.
+    session_runs: HashMap<String, String>,
+}
+
+impl AuditJournalSubscriber {
+    /// Spawn the subscriber on the Tokio runtime.
+    ///
+    /// Runs until the EventBus broadcast channel is closed, then exits cleanly.
+    /// Lag is handled by [`ResilientReceiver`], under the rule of the EventBus
+    /// contract: a `WARN` naming this subscriber, a resubscribe, and reception
+    /// continues.
+    pub fn spawn(
+        handle: AuditJournalHandle,
+        receiver: tokio::sync::broadcast::Receiver<RuntimeEvent>,
+    ) {
+        let subscriber = Self {
+            handle,
+            receiver: resilient(receiver, "audit.journal"),
+            ordinals: HashMap::new(),
+            session_runs: HashMap::new(),
+        };
+        tokio::spawn(subscriber.run());
+    }
+
+    /// Main receive loop.
+    async fn run(mut self) {
+        while let Some(event) = self.receiver.recv().await {
+            // Learn the session -> run binding before any plan event of the
+            // turn can reference it.
+            self.register_session_run(&event);
+            // Capture events carry a per-run step ordinal (stateful);
+            // everything else maps statelessly.
+            if let Some(draft) = map_capture(&mut self.ordinals, &event) {
+                self.handle.append(draft);
+            } else if let Some(draft) = self.map_plan_updated(&event) {
+                self.handle.append(draft);
+            } else if let Some(draft) = map_event(&event) {
+                self.handle.append(draft);
+            }
+            // Free the per-run counters once the run finishes.
+            if let Some(run_id) = run_end_run_id(&event) {
+                self.ordinals.remove(run_id);
+                self.session_runs.retain(|_, rid| rid != run_id);
+            }
+        }
+    }
+
+    /// Records the `session_id -> run_id` binding carried by a chat-turn start so
+    /// later session-keyed events (such as `PlanUpdated`) resolve to the run.
+    fn register_session_run(&mut self, event: &RuntimeEvent) {
+        if let RuntimeEvent::ChatResponseStarted {
+            session_id,
+            run_id: Some(run_id),
+            ..
+        } = event
+        {
+            self.session_runs
+                .insert(session_id.clone(), run_id.as_str().to_string());
+        }
+    }
+
+    /// Maps a `RuntimeEvent::PlanUpdated` to a `PlanMutation` journal draft,
+    /// borrowing this actor's owned ordinal and session-run state.
+    fn map_plan_updated(&mut self, event: &RuntimeEvent) -> Option<JournalEntryDraft> {
+        map_plan_updated(&self.session_runs, &mut self.ordinals, event)
+    }
+}
+
+/// Maps a `RuntimeEvent::PlanUpdated` to a `PlanMutation` journal draft.
+///
+/// Resolves the session to its open run via `session_runs`, assigns the next
+/// per-run plan ordinal from `ordinals`, and serializes a
+/// [`PlanMutationSnapshot`] carrying the single-step delta and the full resulting
+/// plan. Returns `None` (and warns) when the session has no open run, so a
+/// `PlanUpdated` outside a captured turn is dropped cleanly without an orphan
+/// chain. Non-`PlanUpdated` events also return `None`, falling through to the
+/// stateless mappers.
+///
+/// Both maps are owned by the subscriber actor: no shared lock is taken.
+fn map_plan_updated(
+    session_runs: &HashMap<String, String>,
+    ordinals: &mut HashMap<String, RunOrdinals>,
+    event: &RuntimeEvent,
+) -> Option<JournalEntryDraft> {
+    let RuntimeEvent::PlanUpdated {
+        session_id,
+        plan,
+        mutation,
+    } = event
+    else {
+        return None;
+    };
+
+    let Some(run_id) = session_runs.get(session_id).cloned() else {
+        tracing::warn!(
+            session_id = %session_id,
+            dropped = true,
+            "audit.journal.plan_updated_no_run"
+        );
+        return None;
+    };
+
+    let counters = ordinals.entry(run_id.clone()).or_default();
+    let ordinal = counters.plan;
+    counters.plan = counters.plan.saturating_add(1);
+
+    let snapshot = PlanMutationSnapshot {
+        run_id: run_id.clone(),
+        session_id: session_id.clone(),
+        ordinal,
+        kind: mutation.kind.clone(),
+        step_id: mutation.step_id.clone(),
+        reason: mutation.reason.clone(),
+        before: mutation.before.clone(),
+        after: mutation.after.clone(),
+        revision: plan.revision,
+        plan: plan.as_ref().clone(),
+    };
+    let payload = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+    Some(draft(run_id, JournalEntryKind::PlanMutation, payload))
+}
+
+/// Returns the run id when an event marks the end of a run, so its capture
+/// counters can be freed.
+fn run_end_run_id(event: &RuntimeEvent) -> Option<&str> {
+    match event {
+        RuntimeEvent::ChatResponseCompleted {
+            run_id: Some(run_id),
+            ..
+        } => Some(run_id.as_str()),
+        _ => None,
+    }
+}
+
+/// Maps a capture `RuntimeEvent` to a journal draft, assigning the per-run step
+/// ordinal from `ordinals`. Returns `None` for non-capture events, which fall
+/// through to the stateless [`map_event`].
+///
+/// The step ordinal is contiguous and 0-based per run and per capture type, so
+/// the replay cursors can detect a missing entry as a gap.
+fn map_capture(
+    ordinals: &mut HashMap<String, RunOrdinals>,
+    event: &RuntimeEvent,
+) -> Option<JournalEntryDraft> {
+    match event {
+        RuntimeEvent::LlmResponseCaptured {
+            run_id,
+            backend,
+            model,
+            content,
+            tool_calls,
+            prompt_tokens,
+            completion_tokens,
+            cost_usd,
+            stream_truncated,
+        } => {
+            let counters = ordinals.entry(run_id.as_str().to_string()).or_default();
+            let step_ordinal = counters.llm;
+            counters.llm += 1;
+
+            let snapshot = LlmCompletionSnapshot {
+                run_id: run_id.clone(),
+                step_ordinal,
+                backend_name: backend.clone(),
+                model_id: model.clone(),
+                content: content.clone(),
+                tool_calls: tool_calls.clone(),
+                prompt_tokens: *prompt_tokens,
+                completion_tokens: *completion_tokens,
+                cost_usd: *cost_usd,
+                stream_truncated: *stream_truncated,
+            };
+            let payload = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+            Some(draft(
+                run_id.as_str().to_string(),
+                JournalEntryKind::LlmCompletion,
+                payload,
+            ))
+        }
+        RuntimeEvent::ToolOutputCaptured {
+            run_id,
+            tool_call_id,
+            tool_name,
+            output,
+            status,
+        } => {
+            let counters = ordinals.entry(run_id.as_str().to_string()).or_default();
+            let step_ordinal = counters.tool;
+            counters.tool += 1;
+
+            let snapshot = ToolOutputSnapshot {
+                run_id: run_id.clone(),
+                step_ordinal,
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                output: output.clone(),
+                status: status.clone(),
+            };
+            let payload = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+            Some(draft(
+                run_id.as_str().to_string(),
+                JournalEntryKind::ToolOutput,
+                payload,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Current RFC3339 UTC timestamp, seconds precision.
+fn now_ts() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Build a draft for a typed kind.
+fn draft(run_id: String, kind: JournalEntryKind, payload: serde_json::Value) -> JournalEntryDraft {
+    JournalEntryDraft {
+        run_id,
+        ts: now_ts(),
+        kind,
+        payload,
+    }
+}
+
+/// Maps a `RuntimeEvent` to a journal draft, or `None` when it is not
+/// run-scoped (no `run_id`) and therefore not part of any chain.
+///
+/// Typed kinds are produced for tool and LLM calls; chat-response and plan-gate
+/// events are captured under [`JournalEntryKind::Unknown`] so the decision and
+/// response lifecycle stays in the chain without a silent hole.
+pub fn map_event(event: &RuntimeEvent) -> Option<JournalEntryDraft> {
+    match event {
+        RuntimeEvent::ToolCallStarted {
+            run_id: Some(run_id),
+            tool_name,
+            agent_id,
+            task_id,
+            ..
+        } => Some(draft(
+            run_id.as_str().to_string(),
+            JournalEntryKind::ToolCallStarted,
+            serde_json::json!({
+                "tool_name": tool_name,
+                "agent_id": agent_id.as_str(),
+                "task_id": task_id.as_str(),
+            }),
+        )),
+        RuntimeEvent::ToolCallCompleted {
+            run_id: Some(run_id),
+            tool_name,
+            success,
+            duration_ms,
+            ..
+        } => Some(draft(
+            run_id.as_str().to_string(),
+            JournalEntryKind::ToolCallCompleted,
+            serde_json::json!({
+                "tool_name": tool_name,
+                "success": success,
+                "duration_ms": duration_ms,
+            }),
+        )),
+        RuntimeEvent::LlmCallStarted {
+            run_id: Some(run_id),
+            backend,
+            model,
+            messages_count,
+            ..
+        } => Some(draft(
+            run_id.as_str().to_string(),
+            JournalEntryKind::LlmCallStarted,
+            serde_json::json!({
+                "backend": backend,
+                "model": model,
+                "messages_count": messages_count,
+            }),
+        )),
+        RuntimeEvent::LlmCallCompleted {
+            run_id: Some(run_id),
+            backend,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            ..
+        } => Some(draft(
+            run_id.as_str().to_string(),
+            JournalEntryKind::LlmCallCompleted,
+            serde_json::json!({
+                "backend": backend,
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }),
+        )),
+        RuntimeEvent::ChatResponseStarted {
+            run_id: Some(run_id),
+            session_id,
+            message_id,
+        } => Some(unknown(
+            run_id.as_str(),
+            "ChatResponseStarted",
+            serde_json::json!({ "session_id": session_id, "message_id": message_id }),
+        )),
+        RuntimeEvent::ChatResponseCompleted {
+            run_id: Some(run_id),
+            session_id,
+            message_id,
+            ..
+        } => Some(unknown(
+            run_id.as_str(),
+            "ChatResponseCompleted",
+            serde_json::json!({ "session_id": session_id, "message_id": message_id }),
+        )),
+        RuntimeEvent::PlanApprovalRequired {
+            run_id, plan_id, ..
+        } => Some(unknown(
+            run_id,
+            "PlanApprovalRequired",
+            serde_json::json!({ "plan_id": plan_id }),
+        )),
+        RuntimeEvent::PlanApproved {
+            run_id, plan_id, ..
+        } => Some(unknown(
+            run_id,
+            "PlanApproved",
+            serde_json::json!({ "plan_id": plan_id }),
+        )),
+        RuntimeEvent::PlanRejected {
+            run_id, plan_id, ..
+        } => Some(unknown(
+            run_id,
+            "PlanRejected",
+            serde_json::json!({ "plan_id": plan_id }),
+        )),
+        RuntimeEvent::PlanAbandoned { run_id, reason, .. } => Some(unknown(
+            run_id,
+            "PlanAbandoned",
+            serde_json::json!({ "reason": reason }),
+        )),
+        // The orchestrated engine correlates via task_id (no chat run_id), so the
+        // verdict is chained under the task_id, matching the plan-gate events.
+        RuntimeEvent::VerificationCompleted {
+            task_id,
+            passed,
+            check_failures,
+            corrections,
+            skipped,
+            replans,
+        } => Some(unknown(
+            task_id.as_str(),
+            "VerificationCompleted",
+            serde_json::json!({
+                "passed": passed,
+                "check_failures": check_failures,
+                "corrections": corrections,
+                "skipped": skipped,
+                "replans": replans,
+            }),
+        )),
+        // Mailbox messaging: journaled only when a run_id is present (the
+        // sender's run, or a synthetic host-scoped run for a host injection).
+        // A TTL eviction carries no run_id and is intentionally not chained.
+        RuntimeEvent::AgentMessageSent {
+            from,
+            to,
+            message_id,
+            run_id: Some(run_id),
+            payload_hash,
+            full_payload,
+        } => {
+            let snapshot = MessageSnapshot {
+                message_id: message_id.clone(),
+                from: Some(from.clone()),
+                to: to.clone(),
+                payload_hash: Some(payload_hash.clone()),
+                reason: None,
+            };
+            let mut payload = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+            if let (Some(obj), Some(full)) = (payload.as_object_mut(), full_payload.as_ref()) {
+                obj.insert("payload".to_string(), full.clone());
+            }
+            Some(draft(
+                run_id.as_str().to_string(),
+                JournalEntryKind::MessageSent,
+                payload,
+            ))
+        }
+        RuntimeEvent::AgentMessageDelivered {
+            to,
+            message_id,
+            run_id: Some(run_id),
+        } => {
+            let snapshot = MessageSnapshot {
+                message_id: message_id.clone(),
+                from: None,
+                to: to.clone(),
+                payload_hash: None,
+                reason: None,
+            };
+            Some(draft(
+                run_id.as_str().to_string(),
+                JournalEntryKind::MessageDelivered,
+                serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null),
+            ))
+        }
+        RuntimeEvent::AgentMessageDropped {
+            to,
+            message_id,
+            reason,
+            run_id: Some(run_id),
+        } => {
+            let snapshot = MessageSnapshot {
+                message_id: message_id.clone(),
+                from: None,
+                to: to.clone(),
+                payload_hash: None,
+                reason: Some(reason.clone()),
+            };
+            Some(draft(
+                run_id.as_str().to_string(),
+                JournalEntryKind::MessageDropped,
+                serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Build an `Unknown`-kind draft for a run-scoped event with no typed mapping,
+/// keeping the raw variant name so coverage stays auditable.
+fn unknown(run_id: &str, raw_kind: &str, payload: serde_json::Value) -> JournalEntryDraft {
+    draft(
+        run_id.to_string(),
+        JournalEntryKind::Unknown {
+            raw_kind: raw_kind.to_string(),
+        },
+        payload,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apollia_core::events::RunId;
+
+    // A tool call carrying a run_id maps to a typed entry
+    #[test]
+    fn test_tool_call_started_maps_typed() {
+        // GIVEN a ToolCallStarted with a run_id
+        let run = RunId::new();
+        let event = RuntimeEvent::ToolCallStarted {
+            event_id: "e1".into(),
+            task_id: "t1".into(),
+            agent_id: "a1".into(),
+            tool_name: "web_search".into(),
+            args_json: None,
+            run_id: Some(run.clone()),
+        };
+        // WHEN mapped
+        let draft = map_event(&event).expect("should map");
+        // THEN it is a typed ToolCallStarted entry scoped to the run
+        assert_eq!(draft.run_id, run.as_str());
+        assert_eq!(draft.kind, JournalEntryKind::ToolCallStarted);
+    }
+
+    // A mailbox send with a run_id is journaled as a MessageSent entry.
+    #[test]
+    fn test_message_sent_with_run_id_maps_typed() {
+        // GIVEN an AgentMessageSent carrying the sender's run_id
+        let run = RunId::new();
+        let event = RuntimeEvent::AgentMessageSent {
+            from: "agent-a".into(),
+            to: "agent-b".into(),
+            message_id: "m-1".into(),
+            run_id: Some(run.clone()),
+            payload_hash: "deadbeef".into(),
+            full_payload: None,
+        };
+        // WHEN mapped
+        let draft = map_event(&event).expect("should map");
+        // THEN it is a typed MessageSent entry scoped to the run, hash only
+        assert_eq!(draft.run_id, run.as_str());
+        assert_eq!(draft.kind, JournalEntryKind::MessageSent);
+        assert_eq!(draft.payload["message_id"], serde_json::json!("m-1"));
+        assert_eq!(draft.payload["to"], serde_json::json!("agent-b"));
+        assert_eq!(draft.payload["payload_hash"], serde_json::json!("deadbeef"));
+        assert!(draft.payload.get("payload").is_none());
+    }
+
+    // A mailbox send with no run_id is not journaled (load-bearing skip).
+    #[test]
+    fn test_message_sent_without_run_id_skipped() {
+        // GIVEN an AgentMessageSent with no run_id
+        let event = RuntimeEvent::AgentMessageSent {
+            from: "agent-a".into(),
+            to: "agent-b".into(),
+            message_id: "m-2".into(),
+            run_id: None,
+            payload_hash: "cafe".into(),
+            full_payload: None,
+        };
+        // WHEN mapped, THEN it is skipped (no run chain to attach to)
+        assert!(map_event(&event).is_none());
+    }
+
+    // With full-payload auditing on, the content rides along in the entry.
+    #[test]
+    fn test_message_sent_full_payload_recorded() {
+        // GIVEN an AgentMessageSent carrying a full payload (regulated mode)
+        let run = RunId::new();
+        let event = RuntimeEvent::AgentMessageSent {
+            from: "agent-a".into(),
+            to: "agent-b".into(),
+            message_id: "m-3".into(),
+            run_id: Some(run),
+            payload_hash: "beef".into(),
+            full_payload: Some(serde_json::json!({"k": "v"})),
+        };
+        // WHEN mapped, THEN the entry carries the content under "payload"
+        let draft = map_event(&event).expect("should map");
+        assert_eq!(draft.payload["payload"], serde_json::json!({"k": "v"}));
+    }
+
+    // A verification verdict maps to a run-scoped journal entry under its task_id
+    #[test]
+    fn test_verification_completed_maps_under_task_id() {
+        // GIVEN a VerificationCompleted verdict on an orchestrated task
+        let event = RuntimeEvent::VerificationCompleted {
+            task_id: "t-verif".into(),
+            passed: false,
+            check_failures: 0,
+            corrections: 2,
+            skipped: false,
+            replans: 1,
+        };
+        // WHEN mapped
+        let draft = map_event(&event).expect("should map");
+        // THEN it is chained under the task_id and records the verdict payload
+        assert_eq!(draft.run_id, "t-verif");
+        assert_eq!(
+            draft.kind,
+            JournalEntryKind::Unknown {
+                raw_kind: "VerificationCompleted".to_string()
+            }
+        );
+        assert_eq!(draft.payload["passed"], serde_json::json!(false));
+        assert_eq!(draft.payload["corrections"], serde_json::json!(2));
+        assert_eq!(draft.payload["replans"], serde_json::json!(1));
+    }
+
+    // An LLM call without a run_id is not appended
+    #[test]
+    fn test_event_without_run_id_skipped() {
+        // GIVEN an LlmCallCompleted with no run_id
+        let event = RuntimeEvent::LlmCallCompleted {
+            backend: "b".into(),
+            model: "m".into(),
+            task_id: None,
+            step_id: None,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            latency_ms: 1,
+            cost_usd: None,
+            run_id: None,
+        };
+        // WHEN mapped
+        // THEN it is skipped (no chain pollution from non-run events)
+        assert!(map_event(&event).is_none());
+    }
+
+    // A run-scoped event with no typed kind falls back to Unknown
+    #[test]
+    fn test_run_scoped_unmapped_is_unknown() {
+        // GIVEN a ChatResponseCompleted carrying a run_id
+        let run = RunId::new();
+        let event = RuntimeEvent::ChatResponseCompleted {
+            session_id: "s1".into(),
+            message_id: "m1".into(),
+            content: "hi".into(),
+            run_id: Some(run.clone()),
+        };
+        // WHEN mapped
+        let draft = map_event(&event).expect("should map");
+        // THEN it is an Unknown entry keeping the raw variant name
+        assert_eq!(
+            draft.kind,
+            JournalEntryKind::Unknown {
+                raw_kind: "ChatResponseCompleted".to_string()
+            }
+        );
+        assert_eq!(draft.run_id, run.as_str());
+    }
+
+    // A non-run event is ignored
+    #[test]
+    fn test_non_run_event_ignored() {
+        // GIVEN an AgentStopped event (not run-scoped)
+        let event = RuntimeEvent::AgentStopped("agent-1".into());
+        // WHEN mapped
+        // THEN it produces no entry
+        assert!(map_event(&event).is_none());
+    }
+
+    fn captured(run: &RunId, content: &str, truncated: bool) -> RuntimeEvent {
+        RuntimeEvent::LlmResponseCaptured {
+            run_id: run.clone(),
+            backend: "local".into(),
+            model: "m".into(),
+            content: content.into(),
+            tool_calls: vec![],
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost_usd: None,
+            stream_truncated: truncated,
+        }
+    }
+
+    fn snapshot_of(draft: &JournalEntryDraft) -> LlmCompletionSnapshot {
+        serde_json::from_value(draft.payload.clone()).expect("snapshot payload")
+    }
+
+    // The ordinal increases within a run, contiguous from 0
+    #[test]
+    fn test_llm_capture_assigns_increasing_ordinal() {
+        // GIVEN a fresh ordinal map and a run with two captured responses
+        let mut ordinals = HashMap::new();
+        let run = RunId::new();
+
+        // WHEN both events are mapped in order
+        let first = map_capture(&mut ordinals, &captured(&run, "a", false)).expect("first");
+        let second = map_capture(&mut ordinals, &captured(&run, "b", false)).expect("second");
+
+        // THEN the kind is LlmCompletion and the ordinals are 0 then 1
+        assert_eq!(first.kind, JournalEntryKind::LlmCompletion);
+        assert_eq!(snapshot_of(&first).step_ordinal, 0);
+        assert_eq!(snapshot_of(&second).step_ordinal, 1);
+        assert!(!snapshot_of(&first).stream_truncated);
+    }
+
+    // Two runs keep independent ordinal sequences
+    #[test]
+    fn test_step_ordinal_independent_per_run() {
+        // GIVEN two distinct runs whose captures are interleaved
+        let mut ordinals = HashMap::new();
+        let a = RunId::new();
+        let b = RunId::new();
+
+        // WHEN events arrive a0, b0, a1, b1
+        let a0 = map_capture(&mut ordinals, &captured(&a, "a0", false)).expect("a0");
+        let b0 = map_capture(&mut ordinals, &captured(&b, "b0", false)).expect("b0");
+        let a1 = map_capture(&mut ordinals, &captured(&a, "a1", false)).expect("a1");
+        let b1 = map_capture(&mut ordinals, &captured(&b, "b1", false)).expect("b1");
+
+        // THEN each run owns its own 0,1 sequence without cross-contamination
+        assert_eq!(snapshot_of(&a0).step_ordinal, 0);
+        assert_eq!(snapshot_of(&a1).step_ordinal, 1);
+        assert_eq!(snapshot_of(&b0).step_ordinal, 0);
+        assert_eq!(snapshot_of(&b1).step_ordinal, 1);
+    }
+
+    // An interrupted stream is captured with the flag, not dropped
+    #[test]
+    fn test_truncated_stream_captured_with_flag() {
+        // GIVEN a captured response flagged as truncated with partial text
+        let mut ordinals = HashMap::new();
+        let run = RunId::new();
+
+        // WHEN it is mapped
+        let draft = map_capture(&mut ordinals, &captured(&run, "partial", true)).expect("draft");
+
+        // THEN the entry keeps the partial text and the truncation flag
+        let snap = snapshot_of(&draft);
+        assert!(snap.stream_truncated);
+        assert_eq!(snap.content, "partial");
+    }
+
+    // A non-capture event falls through (handled by map_event instead)
+    #[test]
+    fn test_map_capture_ignores_non_capture_event() {
+        // GIVEN an ordinal map and a non-capture event
+        let mut ordinals = HashMap::new();
+        let event = RuntimeEvent::AgentStopped("a".into());
+
+        // WHEN mapped through the capture path
+        // THEN nothing is produced (no ordinal consumed)
+        assert!(map_capture(&mut ordinals, &event).is_none());
+        assert!(ordinals.is_empty());
+    }
+
+    // A completed tool call maps to a ToolOutput entry
+    #[test]
+    fn test_tool_output_capture_maps_with_ordinal() {
+        // GIVEN a captured tool output for a run
+        let mut ordinals = HashMap::new();
+        let run = RunId::new();
+        let event = RuntimeEvent::ToolOutputCaptured {
+            run_id: run.clone(),
+            tool_call_id: "c1".into(),
+            tool_name: "bash_executor".into(),
+            output: serde_json::json!({ "stdout": "ok" }),
+            status: "success".into(),
+        };
+
+        // WHEN mapped
+        let draft = map_capture(&mut ordinals, &event).expect("draft");
+
+        // THEN it is a ToolOutput entry at ordinal 0 keeping the status
+        assert_eq!(draft.kind, JournalEntryKind::ToolOutput);
+        let snap: ToolOutputSnapshot =
+            serde_json::from_value(draft.payload.clone()).expect("snapshot");
+        assert_eq!(snap.step_ordinal, 0);
+        assert_eq!(snap.tool_call_id, "c1");
+        assert_eq!(snap.status, "success");
+    }
+
+    // The shared per-run ordinal sequences are independent per capture type
+    #[test]
+    fn test_ordinals_independent_per_capture_type() {
+        // GIVEN one run emitting an LLM, then a tool, then another LLM
+        let mut ordinals = HashMap::new();
+        let run = RunId::new();
+        // WHEN each capture is mapped to a journal entry
+        let llm0 = map_capture(&mut ordinals, &captured(&run, "a", false)).expect("llm0");
+        let tool0 = map_capture(
+            &mut ordinals,
+            &RuntimeEvent::ToolOutputCaptured {
+                run_id: run.clone(),
+                tool_call_id: "c1".into(),
+                tool_name: "bash".into(),
+                output: serde_json::json!("out"),
+                status: "success".into(),
+            },
+        )
+        .expect("tool0");
+        let llm1 = map_capture(&mut ordinals, &captured(&run, "b", false)).expect("llm1");
+
+        // THEN LLM and tool each own a 0-based sequence (llm: 0,1 ; tool: 0)
+        assert_eq!(snapshot_of(&llm0).step_ordinal, 0);
+        assert_eq!(snapshot_of(&llm1).step_ordinal, 1);
+        let tool_snap: ToolOutputSnapshot =
+            serde_json::from_value(tool0.payload.clone()).expect("tool snapshot");
+        assert_eq!(tool_snap.step_ordinal, 0);
+    }
+
+    use apollia_core::plan::{
+        Plan, PlanMutation, PlanMutationKind, PlanScope, PlanStatus, PlanStep,
+    };
+
+    use crate::audit_journal::entry::PlanMutationSnapshot;
+
+    fn plan_of(session: &str, revision: u32, steps: Vec<PlanStep>) -> Plan {
+        Plan {
+            plan_id: format!("plan-{session}"),
+            scope: PlanScope::Session(session.to_string()),
+            revision,
+            status: PlanStatus::Draft,
+            steps,
+        }
+    }
+
+    fn plan_updated(
+        session: &str,
+        kind: PlanMutationKind,
+        step_id: Option<&str>,
+        plan: Plan,
+    ) -> RuntimeEvent {
+        RuntimeEvent::PlanUpdated {
+            session_id: session.to_string(),
+            plan: Box::new(plan),
+            mutation: Box::new(PlanMutation {
+                kind,
+                step_id: step_id.map(str::to_string),
+                reason: Some("because".into()),
+                before: None,
+                after: None,
+                at: 0,
+            }),
+        }
+    }
+
+    fn plan_snapshot_of(draft: &JournalEntryDraft) -> PlanMutationSnapshot {
+        serde_json::from_value(draft.payload.clone()).expect("plan snapshot payload")
+    }
+
+    fn bind(session: &str, run: &RunId) -> (String, String) {
+        (session.to_string(), run.as_str().to_string())
+    }
+
+    // A PlanUpdated for an open run is appended with an increasing ordinal
+    #[test]
+    fn test_plan_mutation_appended_with_ordinal() {
+        // GIVEN a session bound to a run and two consecutive plan mutations
+        let run = RunId::new();
+        let session_runs: HashMap<String, String> = [bind("sess-1", &run)].into_iter().collect();
+        let mut ordinals = HashMap::new();
+        let propose = plan_updated(
+            "sess-1",
+            PlanMutationKind::Propose,
+            None,
+            plan_of("sess-1", 1, vec![PlanStep::new("s1", "first")]),
+        );
+        let add = plan_updated(
+            "sess-1",
+            PlanMutationKind::AddStep,
+            Some("s2"),
+            plan_of(
+                "sess-1",
+                2,
+                vec![PlanStep::new("s1", "first"), PlanStep::new("s2", "second")],
+            ),
+        );
+
+        // WHEN both events are mapped in order
+        let first = map_plan_updated(&session_runs, &mut ordinals, &propose).expect("first");
+        let second = map_plan_updated(&session_runs, &mut ordinals, &add).expect("second");
+
+        // THEN the kind is PlanMutation, the ordinals are 0 then 1, and the full
+        // plan is captured (revision 1 then 2)
+        assert_eq!(first.kind, JournalEntryKind::PlanMutation);
+        let s0 = plan_snapshot_of(&first);
+        let s1 = plan_snapshot_of(&second);
+        assert_eq!(s0.ordinal, 0);
+        assert_eq!(s1.ordinal, 1);
+        assert_eq!(s0.kind, PlanMutationKind::Propose);
+        assert_eq!(s0.revision, 1);
+        assert_eq!(s0.plan.steps.len(), 1);
+        assert_eq!(s1.revision, 2);
+        assert_eq!(s1.plan.steps.len(), 2);
+        assert_eq!(first.run_id, run.as_str());
+    }
+
+    // Two runs keep independent plan-ordinal sequences when interleaved
+    #[test]
+    fn test_plan_ordinal_independent_per_run() {
+        // GIVEN two sessions each bound to its own run
+        let run_a = RunId::new();
+        let run_b = RunId::new();
+        let session_runs: HashMap<String, String> =
+            [bind("a", &run_a), bind("b", &run_b)].into_iter().collect();
+        let mut ordinals = HashMap::new();
+        let ev = |s: &str| {
+            plan_updated(
+                s,
+                PlanMutationKind::AddStep,
+                Some("s1"),
+                plan_of(s, 1, vec![PlanStep::new("s1", "x")]),
+            )
+        };
+
+        // WHEN events arrive a, b, a, b
+        let a0 = map_plan_updated(&session_runs, &mut ordinals, &ev("a")).expect("a0");
+        let b0 = map_plan_updated(&session_runs, &mut ordinals, &ev("b")).expect("b0");
+        let a1 = map_plan_updated(&session_runs, &mut ordinals, &ev("a")).expect("a1");
+        let b1 = map_plan_updated(&session_runs, &mut ordinals, &ev("b")).expect("b1");
+
+        // THEN each run owns its own 0,1 sequence without cross-contamination
+        assert_eq!(plan_snapshot_of(&a0).ordinal, 0);
+        assert_eq!(plan_snapshot_of(&a1).ordinal, 1);
+        assert_eq!(plan_snapshot_of(&b0).ordinal, 0);
+        assert_eq!(plan_snapshot_of(&b1).ordinal, 1);
+    }
+
+    // A PlanUpdated for a session with no open run is dropped cleanly
+    #[test]
+    fn test_plan_updated_without_run_dropped_cleanly() {
+        // GIVEN no session-run binding for the event's session
+        let session_runs: HashMap<String, String> = HashMap::new();
+        let mut ordinals = HashMap::new();
+        let event = plan_updated(
+            "orphan",
+            PlanMutationKind::Propose,
+            None,
+            plan_of("orphan", 1, vec![]),
+        );
+
+        // WHEN the event is mapped
+        let result = map_plan_updated(&session_runs, &mut ordinals, &event);
+
+        // THEN no entry is produced and no ordinal counter is created (no panic)
+        assert!(result.is_none());
+        assert!(ordinals.is_empty());
+    }
+
+    // A non-PlanUpdated event falls through (handled by other mappers)
+    #[test]
+    fn test_map_plan_updated_ignores_other_events() {
+        // GIVEN a session-run binding and a non-plan event
+        let run = RunId::new();
+        let session_runs: HashMap<String, String> = [bind("s", &run)].into_iter().collect();
+        let mut ordinals = HashMap::new();
+        let event = RuntimeEvent::AgentStopped("a".into());
+
+        // WHEN mapped through the plan path
+        // THEN nothing is produced
+        assert!(map_plan_updated(&session_runs, &mut ordinals, &event).is_none());
+    }
+}

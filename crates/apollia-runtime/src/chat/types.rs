@@ -1,0 +1,941 @@
+//! Chat domain types.
+//!
+//! Defines sessions, messages, roles, tool approval mechanics,
+//! and the `ChatError` hierarchy used throughout the chat subsystem.
+
+use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
+
+use apollia_core::RunId;
+
+mod approvals;
+
+pub use approvals::{
+    AlwaysAcceptScope, ApprovalTimeoutParams, FsHitlDecision, PendingChatApprovals,
+    PendingFilesystemApprovals,
+};
+
+/// Alias for a chat session identifier (UUID v4 string).
+pub type SessionId = String;
+
+/// Alias for a chat message identifier (UUID v4 string).
+pub type MessageId = String;
+
+/// A chat session, either free-form (Libre) or agent-backed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSession {
+    /// Unique identifier (UUID v4).
+    pub id: SessionId,
+    /// Mode of the session (Libre or Agent).
+    pub mode: ChatMode,
+    /// Agent name, present only in Agent mode.
+    pub agent_name: Option<String>,
+    /// System prompt used to prime the LLM.
+    pub system_prompt: String,
+    /// Current lifecycle status.
+    pub status: SessionStatus,
+    /// In-memory message history (populated on demand).
+    pub history: Vec<ChatMessage>,
+    /// Tools the user has permanently authorized for this session.
+    pub authorized_tools: std::collections::HashSet<String>,
+    /// Tools available in this session (from agent manifest or config).
+    pub available_tools: Vec<String>,
+    /// ISO-8601 creation timestamp.
+    pub created_at: String,
+    /// Active exchange state (set while an LLM response is being generated).
+    pub active_exchange: Option<ExchangeState>,
+    /// Preferred LLM backend name (None = runtime default).
+    pub llm_backend: Option<String>,
+    /// User-defined display title (falls back to agent_name or mode).
+    pub title: Option<String>,
+    /// Parent session identifier when this session is a fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<SessionId>,
+    /// Fork depth (0 = root session, 1 = first-level fork, etc.).
+    #[serde(default)]
+    pub fork_depth: i64,
+    /// Project this session belongs to (None = standalone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// Force project context injection on the next user message.
+    ///
+    /// Set when a project link is changed after the session has started; the
+    /// initial-injection path (gated on `is_first_message`) would otherwise
+    /// skip context for already-active sessions. Transient, not persisted.
+    #[serde(skip)]
+    pub force_project_context_inject: bool,
+    /// In-memory filesystem allow rules for this session (not persisted).
+    ///
+    /// Set by the user via "Always allow (this session)" in `HitlFilesystemModal`.
+    /// Format: `"op:level"` e.g., `"write:medium"`.
+    /// Cleared when the session ends (intentional, session-scoped only).
+    #[serde(skip)]
+    pub fs_allow_rules: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Whether this session runs in first-class plan mode.
+    ///
+    /// When `true`, the `plan_*` tool surface is advertised and the plan-mode
+    /// system-prompt block is injected. Persisted across restarts.
+    #[serde(default)]
+    pub plan_mode: bool,
+    /// Current plan-mode lifecycle phase.
+    ///
+    /// Defaults to [`PlanPhase::Done`] for sessions that never enabled plan mode.
+    /// Persisted across restarts.
+    #[serde(default)]
+    pub plan_phase: PlanPhase,
+}
+
+/// Lifecycle phase of a session running in plan mode.
+///
+/// Drives the conversational gate: discovery via `ask_user`, drafting the plan,
+/// awaiting a soft approval, executing, then done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanPhase {
+    /// Asking the user for missing or ambiguous inputs.
+    Discovery,
+    /// Building the plan steps with rationale.
+    Drafting,
+    /// Plan submitted, waiting for approve, reject, or conversational revision.
+    AwaitingApproval,
+    /// Plan approved, agent is executing the steps.
+    Executing,
+    /// Plan finished or plan mode disabled.
+    #[default]
+    Done,
+}
+
+impl PlanPhase {
+    /// Returns the stable SQL representation for persistence.
+    pub fn as_sql(&self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Drafting => "drafting",
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Executing => "executing",
+            Self::Done => "done",
+        }
+    }
+
+    /// Parses a SQL representation, returning `None` for unknown values.
+    pub fn from_sql(s: &str) -> Option<Self> {
+        match s {
+            "discovery" => Some(Self::Discovery),
+            "drafting" => Some(Self::Drafting),
+            "awaiting_approval" => Some(Self::AwaitingApproval),
+            "executing" => Some(Self::Executing),
+            "done" => Some(Self::Done),
+            _ => None,
+        }
+    }
+}
+
+/// Cooperative pause state for a chat session running a ReAct turn.
+///
+/// `Running` is the steady state. `Pausing` is the transient window between a
+/// pause request and the loop reaching its next checkpoint. `Paused` means the
+/// loop has exited cleanly with partial step statuses already persisted by the
+/// `PlanActor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PauseState {
+    /// The turn runs normally, no pause requested.
+    #[default]
+    Running,
+    /// A pause was requested; the loop has not yet reached a checkpoint.
+    Pausing,
+    /// The loop stopped cleanly at a checkpoint; partial progress is persisted.
+    Paused,
+}
+
+/// Terminal disposition of a single ReAct turn, distinguishing a normal
+/// convergence from a cooperative pause so the manager can persist the right
+/// session state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// The loop converged or stopped on its own terms.
+    Completed,
+    /// The loop stopped at a checkpoint because its token was cancelled.
+    Paused,
+}
+
+/// A natural-language instruction injected by the operator while a session is
+/// paused.
+///
+/// It is consumed as a user message on the resume turn, prompting the agent to
+/// adjust its plan via the `plan_*` tools. Any plan step the agent creates or
+/// modifies in response is stamped with [`apollia_core::plan::StepOrigin::UserInject`]
+/// provenance carrying `text` as the reason, so the provenance is deterministic
+/// and never depends on the model emitting the right origin enum.
+#[derive(Debug, Clone)]
+pub struct InjectedInstruction {
+    /// Target session identifier.
+    pub session_id: String,
+    /// Raw operator text, e.g. "before step X, do Y".
+    pub text: String,
+}
+
+impl InjectedInstruction {
+    /// Builds the provenance stamped on steps created from this injection:
+    /// origin [`apollia_core::plan::StepOrigin::UserInject`] with the operator
+    /// text as the reason and the current unix timestamp (seconds).
+    pub fn provenance(&self) -> apollia_core::plan::StepProvenance {
+        apollia_core::plan::StepProvenance {
+            origin: apollia_core::plan::StepOrigin::UserInject,
+            reason: Some(self.text.clone()),
+            at: now_unix_secs(),
+        }
+    }
+}
+
+/// Returns the current unix timestamp in seconds, or `0` if the system clock is
+/// before the epoch (which never happens on a sane host).
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Chat mode, free-form LLM conversation or agent-backed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChatMode {
+    /// Free-form conversation with an LLM (no agent tools).
+    Libre,
+    /// Agent-backed session with tool access.
+    Agent,
+    /// Contextual platform assistant embedded in the UI.
+    ///
+    /// Like `Libre` but intentionally isolated from user memory and cross-session
+    /// history, the companion helps navigate the platform, not the user's personal
+    /// projects. Memory is never injected automatically (Principle #6).
+    Companion,
+}
+
+impl ChatMode {
+    /// Return the SQL-storable string representation.
+    pub fn as_sql(&self) -> &str {
+        match self {
+            Self::Libre => "libre",
+            Self::Agent => "agent",
+            Self::Companion => "companion",
+        }
+    }
+
+    /// Parse from SQL string representation.
+    ///
+    /// Returns `None` for unrecognized values.
+    pub fn from_sql(s: &str) -> Option<Self> {
+        match s {
+            "libre" => Some(Self::Libre),
+            "agent" => Some(Self::Agent),
+            "companion" => Some(Self::Companion),
+            _ => None,
+        }
+    }
+}
+
+/// Lifecycle status of a chat session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionStatus {
+    /// Session is open and accepting messages.
+    Active,
+    /// An LLM response is being generated.
+    Processing,
+    /// Session has been closed, no more messages accepted.
+    Closed,
+}
+
+impl SessionStatus {
+    /// Return the SQL-storable string representation.
+    pub fn as_sql(&self) -> &str {
+        match self {
+            Self::Active => "active",
+            Self::Processing => "processing",
+            Self::Closed => "closed",
+        }
+    }
+
+    /// Parse from SQL string representation.
+    ///
+    /// Returns `None` for unrecognized values.
+    pub fn from_sql(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(Self::Active),
+            "processing" => Some(Self::Processing),
+            "closed" => Some(Self::Closed),
+            _ => None,
+        }
+    }
+}
+
+/// Tracks the in-progress exchange (message being generated).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExchangeState {
+    /// ID of the response message being generated.
+    pub message_id: MessageId,
+    /// ISO-8601 timestamp when the exchange started.
+    pub started_at: String,
+    /// Stable run identifier for this exchange (one user turn, one response).
+    ///
+    /// Generated once when the exchange starts and propagated to the
+    /// `RuntimeEvent` variants emitted during the run. Distinct from
+    /// [`SessionId`] (conversation lifetime) and [`MessageId`] (single message).
+    #[serde(default)]
+    pub run_id: RunId,
+}
+
+/// A single message in a chat session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    /// Unique identifier (UUID v4).
+    pub id: MessageId,
+    /// Role of the message sender.
+    pub role: ChatRole,
+    /// Text content of the message.
+    pub content: String,
+    /// Tool calls attached to this message (assistant role only).
+    pub tool_calls: Option<Vec<ToolCallRecord>>,
+    /// Name of the tool that produced this message (tool role only).
+    pub tool_name: Option<String>,
+    /// ISO-8601 creation timestamp.
+    pub created_at: String,
+    /// Sequence number within the session (1-based, ascending).
+    pub seq: u32,
+    /// Optional key-value metadata attached by the runtime (e.g. cross-session markers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Role of a chat message sender.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChatRole {
+    /// Message from the human user.
+    User,
+    /// Message from the LLM assistant.
+    Assistant,
+    /// System prompt message.
+    System,
+    /// Tool execution result.
+    Tool,
+}
+
+impl ChatRole {
+    /// Return the SQL-storable string representation.
+    pub fn as_sql(&self) -> &str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Tool => "tool",
+        }
+    }
+
+    /// Parse from SQL string representation.
+    ///
+    /// Returns `None` for unrecognized values.
+    pub fn from_sql(s: &str) -> Option<Self> {
+        match s {
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "system" => Some(Self::System),
+            "tool" => Some(Self::Tool),
+            _ => None,
+        }
+    }
+}
+
+/// Record of a single tool call within an assistant message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    /// Name of the invoked tool.
+    pub tool_name: String,
+    /// JSON input arguments.
+    pub input: serde_json::Value,
+    /// Output produced by the tool (after execution).
+    pub output: Option<String>,
+    /// Current status of the tool call.
+    pub status: ToolCallStatus,
+    /// Meta-LLM narration of the call. Persisted so the UI
+    /// can re-render rationale when reopening a past session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<apollia_core::ToolCallRationale>,
+    /// Retry chain captured for this invocation.
+    /// Empty on first-try success; each element represents one attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry_attempts: Vec<apollia_core::RetryAttempt>,
+}
+
+/// Lifecycle status of a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolCallStatus {
+    /// Waiting for authorization.
+    #[serde(alias = "Pending")]
+    Pending,
+    /// Authorized by the user, ready to execute.
+    #[serde(alias = "Authorized")]
+    Authorized,
+    /// Executed, output available.
+    #[serde(alias = "Executed")]
+    Executed,
+    /// Refused by the user.
+    #[serde(alias = "Refused")]
+    Refused,
+    /// Ran and failed: the executor errored, or the tool reported a non-zero
+    /// exit code. Distinct from [`Refused`][Self::Refused], which is a human
+    /// decision taken before anything ran.
+    ///
+    /// Without this variant the failure was only carried by the transient
+    /// `ChatToolCallCompleted` event and the persisted record claimed success,
+    /// so a failed call was re-rendered with a success marker as soon as the
+    /// turn finalized.
+    #[serde(alias = "Failed")]
+    Failed,
+}
+
+impl ToolCallStatus {
+    /// Status for a call that ran, from whether it succeeded.
+    ///
+    /// The single place the verdict becomes a persisted value. Each site used
+    /// to write `Executed` unconditionally while holding a correct boolean two
+    /// lines above, so a failure survived only on the event bus and the
+    /// re-rendered history claimed success.
+    pub fn from_success(success: bool) -> Self {
+        if success {
+            Self::Executed
+        } else {
+            Self::Failed
+        }
+    }
+}
+
+/// User decision on a tool approval request.
+///
+/// The enum mirrors the three buttons surfaced by `ApprovalCardV2`
+/// (approve / reject / always-accept). `Refuse` optionally carries a free-form
+/// reason forwarded to the agent so it can adapt its plan, and `AlwaysAccept`
+/// carries the sticky scope picked by the operator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolDecision {
+    /// Approve this single invocation.
+    Accept,
+    /// Refuse this single invocation. `reason` is `None` when the operator
+    /// declines without providing a justification (or when the manifest does
+    /// not flag `reject_reason_required`).
+    Refuse {
+        /// Free-form reason shared with the agent.
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// Approve this invocation **and** install an "always accept" rule whose
+    /// stickiness is controlled by `scope` (cf. [`AlwaysAcceptScope`]).
+    AlwaysAccept {
+        /// Scope picked by the operator. Defaults to
+        /// [`AlwaysAcceptScope::ThisSession`] for safety.
+        #[serde(default = "AlwaysAcceptScope::safe_default")]
+        scope: AlwaysAcceptScope,
+    },
+}
+
+impl ToolDecision {
+    /// Convenience: "plain refuse" without a reason (legacy call-sites).
+    #[must_use]
+    pub fn refuse() -> Self {
+        Self::Refuse { reason: None }
+    }
+
+    /// Convenience: "always accept" with the safe default scope.
+    #[must_use]
+    pub fn always_accept_default() -> Self {
+        Self::AlwaysAccept {
+            scope: AlwaysAcceptScope::safe_default(),
+        }
+    }
+
+    /// Returns `true` if this decision is an `AlwaysAccept` of any scope.
+    #[must_use]
+    pub fn is_always_accept(&self) -> bool {
+        matches!(self, Self::AlwaysAccept { .. })
+    }
+
+    /// Serde-friendly identifier used for log rows / event payloads.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Refuse { .. } => "refuse",
+            Self::AlwaysAccept { .. } => "always_accept",
+        }
+    }
+}
+
+/// Per-tool aggregated statistics within a session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolStatEntry {
+    /// Tool name (scoped, e.g. `"bash"` or `"native:read_file"`).
+    pub tool_name: String,
+    /// Number of invocations (any status).
+    pub calls: u32,
+    /// Number of invocations that ended with `Refused` status.
+    pub refused: u32,
+    /// Number of invocations that ended with `Executed` status.
+    pub executed: u32,
+}
+
+/// Aggregated metrics for a chat session.
+///
+/// Accumulated by the [`ChatSessionManager`] on each `ExchangeComplete`.
+/// Backend-local: never persisted in SQLite, rebuilt from memory on restart
+/// (minimal slice; persistence is a future concern).
+///
+/// `cost_usd` is `None` when the backend does not report pricing (e.g. local
+/// runner sidecar via `RunnerLlmBackend`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionMetrics {
+    /// Target session.
+    pub session_id: SessionId,
+    /// Input tokens consumed (prompt + cache reads + cache writes).
+    pub prompt_tokens: u32,
+    /// Output tokens generated.
+    pub completion_tokens: u32,
+    /// Cached input tokens read (subset of `prompt_tokens`).
+    pub cache_read_input_tokens: u32,
+    /// Cached input tokens written (subset of `prompt_tokens`).
+    pub cache_write_input_tokens: u32,
+    /// Estimated cost in USD (`None` for local backends).
+    pub cost_usd: Option<f64>,
+    /// Step budget in effect for this session (max steps).
+    pub budget_max_steps: u32,
+    /// Steps consumed so far (exchanges producing assistant responses).
+    pub steps_used: u32,
+    /// Real context window of the active model, in tokens (`0` when unknown).
+    pub context_window_tokens: u32,
+    /// Current context occupancy in tokens (prompt size of the last LLM call).
+    pub context_tokens_used: u32,
+    /// Aggregated per-tool statistics.
+    pub tool_stats: Vec<ToolStatEntry>,
+    /// Number of exchanges completed.
+    pub exchanges_count: u32,
+    /// RFC-3339 timestamp of the first assistant response (session start, LLM time).
+    pub started_at: Option<String>,
+    /// RFC-3339 timestamp of the last update.
+    pub updated_at: Option<String>,
+    /// Cumulative active duration in milliseconds (LLM + tool execution time estimates).
+    #[serde(default)]
+    pub active_duration_ms: u64,
+    /// Backend/model name associated with the session (for pricing resolution).
+    pub llm_backend: Option<String>,
+}
+
+impl SessionMetrics {
+    /// Create an empty metrics record for a session.
+    pub fn new(session_id: impl Into<SessionId>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Increment per-tool counters from a list of tool call records.
+    pub fn record_tool_calls(&mut self, calls: &[ToolCallRecord]) {
+        for call in calls {
+            let entry = self
+                .tool_stats
+                .iter_mut()
+                .find(|e| e.tool_name == call.tool_name);
+            match entry {
+                Some(e) => {
+                    e.calls += 1;
+                    match call.status {
+                        ToolCallStatus::Executed => e.executed += 1,
+                        ToolCallStatus::Refused => e.refused += 1,
+                        _ => {}
+                    }
+                }
+                None => {
+                    let mut e = ToolStatEntry {
+                        tool_name: call.tool_name.clone(),
+                        calls: 1,
+                        refused: 0,
+                        executed: 0,
+                    };
+                    match call.status {
+                        ToolCallStatus::Executed => e.executed = 1,
+                        ToolCallStatus::Refused => e.refused = 1,
+                        _ => {}
+                    }
+                    self.tool_stats.push(e);
+                }
+            }
+        }
+    }
+}
+
+/// Errors that can occur in the chat subsystem.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ChatError {
+    /// The requested session does not exist.
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
+    /// The session has already been closed.
+    #[error("session closed: {0}")]
+    SessionClosed(String),
+    /// The session is busy (an exchange is already in progress).
+    #[error("session busy (exchange in progress): {0}")]
+    SessionBusy(String),
+    /// The referenced agent does not exist in the registry.
+    #[error("agent not found: {0}")]
+    AgentNotFound(String),
+    /// The agent failed to load (Python import error, manifest error, etc.).
+    #[error("agent load failed: {0}")]
+    AgentLoadFailed(String),
+    /// No LLM backend is configured in the runtime.
+    #[error("no LLM configured")]
+    NoLlmConfigured,
+    /// The step budget for this session/agent has been exhausted.
+    #[error("step budget exhausted")]
+    BudgetExhausted,
+    /// An internal error occurred (SQLite, serialization, etc.).
+    #[error("internal error: {0}")]
+    InternalError(String),
+    /// The project referenced by the chat session was not found in the repository.
+    #[error("project '{0}' referenced by chat session not found")]
+    ProjectNotFound(String),
+    /// An approve or reject was requested on a session that is not awaiting
+    /// approval. The soft plan gate only resolves from the awaiting-approval
+    /// phase, so this fails fast instead of starting execution out of order.
+    #[error("session {session_id} is not awaiting approval (current phase: {current_phase})")]
+    NotAwaitingApproval {
+        /// Session that received the approve/reject request.
+        session_id: String,
+        /// The phase the session was actually in, as a stable lowercase string.
+        current_phase: String,
+    },
+    /// The hybrid routing cost ceiling was reached and `ceiling_action` is `HardStop`.
+    ///
+    /// The run stopped cleanly with no data loss. It can be resumed in a new run
+    /// with a higher ceiling or with `ceiling_action = "stay_local"`.
+    #[error("cost ceiling exceeded: {cost_usd:.4} USD >= {ceiling_usd:.4} USD")]
+    CostCeilingExceeded {
+        /// Accumulated session cost at the stop, in USD.
+        cost_usd: f64,
+        /// Configured ceiling, in USD.
+        ceiling_usd: f64,
+    },
+}
+
+/// Configuration for chat session context window management.
+///
+/// Controls how many messages from the conversation history are included
+/// in the LLM context window and when summarization is triggered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSessionConfig {
+    /// Number of recent messages to include in the sliding window (default 20).
+    pub context_window_size: u32,
+}
+
+/// Default context window size (number of messages).
+const DEFAULT_CONTEXT_WINDOW_SIZE: u32 = 20;
+
+impl Default for ChatSessionConfig {
+    fn default() -> Self {
+        Self {
+            context_window_size: DEFAULT_CONTEXT_WINDOW_SIZE,
+        }
+    }
+}
+
+/// Lightweight summary of a recent session for CLI list display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentSessionSummary {
+    /// Session identifier.
+    pub id: String,
+    /// Chat mode string (`"libre"` or `"agent"`).
+    pub mode: String,
+    /// Session status string.
+    pub status: String,
+    /// Content of the first user message in the session, if any.
+    pub first_message: Option<String>,
+    /// ISO-8601 creation timestamp.
+    pub created_at: String,
+}
+
+/// Summary of a past session for cross-session context injection.
+///
+/// Returned by [`ChatSessionRepository::find_relevant_sessions`] and used
+/// to build a context block that gives the LLM awareness of previous
+/// conversations related to the current topic.
+#[derive(Debug, Clone, Serialize)]
+pub struct PastSessionSummary {
+    /// Identifier of the past session.
+    pub session_id: String,
+    /// ISO-8601 creation timestamp of the session.
+    pub created_at: String,
+    /// Summary text produced by the conversation summarizer.
+    pub summary: String,
+}
+
+/// Lightweight session info for list responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    /// Session identifier.
+    pub id: SessionId,
+    /// Chat mode.
+    pub mode: ChatMode,
+    /// Agent name (if agent mode).
+    pub agent_name: Option<String>,
+    /// Current status.
+    pub status: SessionStatus,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// User-defined display title (falls back to agent_name or mode).
+    pub title: Option<String>,
+    /// Project this session belongs to (None = standalone).
+    pub project_id: Option<String>,
+}
+
+/// Detailed session view for single-session responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDetail {
+    /// Full session data.
+    pub session: ChatSession,
+    /// Total number of messages in the session.
+    pub message_count: u32,
+}
+
+/// Trait for injecting project context into chat system prompts.
+///
+/// Implemented outside `apollia-runtime` (e.g. in `apollia-desktop`) because
+/// the actual project data lives in `apollia-tools` which is a sibling crate.
+/// This avoids coupling the runtime to the project persistence layer.
+#[async_trait::async_trait]
+pub trait ProjectContextProvider: Send + Sync {
+    /// Build a context block for a given project ID.
+    ///
+    /// Returns `None` if the project doesn't exist or has no useful context.
+    /// The returned string is injected into the system prompt on the first message.
+    async fn build_context(&self, project_id: &str) -> Option<String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn injected_instruction_provenance_is_user_inject_with_reason() {
+        // GIVEN an operator instruction
+        let inj = InjectedInstruction {
+            session_id: "s1".into(),
+            text: "before step X, do Y".into(),
+        };
+
+        // WHEN building the provenance for steps created from it
+        let prov = inj.provenance();
+
+        // THEN the origin is UserInject and the reason is the operator text
+        assert_eq!(prov.origin, apollia_core::plan::StepOrigin::UserInject);
+        assert_eq!(prov.reason.as_deref(), Some("before step X, do Y"));
+        assert!(prov.at >= 0);
+    }
+
+    #[test]
+    fn pause_state_defaults_to_running() {
+        // GIVEN the default pause state
+        // WHEN it is read
+        // THEN it is the steady Running state
+        assert_eq!(PauseState::default(), PauseState::Running);
+    }
+
+    #[test]
+    fn test_chat_mode_sql_roundtrip() {
+        // GIVEN each ChatMode variant
+        for mode in [ChatMode::Libre, ChatMode::Agent] {
+            // WHEN we convert to SQL and back
+            let sql = mode.as_sql();
+            let restored = ChatMode::from_sql(sql);
+            // THEN we get the original value back
+            assert_eq!(restored, Some(mode));
+        }
+        assert_eq!(ChatMode::from_sql("invalid"), None);
+    }
+
+    #[test]
+    fn test_session_status_sql_roundtrip() {
+        // GIVEN each SessionStatus variant
+        for status in [
+            SessionStatus::Active,
+            SessionStatus::Processing,
+            SessionStatus::Closed,
+        ] {
+            // WHEN we convert to SQL and back
+            let sql = status.as_sql();
+            let restored = SessionStatus::from_sql(sql);
+            // THEN we get the original value back
+            assert_eq!(restored, Some(status));
+        }
+        assert_eq!(SessionStatus::from_sql("invalid"), None);
+    }
+
+    #[test]
+    fn test_chat_role_sql_roundtrip() {
+        // GIVEN each ChatRole variant
+        for role in [
+            ChatRole::User,
+            ChatRole::Assistant,
+            ChatRole::System,
+            ChatRole::Tool,
+        ] {
+            // WHEN we convert to SQL and back
+            let sql = role.as_sql();
+            let restored = ChatRole::from_sql(sql);
+            // THEN we get the original value back
+            assert_eq!(restored, Some(role));
+        }
+        assert_eq!(ChatRole::from_sql("invalid"), None);
+    }
+
+    #[test]
+    fn test_chat_error_variants() {
+        // GIVEN all ChatError variants
+        let errors: Vec<ChatError> = vec![
+            ChatError::SessionNotFound("s1".into()),
+            ChatError::SessionClosed("s2".into()),
+            ChatError::SessionBusy("s3".into()),
+            ChatError::AgentNotFound("a1".into()),
+            ChatError::AgentLoadFailed("reason".into()),
+            ChatError::NoLlmConfigured,
+            ChatError::BudgetExhausted,
+            ChatError::InternalError("db error".into()),
+        ];
+
+        // WHEN each is rendered for a human
+        // THEN each has a non-empty Display message
+        for err in &errors {
+            let msg = format!("{err}");
+            assert!(!msg.is_empty());
+        }
+        // 8 variants (7 from spec + InternalError)
+        assert_eq!(errors.len(), 8);
+    }
+
+    #[test]
+    fn test_chat_session_serialization() {
+        // GIVEN a ChatSession
+        let session = ChatSession {
+            id: "sess-1".into(),
+            mode: ChatMode::Agent,
+            agent_name: Some("test-agent".into()),
+            system_prompt: "You are helpful.".into(),
+            status: SessionStatus::Active,
+            history: vec![],
+            authorized_tools: std::collections::HashSet::new(),
+            available_tools: vec!["bash_executor".into()],
+            created_at: "2026-03-20T10:00:00Z".into(),
+            active_exchange: None,
+            llm_backend: None,
+            title: None,
+            parent_session_id: None,
+            fork_depth: 0,
+            project_id: None,
+            force_project_context_inject: false,
+            fs_allow_rules: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            plan_mode: false,
+            plan_phase: PlanPhase::Done,
+        };
+
+        // WHEN we serialize and deserialize
+        let json = serde_json::to_string(&session).expect("serialize");
+        let restored: ChatSession = serde_json::from_str(&json).expect("deserialize");
+
+        // THEN fields match
+        assert_eq!(restored.id, "sess-1");
+        assert_eq!(restored.mode, ChatMode::Agent);
+        assert_eq!(restored.agent_name.as_deref(), Some("test-agent"));
+    }
+
+    #[test]
+    fn test_plan_phase_sql_round_trip() {
+        // GIVEN every PlanPhase variant
+        for phase in [
+            PlanPhase::Discovery,
+            PlanPhase::Drafting,
+            PlanPhase::AwaitingApproval,
+            PlanPhase::Executing,
+            PlanPhase::Done,
+        ] {
+            // WHEN serialized to SQL and parsed back
+            let parsed = PlanPhase::from_sql(phase.as_sql());
+            // THEN it round-trips
+            assert_eq!(parsed, Some(phase));
+        }
+        // AND an unknown value yields None
+        assert_eq!(PlanPhase::from_sql("bogus"), None);
+    }
+
+    #[test]
+    fn test_plan_phase_default_is_done() {
+        // GIVEN the default PlanPhase
+        // WHEN constructed via Default
+        let phase = PlanPhase::default();
+        // THEN it is Done (neutral, never stuck awaiting approval)
+        assert_eq!(phase, PlanPhase::Done);
+    }
+
+    #[test]
+    fn session_metrics_records_mixed_tool_outcomes() {
+        // GIVEN a session metrics entry and 3 tool calls across 2 distinct tools
+        let mut metrics = SessionMetrics::new("sess-42");
+        let calls = vec![
+            ToolCallRecord {
+                tool_name: "bash".into(),
+                input: serde_json::json!({"cmd": "ls"}),
+                output: Some("ok".into()),
+                status: ToolCallStatus::Executed,
+                rationale: None,
+                retry_attempts: Vec::new(),
+            },
+            ToolCallRecord {
+                tool_name: "bash".into(),
+                input: serde_json::json!({"cmd": "rm -rf /"}),
+                output: None,
+                status: ToolCallStatus::Refused,
+                rationale: None,
+                retry_attempts: Vec::new(),
+            },
+            ToolCallRecord {
+                tool_name: "read_file".into(),
+                input: serde_json::json!({"path": "/etc/hosts"}),
+                output: Some("…".into()),
+                status: ToolCallStatus::Executed,
+                rationale: None,
+                retry_attempts: Vec::new(),
+            },
+        ];
+
+        // WHEN we aggregate
+        metrics.record_tool_calls(&calls);
+
+        // THEN tool_stats has 2 entries with correct counters
+        assert_eq!(metrics.tool_stats.len(), 2);
+        let bash = metrics
+            .tool_stats
+            .iter()
+            .find(|e| e.tool_name == "bash")
+            .expect("bash entry");
+        assert_eq!(bash.calls, 2);
+        assert_eq!(bash.executed, 1);
+        assert_eq!(bash.refused, 1);
+        let read = metrics
+            .tool_stats
+            .iter()
+            .find(|e| e.tool_name == "read_file")
+            .expect("read_file entry");
+        assert_eq!(read.calls, 1);
+        assert_eq!(read.executed, 1);
+        assert_eq!(read.refused, 0);
+    }
+}

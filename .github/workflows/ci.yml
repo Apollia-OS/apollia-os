@@ -1,0 +1,1060 @@
+# CI, continuous validation.
+#
+# Runs on every push to main and every PR. Goal: keep main green, and catch
+# the regressions within 15 min of feedback.
+#
+# What is NOT here:
+#   - Build and release artifacts -> release.yml (on a v* tag)
+#   - E2E desktop, compile-cuda sanity, deep coverage -> nightly.yml
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Line-coverage floor for the coverage gate, ratcheted up over time and never
+  # lowered. Measured baseline is 70.58% line coverage over the workspace with
+  # apollia-desktop and apollia-e2e-tests excluded (neither builds under the
+  # coverage harness: the Tauri crate needs bundled frontend resources, the e2e
+  # crate does not compile standalone) and with tests/ + benches/ ignored. The
+  # floor sits just below the baseline so the gate is green today, then ratchets
+  # up. The floor is read against that reduced scope for as long as the two
+  # excluded crates do not build under the harness.
+  COVERAGE_FLOOR: "70"
+
+# Cancels the runs in flight on the same ref when a newer push arrives.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege default, and no job departs from it: nothing here deploys.
+# The documentation site is built by the docs-build job and published by the
+# hosting provider, so no `pages` or `id-token` escalation is needed.
+permissions:
+  contents: read
+
+jobs:
+  # ── Rust: fmt -> clippy -> test (a chain - each one blocks the next) ───────
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      # Pinned to the build toolchain (rust-toolchain.toml) so CI fmt output
+      # matches local dev exactly and never drifts against rolling stable.
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      # Pinned to the build toolchain so the -D warnings gate is reproducible
+      # and matches the pre-commit pre-push hook byte for byte.
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+          components: clippy
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            cmake clang pkg-config
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # --all-targets adds tests/examples/benches to the lint surface, matching
+      # the pre-commit pre-push hook. --all-features is intentionally omitted:
+      # it pulls the GPU backends (cuda/rocm/vulkan) whose toolkits are absent
+      # on this runner; feature-gated clippy stays in nightly.yml.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Advisory only: runs the same clippy gate on rolling stable to surface lints
+  # coming in a future toolchain before we bump the pinned build toolchain.
+  # Non-blocking, so upstream lint churn never blocks a PR.
+  clippy-stable:
+    name: Clippy (stable, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            cmake clang pkg-config
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The configurations the default features hide. Three release presets
+      # passed `--no-default-features` and no command ever compiled the result:
+      # `cargo check -p apollia-cli --no-default-features` did not build, and
+      # the six `cfg(not(feature = ...))` branches of apollia-llm and
+      # apollia-tools had never been through rustc. `just check-features` is
+      # the same list.
+      - name: Configurations without the default features build
+        run: |
+          cargo check -p apollia-cli --no-default-features --all-targets
+          cargo check -p apollia-llm --no-default-features --all-targets
+          cargo check -p apollia-tools --no-default-features --all-targets
+
+  test:
+    name: Rust Tests
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            cmake clang pkg-config
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # The envelope points HOME at a seeded sentinel and fails the step if
+      # any test writes into it: a green suite that edits the operator's real
+      # ~/.apollia is exactly the defect this line exists to stop.
+      - name: cargo test (workspace, sentinel HOME)
+        run: python3 scripts/check_test_home_isolation.py --wrap cargo test --workspace --no-fail-fast
+      # The PyO3-gated `python-tests` suite of apollia-e2e-tests does not run
+      # here: it needs the Apollia SDK importable through PYO3_PYTHON, and this
+      # job installs no SDK, so the step failed before reaching a single test.
+      # Its one frontier is the python-tests job of nightly.yml, which installs
+      # the editable SDK first.
+
+  # ── MSRV : the 1.89 floor the manifests publish is compiled, never assumed ─
+  msrv:
+    name: MSRV 1.89
+    needs: fmt
+    runs-on: ubuntu-latest
+    env:
+      # The load-bearing line: rust-toolchain.toml pins the build toolchain
+      # (1.95.0) and outranks `rustup default`, so without this variable
+      # rustup would install 1.95 on first call and compile the floor with
+      # the ceiling. The variable outranks the file, for every step of this
+      # job including the cache key probe. Verified at rustc 1.89.0 in a
+      # rust:1.89-bookworm container before this job landed.
+      RUSTUP_TOOLCHAIN: "1.89.0"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      # Pinned to the head of the action's 1.89.0 branch, which hardcodes
+      # `toolchain: 1.89.0` in its parse step: the SHA the other jobs pin
+      # belongs to the 1.95.0 branch and has no `toolchain` input, so passing
+      # one there would be silently ignored and this job would measure 1.95
+      # while claiming 1.89. Before this job existed, RUST-PATTERNS.md said
+      # "Tested in CI" of a floor no toolchain had ever compiled.
+      - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            cmake clang pkg-config
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # --workspace pulls in apollia-desktop too, so every package that
+      # publishes `rust-version = "1.89"` is compiled at exactly 1.89.
+      - run: cargo check --workspace
+
+  # ── CLI end-to-end (Track 1, offline, seeded fixture) ────────────────────
+  cli-e2e:
+    # The suite carries three of the five coverage axes (cli, api, tools), and
+    # it used to run on Linux alone, so the table it feeds said nothing about
+    # the two other systems the release ships. It is bash over the built
+    # binary and sqlite3, and it passes on macOS unchanged (measured
+    # 2026-09-07: 172 assertions, 9s).
+    name: CLI E2E (offline, ${{ matrix.os }})
+    needs: clippy
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - name: Install system deps
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            cmake clang pkg-config sqlite3
+      # sqlite3 is what the seed builder and the assertions read the throwaway
+      # HOME with, and two schemas declare FTS5 virtual tables. The sqlite3 the
+      # macOS runner ships carries no FTS5 module, so the profile is built half
+      # way and twenty assertions fail without naming the cause; Homebrew's
+      # carries it and goes first on PATH.
+      - name: Install a sqlite3 that carries FTS5
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew install sqlite
+          echo "$(brew --prefix sqlite)/bin" >> "$GITHUB_PATH"
+      - name: Check sqlite3 carries FTS5
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          sqlite3 --version
+          sqlite3 :memory: "CREATE VIRTUAL TABLE t USING fts5(x);"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Build apollia-cli
+        run: cargo build -p apollia-cli
+      - name: Seed builder self-test
+        run: bash tests/cli/seed/self-test.sh
+      # Lives here and not in prose-guard because its first subject is the
+      # built binary: it replays every documented command line of the entry
+      # documents against target/debug/apollia-os, which the step above just
+      # produced. Its second subject needs no binary: every path the tooling
+      # documents cite must be a file `git ls-files` reports.
+      - name: Documented command lines are accepted by the binary
+        run: python3 scripts/check_entry_doc_commands.py
+      # Same placement rationale: the floor is measured against the built
+      # binary's own command tree. Selftest first, so a classifier that cannot
+      # fire is reported before its green on the real tracks is believed.
+      - name: Every CLI leaf is invoked by a track
+        run: |
+          python3 scripts/check_cli_e2e_coverage.py --selftest
+          python3 scripts/check_cli_e2e_coverage.py
+      - name: JSON error envelope and exit-code contract
+        run: |
+          python3 scripts/check_cli_json_contract.py --selftest
+          python3 scripts/check_cli_json_contract.py
+      # Section 1 of the crate rulebook announced "adding to this whitelist
+      # requires a note here" and had no verifier, so the note stopped being
+      # written: 17 bare verbs against a whitelist of 15, and 60 leaves whose
+      # verb was in no declared category.
+      - name: Every CLI verb is declared in the crate taxonomy
+        run: python3 scripts/check_cli_json_contract.py taxonomy
+      - name: Every CLI leaf has a parsing test
+        run: |
+          python3 scripts/check_cli_parse_tests.py --selftest
+          python3 scripts/check_cli_parse_tests.py
+      - name: Run CLI E2E (Track 1, offline, seeded)
+        run: bash tests/cli/cli-e2e.sh
+      - name: Upload E2E report
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: cli-e2e-report
+          path: tests/cli/report/
+
+  # ── Frontend ─────────────────────────────────────────────────────────────
+  vitest:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: crates/apollia-desktop/ui/package-lock.json
+      - name: Install dependencies
+        working-directory: crates/apollia-desktop/ui
+        run: npm ci
+      - name: Run Vitest
+        working-directory: crates/apollia-desktop/ui
+        run: npm test
+      # The three verdicts below existed only as npm scripts an operator types:
+      # a frontend that does not build, a type error, or an i18n key missing in
+      # one locale all crossed this boundary unjudged.
+      - name: Build the frontend
+        working-directory: crates/apollia-desktop/ui
+        run: npm run build
+      - name: Type check (svelte-check, errors only)
+        working-directory: crates/apollia-desktop/ui
+        run: npx svelte-check --threshold error
+      - name: i18n catalogue audit
+        working-directory: crates/apollia-desktop/ui
+        run: npm run audit:i18n
+      - name: Accessibility audit (form labels, icon-only buttons)
+        working-directory: crates/apollia-desktop/ui
+        run: npm run audit:a11y
+      # Needs no node_modules: it reads the tracked sources and app.css.
+      - name: Design tokens (no visual literal where a token covers it)
+        run: python3 scripts/check_design_tokens.py
+
+  # ── Security / dependencies ──────────────────────────────────────────────
+  deny:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      # Explicit full check (advisories, bans, licenses, sources) on the PR
+      # gate, not just a subset. The redundant heavy pass stays in nightly.yml.
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
+        with:
+          command: check advisories bans licenses sources
+      # The three surfaces below are the ones the release actually ships:
+      # the bundled Python site-packages (not the intentionally empty SDK,
+      # which python-quality audits), the desktop UI's runtime dependencies,
+      # and every archive the packaging scripts download.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      # Pinned like the ruff of python-quality: an unpinned audit tool changes
+      # its verdict under the job without a commit.
+      - run: pip install pip-audit==2.10.0
+      - name: pip-audit (bundled Python supply chain)
+        run: pip-audit -r packaging/requirements-bundled.txt --no-deps --progress-spinner off
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+      - name: npm audit (desktop UI runtime dependencies)
+        working-directory: crates/apollia-desktop/ui
+        run: npm audit --omit=dev
+      - name: Download sums (pinned archives match the upstream digests)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_download_sums.py --github
+
+  # ── macOS Silicon : core test run backing the "Tested" platform claim ──────
+  test-macos:
+    name: Rust Tests (macOS Silicon)
+    needs: clippy
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Default members exclude the heavy Tauri desktop crate; full desktop
+      # E2E stays in nightly.yml.
+      - run: cargo test
+
+  # ── Prose guard : locks in the sanitize invariants (no regressions) ────────
+  prose-guard:
+    name: Prose Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      # The repository's own guard, not a transcription of it. This job used
+      # to carry a grep copy of three of its four rules, and the copy judged
+      # a different tree: it restricted the em-dash search to four suffixes,
+      # leaving 846 of the 2454 tracked files (393 TypeScript, 100 JSON, 44
+      # TOML) to cross the last boundary before publication unjudged, and it
+      # read the working directory where the guard reads the git inventory.
+      # A rule that exists as a script is not rewritten in a workflow file;
+      # the boundary invokes the script.
+      - name: Prose rules, the same guard the pre-commit hook runs
+        run: python3 scripts/check_prose.py
+      # One language per file, over the code as well as the prose: the rule
+      # `FORBIDDEN.md` states and nothing measured until now.
+      - name: One language per file, code and documents
+        run: python3 scripts/check_file_language.py
+      # The Python rules no ruff configuration expresses: the AgentError
+      # exception root, the print() carve-out (with its written REASON
+      # exemptions), PEP 563 + TypedDict, and the agent module contract.
+      - name: Python rules beyond ruff, on sdk/ and agents/
+        run: python3 scripts/check_python_rules.py
+      # The rulebook against the tree it describes: every path, CamelCase
+      # symbol and test tool it cites, plus the line references. It ran here
+      # first on a corpus that carried five dead paths, eight absent types and
+      # nine tools no manifest declares, none of which any existing gate read.
+      - name: The rulebook describes this tree
+        run: |
+          python3 scripts/check_corpus_claims.py --selftest
+          python3 scripts/check_corpus_claims.py
+      # Runs before the checks it covers. Two of them independently counted a
+      # symbol named in a doc-comment as a live call site, always in the
+      # direction that declares a dead capability alive. This pins that case on a
+      # fixture so the next check written here cannot reintroduce it quietly.
+      - name: The checks themselves, on a fixture
+        run: python3 scripts/check_selftest.py
+      # The crate rulebooks described a budget with five dimensions where
+      # apollia-core carries three, an AipError enum that does not exist, a
+      # runtime.db and an auth.toml no path builds, and a SIGHUP reload nothing
+      # handles. Sixteen symbols, none of them more than a git grep away.
+      - name: Every crate rulebook names its own crate
+        run: |
+          python3 scripts/check_agents_md.py --selftest
+          python3 scripts/check_agents_md.py
+      # A rule in a document is not a gate. This one exists because the trap it
+      # catches was invisible: five crates lost `unwrap_used = "deny"` by
+      # declaring a local [lints] table, and clippy kept passing. It now also
+      # holds the [workspace.package] and [workspace.dependencies] inheritance
+      # that RUST-PATTERNS.md promises: 19 packages published without the MSRV
+      # the document announced, and 65 dependency versions lived outside the
+      # single source. The selftest replays every rule on an altered manifest.
+      - name: Every manifest actually gets the workspace tables
+        run: |
+          python3 scripts/check_crate_lints.py --selftest
+          python3 scripts/check_crate_lints.py
+      # The mechanisable Rust rules of FORBIDDEN.md, each held at zero or on a
+      # named two-sided ratchet. Before this guard, eighteen tracing format
+      # strings and twelve wildcard re-exports sat green behind rules only a
+      # reader enforced. The selftest feeds every rule a red sample first.
+      - name: The mechanisable Rust rules hold
+        run: |
+          python3 scripts/check_rust_rules.py --selftest
+          python3 scripts/check_rust_rules.py
+      # The same rules one level in, on test bodies, which nothing read until
+      # this guard: 21 tests carried no assertion of any kind, one of them a
+      # body made only of comments, and 963 are missing at least one of the
+      # three markers `AGENTS.md` and `FORBIDDEN.md` both make mandatory.
+      # Sleeps and ports stay with `time-sensitive-tests` above; this rule
+      # fails if that one disappears rather than counting them twice.
+      - name: No Rust test that cannot fail, GIVEN/WHEN/THEN on a ratchet
+        run: |
+          python3 scripts/check_rust_tests.py --selftest
+          python3 scripts/check_rust_tests.py
+      # The other half of the same rule: check_rust_rules.py holds the format
+      # strings at zero, and nothing held the label form, so 837 of the 995
+      # production events were prose and no query could group them. Selftest
+      # first, red sample first.
+      - name: Tracing messages are labels, per crate, on a descending ratchet
+        run: |
+          python3 scripts/check_tracing_messages.py --selftest
+          python3 scripts/check_tracing_messages.py
+      # Placement, not just existence. The replay asks whether some file carries
+      # an id; this asks whether the marker still sits on the paragraph it
+      # guards, and reports which of its rules had no coverage.
+      - name: Claim markers are placed and matched
+        run: python3 scripts/check_claim_anchors.py
+      # Three times the repo shipped a `with_*` builder installing a capability
+      # production never asks for, each time with documentation describing it as
+      # active. The shape compiles, its own tests pass, and only the call path
+      # tells the truth. New instances now fail here instead of in a doc audit.
+      - name: Optional-capability builders have a production caller
+        run: python3 scripts/check_optional_builders.py --strict
+      # The same failure one level out: `dead_code` stops at the crate boundary,
+      # so a `pub` item nothing calls, or one only a test calls, compiles clean
+      # forever. This crosses every exported item with its uses and holds two
+      # ratchets that can only shrink.
+      - name: Exported items have a caller outside the tests
+        run: |
+          python3 scripts/check_pub_unreferenced.py --selftest
+          python3 scripts/check_pub_unreferenced.py
+      # The desktop owns no console on Windows, so every console-subsystem child
+      # it starts is given a visible window. A first sweep hid ten spawn sites
+      # and left four crates listed as remaining; nobody took them, and a later
+      # change added three more in files that did not exist yet. The count went
+      # up while the rule sat in a document. It is a check now.
+      - name: Spawned children ask for no console window
+        run: python3 scripts/check_subprocess_window.py
+      # Two rules that lived in three copies each and were absent wherever the
+      # copy had not been made: the SSRF redirect policy and the response-body
+      # cap. The hook handler carried neither while SECURITY.md said no direct
+      # network path carries an agent payload without them. Selftest first, so
+      # a green line proves the rules can still see a defect.
+      - name: HTTP clients and response bodies go through apollia_core::net
+        run: |
+          python3 scripts/check_http_clients.py --selftest
+          python3 scripts/check_http_clients.py
+      # The layout of ~/.apollia had three diverging inventories (code, seed,
+      # reset script) and 105 production lines composing the directory by hand
+      # before the DataFile catalogue existed. These three guards hold the
+      # catalogue as the one source: no hand-composed path or database name,
+      # every new SQLite store versioned, every persisted struct able to
+      # survive the addition of a field. Selftest first, red sample first.
+      - name: Data directory layout, schema versioning, persisted formats
+        run: |
+          python3 scripts/check_data_layout.py --selftest
+          python3 scripts/check_data_layout.py
+          python3 scripts/check_sqlite_schema_versioning.py --selftest
+          python3 scripts/check_sqlite_schema_versioning.py
+          python3 scripts/check_serde_persisted_defaults.py --selftest
+          python3 scripts/check_serde_persisted_defaults.py
+      # A pasted Google Fonts snippet makes a cold start phone a third party
+      # before the user clicks anything, which is the one promise the product
+      # is sold on. The desktop webview has a CSP that blocks it; the docs site
+      # has nothing, so the gate lives here.
+      - name: No web font is fetched from a third party
+        run: python3 scripts/check_no_font_cdn.py
+      # Tauri camel-cases the name of every command argument before looking it
+      # up, and never falls back to snake_case. A key it does not find makes it
+      # reject the whole call, so a single wrong spelling ships a surface that
+      # fails at every execution and says nothing. Two of them lived in the
+      # tree at once, one of them frozen green by a unit test. Nothing read
+      # the two sides of that contract together until this.
+      - name: Every invoke call carries the argument keys Tauri reads
+        run: |
+          python3 scripts/check_tauri_ipc_args.py --selftest
+          python3 scripts/check_tauri_ipc_args.py
+      # The other half of the same contract. A command registered in
+      # `generate_handler!` that nothing calls compiles, passes its own unit
+      # tests and is reachable by no user; nineteen of them lived here at once.
+      # The crossing was measured by hand each time, never kept, so the count
+      # went back up between measurements. The two completeness lines of the
+      # output are what makes an empty result mean something.
+      - name: Every registered Tauri command has a caller
+        run: |
+          python3 scripts/check_tauri_ipc_callers.py --selftest
+          python3 scripts/check_tauri_ipc_callers.py
+      # A source file no bundle entry reaches ships with nobody: the bundle
+      # drops it, svelte-check still type-checks it, and its defects are
+      # invisible. Four components and a knip.json nothing executed sat in
+      # that state; the barrels' blanket re-exports laundered them past
+      # `noUnusedLocals`.
+      # The same rule on both sides of the tree. It was stated once, in the
+      # Rust section of FORBIDDEN.md, and measured nowhere on the frontend: six
+      # desktop UI modules stood over the threshold, the largest at 2358 lines.
+      - name: No module exceeds 800 lines outside its table
+        run: |
+          python3 scripts/check_module_size.py --selftest
+          python3 scripts/check_module_size.py
+      - name: Every desktop UI source is reached from a bundle entry
+        run: |
+          python3 scripts/check_unimported_files.py --selftest
+          python3 scripts/check_unimported_files.py
+      # `ctx` is published on one side and executed on the other, and for a
+      # long time the reference pages rendered only the published half:
+      # twenty-two divergences of signature, method name and class name
+      # shipped as fact. The generator now refuses to write a page when the two
+      # halves disagree, and this runs the same engine on its own fabricated
+      # subject first, in both directions, so a permanent red cannot pass for a
+      # guard that works.
+      - name: The ctx protocol and the bridge agree
+        run: |
+          python3 scripts/check_ctx_contract.py --selftest
+          python3 scripts/check_ctx_contract.py
+      # A category link declared on a slug its own index page already serves
+      # takes the route from that page. The page is then never rendered, so the
+      # build's link verifier never collects its links: a dead internal route
+      # written in it travels through the docs build in exit 0. Ten source
+      # pages, five sections in two locales, were in that state.
+      - name: Every documentation index page owns its route
+        run: python3 scripts/check_docs_routes.py
+      # The four guards below were launched by `just guards` alone, so a defect
+      # born in a PR crossed this boundary unjudged. They are static sweeps of
+      # tracked files, which is exactly what this job can judge on a bare
+      # checkout. Two guards of the same corpus stay local on purpose:
+      # check_guard_verdicts.py and check_instrument_verdicts.py measure
+      # install artefacts (node_modules, built binaries) and macOS codesign,
+      # and both exit non-zero by design when a subject is absent, so a runner
+      # without a development machine can only report their zero coverage.
+      # The event catalogue read from both sides. `RuntimeEvent` is relayed to
+      # the webview by one exhaustive match, which makes every variant look
+      # wired to the compiler and to a plain grep: twenty-one were orphaned on
+      # one side or the other, and nine of them named a subsystem that exists in
+      # no crate. The same file holds the lag rule of the EventBus contract,
+      # declared in two documents and held by none of the thirteen subscriber
+      # loops. Selftest first, so a rule that cannot fire is reported before its
+      # green on the real tree is believed.
+      - name: The event catalogue is read from both sides
+        run: |
+          python3 scripts/check_eventbus_variants.py --selftest
+          python3 scripts/check_eventbus_variants.py
+      # Two buses, not one: the webview's DOM events with themselves, and the
+      # Tauri channels between the shell and the webview. The second crossing
+      # held three one-sided channels at once, so the selftest runs first and a
+      # permanent red cannot pass for a guard that works.
+      - name: Every event channel has an emitter and a listener
+        run: |
+          python3 scripts/check_custom_event_listeners.py --selftest
+          python3 scripts/check_custom_event_listeners.py
+      - name: Documentation frontmatter is well formed
+        run: python3 scripts/check_docs_frontmatter.py
+      # check_i18n_catalogue.py used to run here, but it now judges the theme
+      # strings against the English defaults that `npm ci` installs, so its
+      # boundary is the docs-build job, after the install.
+      - name: French mirrors match their English pages in structure
+        run: python3 scripts/check_docs_mirror.py
+      - name: Every documentation page sits under the locale of its language
+        run: python3 scripts/check_docs_lang.py
+      - name: No production panic path escapes the lint
+        run: python3 scripts/check_panic_free.py
+      # The workflows themselves: SHA pins, resolved needs, dispatch coverage,
+      # bot exclusions, advisory naming, no forced single-thread test runs.
+      # Selftest first, so a rule that cannot fire is reported before its
+      # green on the real tree is believed.
+      - name: The workflows hold their declared form
+        run: |
+          python3 scripts/check_ci_workflows.py --selftest
+          python3 scripts/check_ci_workflows.py
+      # The artifact naming contract: every name a consumer expects has a
+      # producing step in release.yml, judged by parsing rather than mention.
+      # Selftest first, so a rule that cannot fire is reported before its
+      # green on the real tree is believed.
+      - name: The artifact names bind producer and consumers
+        run: |
+          python3 scripts/check_release_artifacts.py --selftest
+          python3 scripts/check_release_artifacts.py
+      # A `testDir` narrowed to one subdirectory left 5 of the 7 Playwright
+      # specs invisible to the runner: `--list` answered "0 tests in 0 files",
+      # which is an error to no caller, and 5 of their testid anchors had been
+      # removed from the UI source with nothing failing. Two more specs seeded
+      # a storage bridge and a query flag that no commit of the UI has ever
+      # read. A spec the runner never lists, or that navigates somewhere the
+      # application cannot be sent to, can neither pass nor fail, so its rot is
+      # silent by construction; this reads the config, the anchors and the
+      # navigation targets at rest instead. Selftest first, so a rule that
+      # cannot fire is reported before its green on the real tree is believed.
+      - name: Every Playwright spec is reachable and anchored
+        run: |
+          python3 scripts/check_playwright_specs.py --selftest
+          python3 scripts/check_playwright_specs.py
+
+  # ── Python SDK : strict type check (lint/format cleanup tracked separately) ─
+  python-types:
+    name: Python Type Check (SDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: pip install mypy
+      - name: mypy (strict, apollia package)
+        working-directory: sdk
+        run: mypy apollia
+
+  # ── Python SDK unit tests + coverage ───────────────────────────────────────
+  # Blocking. It was advisory while three tests failed: two asserted strict
+  # payload rejection against a dispatcher that dropped unexpected fields with a
+  # warning, and one mock had not followed `ctx.mail` onto the Ctx protocol. Both
+  # are fixed, so the job blocks; an advisory job that hides a real failure is
+  # worse than no job.
+  python-tests:
+    name: Python Tests (SDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install SDK with dev extras
+        working-directory: sdk
+        run: pip install -e ".[dev]"
+      - name: pytest with coverage
+        working-directory: sdk
+        run: pytest --cov=apollia --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: sdk-coverage-xml
+          path: sdk/coverage.xml
+
+  # ── Generated docs : the committed CLI and SDK references must match the code ─
+  # These pages are produced by docs/site/regen.sh from the clap tree and from an
+  # ast walk of the SDK. They are committed (a plain node build has neither cargo
+  # nor python), so nothing stops them drifting except this job.
+  docs-generated:
+    name: Generated Docs Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      # `setup-python` hands this job a clean interpreter, unlike the runner's
+      # own python3 which ships PyYAML. `regen.sh` reaches
+      # `check_release_artifacts.py`, which reads the packaging manifest, so
+      # without this the script answers "nothing measured" and halts the whole
+      # regeneration at its second step.
+      - run: pip install PyYAML==6.0.2
+      # The CLI reference is emitted by the `apollia-os` binary, so this job
+      # links the whole dependency tree, audio backends included. The short
+      # list it carried lacked libasound2-dev: `alsa-sys` failed its build
+      # script, the generator produced nothing, and the drift check reported
+      # the resulting empty page as stale documentation.
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            cmake clang pkg-config
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      # Before the generators, not after: a generator whose pointer has moved
+      # answers "nothing measured" and writes no page, so the drift check at the
+      # end of this job would report a clean tree over a source nobody read.
+      - name: The generators still find the sources they declare
+        run: |
+          python3 scripts/check_doc_generators.py
+          python3 scripts/check_doc_generators.py --selftest
+      # One command, not a transcription of it. This job used to re-implement
+      # the five generation steps inline, and the copy drifted from the script
+      # in the way that matters: `regen.sh` carries `set -euo pipefail`, the
+      # copy did not, so a failed `cargo run` was swallowed by the `perl` at
+      # the end of its pipe and the truncated page reached the drift check as
+      # a documentation defect rather than as a build failure. The error a
+      # reader saw named the wrong thing entirely.
+      - name: Regenerate every page from its source
+        run: bash docs/site/regen.sh
+      - name: The OpenAPI spec declares every route the runtime serves
+        run: |
+          python3 scripts/check_openapi_routes.py
+          python3 scripts/check_openapi_routes.py --selftest
+      # Every page `regen.sh` writes, and no fewer. Twice already a page was
+      # regenerated by this job and then left out of the comparison, so a
+      # drift on it passed as green: the EventBus catalogue and its mirror,
+      # then the two install pages carrying the release-artifact block.
+      - name: Fail if the committed pages drifted
+        run: |
+          if ! git diff --exit-code -- \
+            docs/site/docs/reference/cli \
+            docs/site/docs/reference/sdk \
+            docs/site/docs/reference/configuration.md \
+            docs/site/docs/reference/eval-suites.md \
+            docs/site/docs/reference/events.md \
+            docs/site/docs/how-to/install-the-desktop-app.md \
+            docs/site/i18n/fr/docusaurus-plugin-content-docs/current/reference/events.md \
+            docs/site/i18n/fr/docusaurus-plugin-content-docs/current/how-to/install-the-desktop-app.md; then
+            echo "::error::generated docs are stale; run 'bash docs/site/regen.sh' and commit the result"
+            exit 1
+          fi
+
+  # ── Capability claims : replays every documented capability against the code ─
+  # The corpus has described capabilities whose symbol existed while nothing
+  # called it. Prose review does not catch that; this does.
+  claims:
+    name: Capability Claims
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - run: python3 scripts/check_claims.py
+
+  # ── Link check : catches broken local doc links (offline, no external flake) ─
+  # Scope: every public file a visitor reads before the code, root files and
+  # `.github/` alike. Links under docs/site are routes the Docusaurus build
+  # resolves at render time, so their judge is the docs-build job below
+  # (onBrokenLinks: throw), not a file-level checker.
+  links:
+    name: Doc Link Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2
+        with:
+          args: "--offline --no-progress README.md CONTRIBUTING.md SECURITY.md GOVERNANCE.md CHANGELOG.md SPONSORS.md .github/CODE_OF_CONDUCT.md .github/PULL_REQUEST_TEMPLATE.md .github/SUPPORT.md .github/FUNDING.yml .github/ISSUE_TEMPLATE"
+          fail: true
+
+  # ── Link check, online : the half `--offline` cannot see ──────────────────
+  # The offline job above resolves relative paths and skips every URL, so an
+  # external target that answers 404 passes it unseen. This job contacts them.
+  # Advisory on purpose: a third-party host that is down for five minutes must
+  # not turn main red, so the verdict is read, not blocked on.
+  links-online:
+    name: Doc Link Check, online (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      # patreon.com answers 403 to the checker whatever the page, so the two
+      # sponsor links were red on every run. A job that is always red stops
+      # being read, and the 403 says nothing about whether the page exists: the
+      # host is excluded rather than left to drown the reds that mean something.
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: "--no-progress --max-retries 2 --exclude '^https?://(www\\.)?patreon\\.com' README.md CONTRIBUTING.md SECURITY.md GOVERNANCE.md CHANGELOG.md SPONSORS.md .github/CODE_OF_CONDUCT.md .github/PULL_REQUEST_TEMPLATE.md .github/SUPPORT.md .github/FUNDING.yml .github/ISSUE_TEMPLATE"
+          fail: true
+
+  # ── Docs build : Docusaurus build on every PR (onBrokenLinks: throw) ───────
+  # Judge of the internal links of docs/site, routes and markdown links alike.
+  # Build-only: the hosting provider builds and publishes the site itself.
+  docs-build:
+    name: Docs Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: docs/site/package-lock.json
+      - name: Install dependencies
+        working-directory: docs/site
+        run: npm ci
+      # After the install on purpose: the guard reads the theme's English
+      # defaults from node_modules to spot a French message never translated.
+      - name: The i18n catalogue is complete in both locales
+        run: python3 scripts/check_i18n_catalogue.py
+      # Same reason as above, and the same frontier: the guard derives what each
+      # swizzled file should be from the plugin in node_modules, so it can only
+      # answer after the install. Without it the fork under docs/site/src/theme
+      # would keep rendering the version taken on the day it was made and no
+      # chain would say so.
+      - name: The swizzled search theme still matches the plugin
+        run: python3 scripts/check_swizzled_theme.py
+      - name: Build site (onBrokenLinks throw)
+        working-directory: docs/site
+        run: npm run build
+      # After the build on purpose: `onBrokenAnchors` defaults to warn, so the
+      # build alone says nothing about fragment links. This resolves them all
+      # against the rendered HTML.
+      - name: Every fragment link of the built site resolves
+        run: python3 scripts/check_docs_anchors.py docs/site/build
+
+  # ── Unused dependencies : keeps the Cargo graph honest ─────────────────────
+  machete:
+    name: Unused Deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2.83.0
+        with:
+          tool: cargo-machete
+      # Known false positives are allow-listed per crate via
+      # [package.metadata.cargo-machete] ignored, each with a lift note.
+      - run: cargo machete
+
+  # ── Fuzz smoke : build the cargo-fuzz targets and hammer the seed corpus ────
+  # The untrusted-input parsers (LLM output, web content, automation text, tool
+  # specs) are fuzzed with libFuzzer. Advisory for now (continue-on-error) so a
+  # freshly surfaced crash reports without blocking the PR; the deep run lives
+  # in nightly.yml. This cargo-fuzz integration is what the OpenSSF Scorecard
+  # Fuzzing check detects.
+  fuzz:
+    name: Fuzz (smoke, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      # cargo-fuzz builds targets with -Zsanitizer=address, which needs nightly.
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            cmake clang pkg-config
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: "fuzz -> target"
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2.83.0
+        with:
+          tool: cargo-fuzz
+      - name: Fuzz each target briefly over its seed corpus
+        run: |
+          set -euo pipefail
+          # --target is load-bearing: install-action ships cargo-fuzz as a
+          # statically linked musl binary, and cargo-fuzz defaults its build
+          # target to its own compile-time triple. Without the flag the build
+          # targets x86_64-unknown-linux-musl and dies on `libc` ("sanitizer
+          # is incompatible with statically linked libc", "can't find crate
+          # for `core`") before any objective runs.
+          for t in parse_automation confidence_parser gbnf web_read_extract truncation; do
+            echo "::group::fuzz $t"
+            # fuzz/corpus/ is gitignored (fuzz/.gitignore), so a fresh checkout
+            # has no corpus directory, and libFuzzer refuses to start when a
+            # corpus argument names a directory that does not exist.
+            mkdir -p fuzz/corpus/"$t"
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+              "$t" fuzz/corpus/"$t" fuzz/seeds/"$t" \
+              -- -max_total_time=60 -rss_limit_mb=4096
+            echo "::endgroup::"
+          done
+
+  # ── SemVer : guards the Rust public contract against silent API breaks ─────
+  # Advisory only for now: apollia-core / apollia-runtime are unpublished and
+  # pre-1.0, so this reports breaking changes against main rather than blocking.
+  # Blocking posture is revisited post-1.0 (see the release readiness notes).
+  # apollia-aip is intentionally excluded: its public contract is the Python
+  # surface (guarded by the SDK version + generated clients), not a Rust API.
+  semver-checks:
+    name: SemVer (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libssl-dev libasound2-dev libpulse-dev cmake clang pkg-config
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2.83.0
+        with:
+          tool: cargo-semver-checks
+      - name: cargo semver-checks (baseline = main)
+        run: |
+          cargo semver-checks --baseline-rev origin/main \
+            -p apollia-core -p apollia-runtime
+
+  # ── Python SDK : lint + format + supply chain (mypy lives in python-types) ──
+  python-quality:
+    name: Python Quality (SDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      # Pinned, and kept in lockstep with the ruff-pre-commit rev in
+      # .pre-commit-config.yaml. Unpinned, a new ruff release changes the rule
+      # set under the job and turns a green tree red without a commit.
+      - run: pip install ruff==0.15.15 pip-audit
+      # The two SDK-ruled subtrees plus scripts/: agents/ruff.toml extends
+      # sdk/pyproject.toml, scripts/ falls under the root ruff.toml (default
+      # rule set, check only, no format: a format pass would rewrite 33
+      # files in one move). The pre-commit ruff-check hook covers the same
+      # ^(sdk|agents|scripts)/ perimeter. Paths without a trailing slash on
+      # purpose: `sdk/ agents/` makes ruff walk past the .gitignore of
+      # sdk/build and judge generated files.
+      - name: ruff format --check
+        run: ruff format --check sdk agents
+      - name: ruff check
+        run: ruff check sdk agents scripts
+      # Installs the SDK so its resolved deps are the audit surface. The SDK is
+      # stdlib-only by design, so this surface is intentionally tiny.
+      - name: pip-audit (SDK supply chain)
+        run: |
+          pip install ./sdk
+          pip-audit
+
+  # ── Coverage : line-coverage floor, ratcheted up over time (never lowered) ──
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Set PYO3_PYTHON
+        run: echo "PYO3_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> $GITHUB_ENV
+      - name: Install system deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libxdo-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            cmake clang pkg-config
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2.83.0
+        with:
+          tool: cargo-llvm-cov
+      # The floor is set just below the measured baseline so the gate is green
+      # from day one, then ratcheted up. Full HTML report stays in nightly.yml.
+      # apollia-desktop and apollia-e2e-tests are excluded because neither builds
+      # under the coverage harness; tests/ and benches/ are ignored so the number
+      # reflects source coverage, not test code exercising itself.
+      - name: cargo llvm-cov (workspace, floor gate)
+        run: |
+          cargo llvm-cov --workspace \
+            --exclude apollia-e2e-tests --exclude apollia-desktop \
+            --ignore-filename-regex '(/tests/|/benches/)' \
+            --lcov --output-path lcov.info \
+            --fail-under-lines ${{ env.COVERAGE_FLOOR }}
+      # Per-crate floors on the five core crates TESTING.md names. A global
+      # floor cannot see one crate sink while the others float it: the
+      # workspace gate sat at 70 while apollia-runtime was at 72.90. Each
+      # floor is the measured baseline rounded down to the half point, and it
+      # ratchets up with the measure, never down.
+      #
+      # --all-features is per crate, and it is what makes the number honest.
+      # Without it, `-p apollia-core` never compiles src/net.rs, which lives
+      # behind the optional `net` feature, so the tests that file carries never
+      # run. The file reached the report anyway, at 0%: the workspace step
+      # above leaves its object files in the same llvm-cov target directory,
+      # apollia-runtime among them, and those carry apollia-core built with
+      # `net` on and no counter from this run. Those 123 phantom uncovered
+      # lines are what read apollia-core at 83.70% against its 85.0 floor on
+      # the first public run, while the same crate measured with its feature on
+      # sits above the floor. --all-features over the whole workspace stays
+      # impossible, because apollia-runner declares three mutually exclusive
+      # whisper backends, but none of the five crates gated here is
+      # apollia-runner and none of their features is exclusive.
+      - name: cargo llvm-cov (per-crate floor gates)
+        run: |
+          set -euo pipefail
+          for pair in apollia-core:85.0 apollia-oria:92.5 \
+                      apollia-permissions:91.0 apollia-memory:91.0 \
+                      apollia-runtime:72.5; do
+            crate="${pair%%:*}"
+            floor="${pair##*:}"
+            echo "::group::coverage floor ${crate} >= ${floor}"
+            cargo llvm-cov -p "${crate}" --all-features --summary-only \
+              --ignore-filename-regex '(/tests/|/benches/)' \
+              --fail-under-lines "${floor}"
+            echo "::endgroup::"
+          done
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: coverage-lcov
+          path: lcov.info

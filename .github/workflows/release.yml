@@ -1,0 +1,1956 @@
+# Release - production of the distributable artefacts.
+#
+# Triggered on a `v*` tag push (an official release), or through a manual
+# dispatch to test without bumping the version.
+#
+# Produces, in parallel:
+#   1. Six self-contained CLI archives (Python plus static CRT bundled), one
+#      per preset of the FULL matrix in the `setup` job below
+#      -> one tarball/zip per OS x arch x accelerator preset
+#   2. Desktop installers (Tauri 2), five jobs:
+#        macOS ARM64         : .dmg
+#        Linux x86_64        : .deb + .AppImage
+#        Windows x86_64      : .msi + .exe (NSIS)
+#        Linux x86_64 CUDA   : .deb + .AppImage
+#        Windows x86_64 CUDA : .msi + .exe (NSIS)
+#      Every desktop job embeds the same Python bundle (PyO3) as the CLI job.
+#
+# The final `release` job aggregates everything into a draft GitHub Release
+# (reviewed by hand before publication).
+#
+# Wall clock, cold: 35 to 40 min; warm cache: about 20 min.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      presets:
+        description: "CLI presets to build (comma-separated, e.g. macos-silicon,linux-x86-vulkan). 'all' = every one."
+        required: false
+        default: "all"
+      skip_desktop:
+        description: "Skip every desktop bundle (saves the whole desktop half when testing the CLI alone)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      desktop:
+        description: "Which desktop bundles to build. Narrowing one platform is how you iterate on it without paying for the others; the CUDA pair also drags in the llama-server compile."
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - "all"
+          - "macos"
+          - "linux"
+          - "linux-cuda"
+          - "windows"
+          - "windows-cuda"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least-privilege default. Only the final `release` job escalates (below).
+permissions:
+  contents: read
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Setup - computes the filtered CLI matrix (dynamic matrix).
+  #
+  # GH Actions does NOT support `matrix.preset` in a job-level `if:` (a parser
+  # limitation). The standard workaround: a light job that outputs the matrix
+  # JSON, then read back through `fromJSON(needs.setup.outputs.matrix)`.
+  # ────────────────────────────────────────────────────────────────────────────
+  setup:
+    name: Setup matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.compute.outputs.matrix }}
+      run_desktop: ${{ steps.compute.outputs.run_desktop }}
+      desktop: ${{ steps.compute.outputs.desktop }}
+    steps:
+      - id: compute
+        env:
+          PRESETS_INPUT: ${{ github.event.inputs.presets || 'all' }}
+          SKIP_DESKTOP: ${{ github.event.inputs.skip_desktop || 'false' }}
+          DESKTOP: ${{ github.event.inputs.desktop || 'all' }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          # Full preset matrix - single source of truth.
+          #
+          # `allow_fail` marks a preset as advisory: it still builds and uploads
+          # when it works, but its failure does not block the release. Exactly
+          # three presets are blocking, one per supported platform, which is what
+          # makes a tag able to produce a draft at all. Previously ten of the
+          # thirteen were blocking, so any single exotic accelerator failing took
+          # the whole release with it.
+          #
+          # The `local-*` / `stt-*` features now only select the whisper
+          # acceleration of the STT sidecar. Local LLM inference runs through the
+          # pinned llama-server binary, which upstream publishes per platform, so
+          # a GPU preset failing here costs STT acceleration, never inference.
+          # Archive names live in packaging/artifacts.json (the naming
+          # contract), never here: each job reads its name from the contract,
+          # so a preset absent from it fails loudly instead of shipping a
+          # name no consumer knows.
+          #
+          # Windows ARM carried two presets and carries none for 0.1.0. pandas
+          # publishes no win_arm64 wheel, so pip fell back to the source
+          # archive whose sum is not pinned and --require-hashes refused, which
+          # is the guard working. Building it from source on the runner would
+          # need a C toolchain and NumPy in place for an architecture that is
+          # in none of the three blocking platforms and that neither the
+          # gestural automaton nor a hand pass can reach. Removed rather than
+          # left permanently red: a job nobody can act on teaches an operator
+          # to read past red.
+          read -r -d '' FULL <<'JSON' || true
+          {
+            "include": [
+              {"preset":"macos-silicon",      "runner":"macos-latest",     "triple":"aarch64-apple-darwin",      "features":"local-metal"},
+              {"preset":"linux-x86-cpu",      "runner":"ubuntu-24.04",     "triple":"x86_64-unknown-linux-gnu",  "features":"local-cpu"},
+              {"preset":"windows-x86-cpu",    "runner":"windows-latest",   "triple":"x86_64-pc-windows-msvc",    "features":"local-cpu"},
+              {"preset":"linux-x86-vulkan",   "runner":"ubuntu-24.04",     "triple":"x86_64-unknown-linux-gnu",  "features":"local-vulkan", "needs_vulkan":true, "allow_fail":true},
+              {"preset":"linux-arm-cpu",      "runner":"ubuntu-24.04-arm", "triple":"aarch64-unknown-linux-gnu", "features":"local-cpu",    "allow_fail":true},
+              {"preset":"windows-x86-vulkan", "runner":"windows-latest",   "triple":"x86_64-pc-windows-msvc",    "features":"local-vulkan", "needs_vulkan":true, "allow_fail":true}
+            ]
+          }
+          JSON
+
+          if [[ "$EVENT_NAME" != "workflow_dispatch" || "$PRESETS_INPUT" == "all" || -z "$PRESETS_INPUT" ]]; then
+            MATRIX="$FULL"
+          else
+            # jq filter on PRESETS_INPUT (comma-separated)
+            MATRIX=$(echo "$FULL" | jq -c --arg p "$PRESETS_INPUT" \
+              '{include: [.include[] | select(.preset as $x | $p | split(",") | index($x))]}')
+          fi
+
+          echo "Matrix selected:"
+          echo "$MATRIX" | jq -r '.include[] | "  · " + .preset'
+
+          # GH Actions output: compact JSON (single line).
+          echo "matrix=$(echo "$MATRIX" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+          # Desktop gate. `skip_desktop` still turns the whole half off; the
+          # `desktop` choice then narrows what remains, so iterating on one
+          # bundle does not pay for the four others. A tag push takes every
+          # bundle: the filter is a manual-run affordance, never a release one.
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$SKIP_DESKTOP" == "true" ]]; then
+            echo "run_desktop=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_desktop=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "desktop=${DESKTOP}" >> "$GITHUB_OUTPUT"
+          else
+            echo "desktop=all" >> "$GITHUB_OUTPUT"
+          fi
+          echo "  desktop selection: ${DESKTOP}"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # CLI binaries (13 presets at most) - self-contained bundles with Python
+  # ────────────────────────────────────────────────────────────────────────────
+  cli:
+    name: CLI ${{ matrix.preset }}
+    needs: setup
+    if: needs.setup.outputs.matrix != '' && fromJSON(needs.setup.outputs.matrix).include[0] != null
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.allow_fail || false }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.triple }}
+
+      - name: Install Linux build deps
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            python3-dev clang cmake
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Vulkan SDK (Linux)
+        if: matrix.needs_vulkan && startsWith(matrix.runner, 'ubuntu')
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | \
+            sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/1.3.290 noble main" | \
+            sudo tee /etc/apt/sources.list.d/vulkan.list
+          sudo apt-get update -q
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.needs_vulkan && startsWith(matrix.runner, 'windows')
+        shell: pwsh
+        run: |
+          # The installer runs on the host that produces signed artifacts, so
+          # its integrity is pinned: the sha256 is verified before
+          # execution, sha256 computed from the archive at this URL.
+          $url = "https://sdk.lunarg.com/sdk/download/1.3.290.0/windows/VulkanSDK-1.3.290.0-Installer.exe"
+          $expected = "0ba0392a78157b82354157c5c988d74ddc6bc15573cc9c8653aa60245355fe8a"
+          Invoke-WebRequest -Uri $url -OutFile VulkanSDK.exe -UseBasicParsing
+          $actual = (Get-FileHash VulkanSDK.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+              throw "VulkanSDK.exe sha256 mismatch: expected $expected, got $actual"
+          }
+          Start-Process -FilePath ".\VulkanSDK.exe" -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait
+          $sdk = "C:\VulkanSDK\1.3.290.0"
+          echo "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+          echo "$sdk\Bin" >> $env:GITHUB_PATH
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.preset }}
+          shared-key: cli-binaries
+
+      # ── Python bundle (before cargo: PyO3 links against the bundled interpreter) ──
+      - name: Build Python bundle
+        shell: bash
+        run: |
+          mkdir -p target/python-bundle/${{ matrix.triple }}
+          bash packaging/build-python-bundle.sh \
+            ${{ matrix.triple }} \
+            target/python-bundle/${{ matrix.triple }}
+          # Two spellings of one directory, and the split is deliberate. The
+          # tests run under Git Bash on the Windows runners, where a native
+          # `D:\a\...` path is unreliable, so they stay relative. The values
+          # are read by rustc and PyO3, which are native binaries and cannot
+          # open the MSYS path `$(pwd)` would answer there.
+          REL="target/python-bundle/${{ matrix.triple }}/python"
+          NAT="${{ github.workspace }}/target/python-bundle/${{ matrix.triple }}/python"
+          if [ -x "$REL/bin/python3.13" ]; then
+            echo "PYO3_PYTHON=$NAT/bin/python3.13" >> $GITHUB_ENV
+          else
+            echo "PYO3_PYTHON=$NAT/python.exe" >> $GITHUB_ENV
+          fi
+          # python-build-standalone answers `sysconfig` with its build-time
+          # prefix, `LIBDIR=/install/lib`, a directory that exists on no runner.
+          # PyO3 turns that into the only link search path it emits, so the link
+          # dies on `-lpython3.13` while the library sits in the bundle. The two
+          # desktop jobs below already carry this flag; the CLI matrix never did,
+          # which is why they linked and it did not. Windows keeps its import
+          # library in `libs/`, the other two in `lib/`.
+          if [ -d "$REL/libs" ]; then
+            echo "RUSTFLAGS=-L $NAT/libs" >> $GITHUB_ENV
+          else
+            echo "RUSTFLAGS=-L $NAT/lib" >> $GITHUB_ENV
+          fi
+
+      # ── Build ─────────────────────────────────────────────────────────────
+      # Since the multi-runner refactor, apollia-cli exposes no backend
+      # feature: the cloud clients are unconditional. `matrix.features` now
+      # carries only the runner backend, read by the "Extract runner feature"
+      # step below. Every name there is declared in a Cargo.toml: an invented
+      # name builds nothing.
+      # Windows: +crt-static through .cargo/config.toml plus
+      # CMAKE_MSVC_RUNTIME_LIBRARY, to align /MT on the apollia-runner side.
+      - name: Build CLI
+        shell: bash
+        env:
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+        run: |
+          cargo build --release -p apollia-cli \
+            --target ${{ matrix.triple }} \
+            --no-default-features
+
+      # Build apollia-runner with the matching backend feature.
+      # Extracts local-{cpu,cuda,rocm,vulkan,metal} from matrix.features.
+      # For the presets with no local-* (cloud only), no runner is built.
+      - name: Extract runner feature
+        id: runner_feat
+        shell: bash
+        run: |
+          FEAT=$(echo "${{ matrix.features }}" | tr ',' '\n' | grep -E '^local-(cpu|cuda|rocm|vulkan|metal)$' | head -1 || true)
+          echo "feature=$FEAT" >> "$GITHUB_OUTPUT"
+          if [ -n "$FEAT" ]; then
+            BACKEND=${FEAT#local-}
+            echo "backend=$BACKEND" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build apollia-runner
+        if: steps.runner_feat.outputs.feature != ''
+        shell: bash
+        env:
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+        run: |
+          cargo build --release -p apollia-runner \
+            --target ${{ matrix.triple }} \
+            --no-default-features \
+            --features "${{ steps.runner_feat.outputs.feature }}"
+
+      - name: Strip binary (Linux)
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          strip target/${{ matrix.triple }}/release/apollia-os
+          if [ -f target/${{ matrix.triple }}/release/apollia-runner ]; then
+            strip target/${{ matrix.triple }}/release/apollia-runner
+          fi
+
+      # ── Package self-contained ────────────────────────────────────────────
+      # The archive name comes from the naming contract, the same file
+      # `apollia-os update` embeds at build time. A preset missing from the
+      # contract is a red here, not a name invented on the spot.
+      - name: Read the archive name from the naming contract
+        id: contract
+        shell: bash
+        run: |
+          NAME=$(jq -r --arg p "${{ matrix.preset }}" \
+            '.cli[] | select(.preset == $p) | .archive' packaging/artifacts.json)
+          if [ -z "$NAME" ] || [ "$NAME" = "null" ]; then
+            echo "::error::preset ${{ matrix.preset }} is absent from packaging/artifacts.json"
+            exit 1
+          fi
+          echo "archive=$NAME" >> "$GITHUB_OUTPUT"
+
+      # The self-contained promise includes the inference engine. Exit 2 means
+      # the pinned upstream release has no build for this couple: the bundle
+      # ships without it, and its README says so instead of implying it.
+      - name: Stage the llama-server engine
+        shell: bash
+        env:
+          RUNNER_BACKEND: ${{ steps.runner_feat.outputs.backend }}
+        run: |
+          STAGE="target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}"
+          mkdir -p "$STAGE"
+          set +e
+          bash packaging/fetch-llama-server.sh "$RUNNER_BACKEND" "$STAGE/runners"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "LLAMA_BUNDLED=1" >> "$GITHUB_ENV"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::warning::no upstream llama-server build for preset ${{ matrix.preset }}; the bundle ships without the embedded engine"
+            echo "LLAMA_BUNDLED=0" >> "$GITHUB_ENV"
+          else
+            exit "$rc"
+          fi
+
+      - name: Assemble bundle (Unix)
+        if: runner.os != 'Windows'
+        env:
+          RUNNER_BACKEND: ${{ steps.runner_feat.outputs.backend }}
+        run: |
+          STAGE="target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}"
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.triple }}/release/apollia-os "$STAGE/apollia-os"
+          cp packaging/launchers/apollia-os.sh "$STAGE/apollia-os.sh"
+          chmod +x "$STAGE/apollia-os.sh"
+          cp -R target/python-bundle/${{ matrix.triple }}/python "$STAGE/python"
+          # Includes the runner matching the preset backend, when it was built.
+          if [ -n "$RUNNER_BACKEND" ] && [ -f "target/${{ matrix.triple }}/release/apollia-runner" ]; then
+            cp "target/${{ matrix.triple }}/release/apollia-runner" "$STAGE/apollia-runner-$RUNNER_BACKEND"
+            chmod +x "$STAGE/apollia-runner-$RUNNER_BACKEND"
+            echo "  Runner bundled: apollia-runner-$RUNNER_BACKEND"
+          fi
+          if [ "${LLAMA_BUNDLED:-0}" = "1" ]; then
+            ENGINE=" + llama-server engine"
+            ENGINE_NOTE=""
+          else
+            ENGINE=""
+            ENGINE_NOTE="Note: the llama-server engine is not bundled for this preset (no upstream build); the daemon uses a llama-server found on PATH."
+          fi
+          cat > "$STAGE/README.txt" <<EOF
+          Apollia OS ${{ matrix.preset }} - self-contained bundle
+          ========================================================
+          Run   : ./apollia-os.sh start
+          Doc   : https://docs.apollia.fr/how-to/install-and-run
+          Included: apollia-os daemon + sidecar runner ($RUNNER_BACKEND)$ENGINE + Python 3.13.
+          Required: an up-to-date GPU driver for a GPU preset.
+          $ENGINE_NOTE
+          EOF
+          ARCHIVE="${{ steps.contract.outputs.archive }}"
+          cd target/${{ matrix.triple }}/bundle
+          tar -czf "$ARCHIVE" apollia-os-${{ matrix.preset }}/
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+
+      - name: Assemble bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RUNNER_BACKEND: ${{ steps.runner_feat.outputs.backend }}
+        run: |
+          $stage = "target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.triple }}/release/apollia-os.exe" "$stage/apollia-os.exe"
+          Copy-Item "packaging/launchers/apollia-os.bat" "$stage/apollia-os.bat"
+          Copy-Item -Recurse "target/python-bundle/${{ matrix.triple }}/python/*" "$stage/"
+          $rb = "${env:RUNNER_BACKEND}"
+          if ($rb -and (Test-Path "target/${{ matrix.triple }}/release/apollia-runner.exe")) {
+              Copy-Item "target/${{ matrix.triple }}/release/apollia-runner.exe" "$stage/apollia-runner-$rb.exe"
+              Write-Host "  Runner bundled : apollia-runner-$rb.exe"
+          }
+          if ("${env:LLAMA_BUNDLED}" -eq "1") {
+              $engine = " + llama-server engine"
+              $engineNote = ""
+          } else {
+              $engine = ""
+              $engineNote = "Note: the llama-server engine is not bundled for this preset (no upstream build); the daemon uses a llama-server found on PATH."
+          }
+          @"
+          Apollia OS ${{ matrix.preset }} - self-contained bundle
+          ========================================================
+          Run   : apollia-os.bat start
+          Doc   : https://docs.apollia.fr/how-to/install-and-run
+          Included: apollia-os.exe daemon + sidecar runner ($rb)$engine + Python 3.13 + static CRT.
+          Required: an up-to-date GPU driver. No VC++ Redist needed.
+          $engineNote
+          "@ | Out-File "$stage/README.txt" -Encoding ASCII
+          $archive = "${{ steps.contract.outputs.archive }}"
+          Push-Location "target/${{ matrix.triple }}/bundle"
+          Compress-Archive -Path "apollia-os-${{ matrix.preset }}" -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash
+          "$hash  $archive" | Out-File "$archive.sha256" -Encoding ASCII
+          Pop-Location
+
+      # ── SBOM (whole bundle : Rust crates + embedded CPython) ────────────────
+      # The release published eighteen deliverables that nothing had ever
+      # started. This runs the bundle this job just assembled, through the
+      # launcher a user runs, under a throwaway home so it depends on no state
+      # and leaves none. It is placed after assembly on purpose: the binary
+      # alone cannot start on macOS, where its libpython is linked at
+      # `@executable_path/../Resources/python/lib`, a path only the packaged
+      # layout answers. What is asserted is thin, that the thing starts, names
+      # itself and answers its command surface; what it catches is the class
+      # that ships broken and is found by a user.
+      - name: Smoke the bundle this job just assembled
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}"
+          # The launcher is the entry point the archive documents and a user
+          # runs: it points the binary at the interpreter beside it and at the
+          # library that interpreter needs. Running the binary alone is not the
+          # shipped contract and does not start on macOS.
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            LAUNCH=(cmd //c "$(cygpath -w "$STAGE/apollia-os.bat")")
+            PROBE="$STAGE/apollia-os.bat"
+          else
+            LAUNCH=("$STAGE/apollia-os.sh")
+            PROBE="$STAGE/apollia-os.sh"
+          fi
+          if [ ! -f "$PROBE" ]; then
+            echo "::error::$PROBE is not in the assembled bundle"
+            ls -la "$STAGE" || true
+            exit 1
+          fi
+          HOME_DIR="$(mktemp -d)"
+          export HOME="$HOME_DIR" USERPROFILE="$HOME_DIR"
+          echo "== version"
+          "${LAUNCH[@]}" --version
+          "${LAUNCH[@]}" --version | grep -q "apollia-os" || {
+            echo "::error::--version does not name the binary"; exit 1; }
+          echo "== help"
+          "${LAUNCH[@]}" --help > /dev/null
+          echo "== doctor, machine readable"
+          "${LAUNCH[@]}" doctor --json > doctor.json
+          python3 -c "import json,sys; d=json.load(open('doctor.json')); n=len(d['checks']); print(f'{n} check(s)'); sys.exit(0 if n else 1)"
+          rm -rf "$HOME_DIR" doctor.json
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}
+          format: cyclonedx-json
+          output-file: target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}.cdx.json
+          upload-artifact: false
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}
+          format: spdx-json
+          output-file: target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}.spdx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: apollia-os-${{ matrix.preset }}
+          path: |
+            target/${{ matrix.triple }}/bundle/${{ steps.contract.outputs.archive }}
+            target/${{ matrix.triple }}/bundle/${{ steps.contract.outputs.archive }}.sha256
+            target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}.cdx.json
+            target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # llama-server with CUDA for Linux, built here because upstream ships none.
+  # ────────────────────────────────────────────────────────────────────────────
+  # llama.cpp publishes a CUDA engine for Windows and none for Linux: of the 25
+  # assets on the pinned tag, `ubuntu-*` covers cpu, vulkan, rocm, sycl and
+  # openvino, and stops there. Their dated CUDA container images stop around
+  # b9002, a thousand builds behind the tag this workspace pins, so pulling one
+  # would either move under us or ship Linux users a different llama.cpp from
+  # everyone else. Compiling it here is what remains, and it is the ordinary
+  # thing to do: the toolkit installs, the cmake invocation is upstream's own.
+  #
+  # The cost is stated rather than hidden: nvcc compiles the kernels once per
+  # architecture, so this job is the long pole of a release run.
+  #
+  # The architecture list is a product decision, not a default. Real SASS for
+  # Turing (75), A100 (80), Ampere consumer (86) and Ada (89), which together
+  # cover every consumer card from the RTX 20 series on and the datacenter part
+  # people actually rent, plus virtual 90 so a newer card still runs through
+  # PTX rather than refusing to start. Cards older than Turing are out: adding
+  # them costs build time on every release for hardware that cannot hold a
+  # useful model anyway.
+  llama-cuda-linux:
+    name: llama-server CUDA (Linux x86_64)
+    needs: setup
+    if: needs.setup.outputs.run_desktop == 'true' && (needs.setup.outputs.desktop == 'all' || needs.setup.outputs.desktop == 'linux-cuda')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install the CUDA toolkit
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: '12.6.0'
+          method: 'network'
+          sub-packages: '["nvcc","cudart","thrust"]'
+          non-cuda-sub-packages: '["libcublas","libcublas-dev","libcurand","libcurand-dev"]'
+          use-github-cache: true
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y build-essential cmake git libcurl4-openssl-dev
+
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      # The tag is read from the packaging script rather than repeated here, so
+      # the engine this job builds and the engine every other platform downloads
+      # can never drift apart silently.
+      - name: Read the pinned llama.cpp tag
+        id: tag
+        run: |
+          TAG=$(grep -oE 'b[0-9]{4,6}' packaging/fetch-llama-server.sh | head -1)
+          [ -n "$TAG" ] || { echo "no pinned llama.cpp tag in packaging/fetch-llama-server.sh" >&2; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build llama.cpp with CUDA
+        run: |
+          git clone --depth 1 --branch "${{ steps.tag.outputs.tag }}" \
+            https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+          cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_CUDA=ON \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="75-real;80-real;86-real;89-real;90-virtual"
+          # `$ORIGIN` on the install RPATH, and it is not cosmetic. CMake strips
+          # the build tree's RPATH when it installs, which the install log said
+          # in as many words: `Set non-toolchain portion of runtime path of
+          # ... to ""`. A library with no RPATH cannot be found beside the file
+          # that needs it, so the AppImage bundler stopped on
+          # `Could not find dependency: libllama.so.0` while deploying
+          # `libllama-common.so.0` from the same directory, and a user's loader
+          # would have stopped the same way. The upstream archives this job
+          # replaces carry `$ORIGIN`, which is why the Vulkan bundle never hit
+          # this.
+          #
+          # Everything the configuration declares, not just the one target.
+          # `cmake --install` runs the install rules of every subdirectory
+          # configured, and stops on the first artefact that was never built:
+          # with `--target llama-server` it stopped on
+          # `cannot find build/bin/libllama-batched-bench-impl.so`.
+          #
+          # The tools cannot simply be configured away. `tools/` is gated on
+          # LLAMA_BUILD_TOOLS and the server lives inside it, so turning tools
+          # off removes what this job exists to produce. Nor can the install be
+          # split: `install(TARGETS llama ...)` sits in the root CMakeLists,
+          # whose install script includes the tools one.
+          #
+          # The extra targets are CPU-side C++ linking against libllama. The
+          # CUDA kernels above dominate this job and are built once either way.
+          cmake --build /tmp/llama.cpp/build --config Release -j"$(nproc)"
+
+      # What ships is what the server needs, walked from the server outwards.
+      #
+      # `cmake --install` lays down everything the project declares, which after
+      # the full build above includes seven tool libraries this release does not
+      # ship: quantize, bench, cli, perplexity and their siblings. Copying the
+      # whole install tree put them in the bundle, and one of them dragged the
+      # AppImage bundler into resolving a CUDA driver library on a runner that
+      # has no driver.
+      #
+      # So the rule is a closure rather than a copy: start at `llama-server`,
+      # take what it asks for, take what those ask for, and stop when a pass adds
+      # nothing. Two source directories feed it, the llama.cpp install tree and
+      # the CUDA toolkit, because the answer to "where does this library live"
+      # differs for the two and the walk should not have to care.
+      #
+      # `libcuda.so.1` is skipped by name: it belongs to the NVIDIA driver, it
+      # ships with the driver on the machine that has the GPU, and copying it
+      # would pin every user to the driver version of a CI runner.
+      #
+      # `cp -L` flattens each symlink chain into one real file named after the
+      # SONAME the loader asks for, which is all $ORIGIN resolution needs.
+      #
+      # Flat, because LLAMA_SERVER_DIR expects the server and its libraries in
+      # one directory, which is also how the upstream archives are laid out.
+      - name: Stage the engine and everything it asks for
+        run: |
+          cmake --install /tmp/llama.cpp/build --prefix /tmp/llama-install
+          mkdir -p engine
+          cp -L /tmp/llama-install/bin/llama-server engine/
+          cd engine
+
+          search_dirs="/tmp/llama-install/lib /tmp/llama-install/bin"
+          for d in "${CUDA_PATH}/lib64" "${CUDA_PATH}/targets/x86_64-linux/lib"; do
+            [ -d "$d" ] && search_dirs="$search_dirs $d"
+          done
+          echo "searching: $search_dirs"
+
+          added=1
+          rounds=0
+          while [ "$added" -ne 0 ]; do
+            added=0
+            rounds=$((rounds + 1))
+            if [ "$rounds" -gt 20 ]; then
+              echo "::error::the dependency closure did not settle in 20 rounds"
+              exit 1
+            fi
+            for f in llama-server *.so*; do
+              [ -e "$f" ] || continue
+              for need in $(readelf -d "$f" 2>/dev/null | awk '/NEEDED/ {gsub(/[][]/,"",$5); print $5}'); do
+                [ "$need" = "libcuda.so.1" ] && continue
+                [ -e "$need" ] && continue
+                src=""
+                for d in $search_dirs; do
+                  cand=$(find "$d" -maxdepth 1 -name "$need" 2>/dev/null | head -1)
+                  [ -n "$cand" ] && { src="$cand"; break; }
+                done
+                # Not every NEEDED entry is ours to ship: libc and its friends
+                # come from the machine. Only a name we can find in one of the
+                # directories above is staged, and the check that follows is
+                # what decides whether a name we did not find is a defect.
+                [ -n "$src" ] || continue
+                cp -L "$src" .
+                echo "  staged ${need} for ${f}"
+                added=$((added + 1))
+              done
+            done
+          done
+          echo "closure settled after ${rounds} round(s)"
+          ls -la
+          echo "engine size: $(du -sh . | cut -f1)"
+          du -h --threshold=1M . 2>/dev/null | sort -h | tail -8 || true
+
+      # Every library the staged files ask for must reach the machine that runs
+      # them. Without this the answer arrives fifteen minutes later and one job
+      # away, from a bundler walking the AppDir, which is how the missing SONAME
+      # above was found the first time. `readelf -d` names what each file needs,
+      # and each name is answered here rather than on a user's machine.
+      #
+      # Two names cannot be judged by "is it on this runner", and the split is
+      # the whole point of this step:
+      #
+      #   - `libcuda.so.1` belongs to the NVIDIA driver, not to the toolkit. It
+      #     ships with the driver on the machine that has the GPU, and copying
+      #     it into a release would pin users to this runner's driver version.
+      #     It is legitimately absent here, where there is a toolkit and no GPU.
+      #
+      #   - the toolkit's own libraries are the mirror image: present on this
+      #     runner and on almost no user machine. Finding one in the loader
+      #     cache here proves nothing about where the engine will run, so they
+      #     are required to be staged rather than accepted as found.
+      #
+      # Each entry prints how it resolved, so the next failure reads as a
+      # verdict rather than as a name with no context.
+      - name: Refuse an engine whose libraries are not all here
+        run: |
+          cd engine
+          driver_provided='libcuda.so.1'
+          toolkit_prefixes='libcudart libcublas libcublasLt libcufft libcurand
+                            libcusparse libcusolver libnvJitLink libnvrtc'
+          missing=""
+          for f in llama-server *.so*; do
+            [ -e "$f" ] || continue
+            for need in $(readelf -d "$f" 2>/dev/null | awk '/NEEDED/ {gsub(/[][]/,"",$5); print $5}'); do
+              if printf '%s\n' $driver_provided | grep -qx "$need"; then
+                echo "  ${f} needs ${need}: comes from the NVIDIA driver on the target machine"
+                continue
+              fi
+              if [ -e "$need" ]; then
+                echo "  ${f} needs ${need}: staged beside it"
+                continue
+              fi
+              staged_check_done=""
+              for prefix in $toolkit_prefixes; do
+                case "$need" in
+                  "${prefix}".so*)
+                    echo "::error::${f} needs ${need}, a CUDA toolkit library that is not staged beside it. This runner has the toolkit and a user machine does not, so it has to ship with the engine."
+                    missing="yes"
+                    staged_check_done="yes"
+                    break
+                    ;;
+                esac
+              done
+              [ -z "$staged_check_done" ] || continue
+              if ldconfig -p | awk '{print $1}' | grep -qx "$need"; then
+                echo "  ${f} needs ${need}: in the system loader cache"
+                continue
+              fi
+              echo "::error::${f} needs ${need}, which is neither staged beside it nor on the system"
+              missing="yes"
+            done
+          done
+          [ -z "$missing" ] || exit 1
+          echo "every NEEDED entry of the staged engine resolves"
+
+          # A sibling that exists is not a sibling that is found. `cmake
+          # --install` clears the RPATH it built with, and a file with none is
+          # searched for only in the system cache: the AppImage bundler stopped
+          # on `Could not find dependency: libllama.so.0` while deploying
+          # `libllama-common.so.0` out of the same directory, and a user's
+          # loader would have done the same. Every file that needs a sibling
+          # must therefore say where to look, and the answer is `$ORIGIN`
+          # because this directory is flat.
+          rootless=""
+          for f in llama-server *.so*; do
+            [ -e "$f" ] || continue
+            needs_sibling=""
+            for need in $(readelf -d "$f" 2>/dev/null | awk '/NEEDED/ {gsub(/[][]/,"",$5); print $5}'); do
+              [ -e "$need" ] && needs_sibling="yes"
+            done
+            [ -n "$needs_sibling" ] || continue
+            if ! readelf -d "$f" 2>/dev/null | grep -qE '\(RUNPATH\)|\(RPATH\)'; then
+              echo "::error::${f} loads a library from this directory and carries no RUNPATH, so nothing will find it"
+              rootless="yes"
+            elif ! readelf -d "$f" 2>/dev/null | grep -E '\(RUNPATH\)|\(RPATH\)' | grep -q 'ORIGIN'; then
+              echo "::error::${f} carries a RUNPATH that does not mention \$ORIGIN, so it will not look beside itself"
+              rootless="yes"
+            fi
+          done
+          [ -z "$rootless" ] || exit 1
+          echo "every file that needs a sibling looks beside itself"
+          # Not run here: without an NVIDIA driver the loader cannot satisfy
+          # libcuda.so.1, so a failure would say nothing about the build.
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: llama-server-cuda-linux-x86_64
+          path: engine/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Desktop bundle Tauri - macOS ARM64 .dmg (extension future : Linux/Win)
+  # ────────────────────────────────────────────────────────────────────────────
+  desktop-macos:
+    name: Desktop macOS (ARM64)
+    needs: setup
+    if: needs.setup.outputs.run_desktop == 'true' && (needs.setup.outputs.desktop == 'all' || needs.setup.outputs.desktop == 'macos')
+    runs-on: macos-latest
+    env:
+      # Deliberately not named APPLE_SIGNING_IDENTITY. The Tauri bundler reads
+      # that variable and takes it over the `signingIdentity` pinned in
+      # tauri.conf.json, and a variable defined-but-empty is still a value to
+      # it: it signed with the identity "" and stopped on "no identity found".
+      # A build without the Apple secrets must produce an ad hoc bundle, so the
+      # real variable is exported below, only once it has content.
+      APPLE_IDENTITY_INPUT: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: desktop-macos-arm64
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Install frontend deps
+        working-directory: crates/apollia-desktop/ui
+        run: npm ci
+
+      - name: Build Python bundle (aarch64-apple-darwin)
+        run: |
+          ./packaging/build-python-bundle.sh aarch64-apple-darwin \
+            target/python-bundle/aarch64-apple-darwin
+
+      # `createUpdaterArtifacts: true` + `pubkey` make `cargo tauri build`
+      # demand TAURI_SIGNING_PRIVATE_KEY. The build must finish either way:
+      # with the secret it emits updater artifacts, without it it builds with
+      # createUpdaterArtifacts=false and the run summary says so. Configuring
+      # the secret stays a human act.
+      - name: Guard the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not configured: building with createUpdaterArtifacts=false, this build ships no updater artifact"
+            echo "TAURI_SIGNING_PRIVATE_KEY absent : createUpdaterArtifacts=false, no updater artifact" >> "$GITHUB_STEP_SUMMARY"
+            echo 'TAURI_BUNDLE_CONFIG={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+          fi
+
+      # Tauri reads the APPLE_* variables itself: it imports the certificate
+      # into a temporary keychain, signs the .app (hardened runtime and
+      # entitlements from tauri.conf.json), then notarizes and staples it,
+      # all BEFORE the .dmg is sealed from that .app. The previous shape
+      # re-signed the .app on disk after the build, so the sealed .dmg kept
+      # the ad hoc payload and notarization could only refuse it.
+      - name: Prepare Apple Developer ID signing (if secrets present)
+        if: env.APPLE_IDENTITY_INPUT != '' && env.APPLE_API_KEY_P8_BASE64 != ''
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          echo "$APPLE_API_KEY_P8_BASE64" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
+          {
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_IDENTITY_INPUT"
+            echo "APPLE_CERTIFICATE=$APPLE_CERT_P12_BASE64"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERT_PASSWORD"
+            echo "APPLE_API_KEY=$APPLE_API_KEY_ID"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Tauri app
+        working-directory: crates/apollia-desktop
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/target/python-bundle/aarch64-apple-darwin/python/bin/python3.13
+          RUSTFLAGS: -L ${{ github.workspace }}/target/python-bundle/aarch64-apple-darwin/python/lib
+          APOLLIA_DESKTOP_RUNNERS: "cpu metal"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          PATCH="${TAURI_BUNDLE_CONFIG:-}"
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            # tauri.conf.json pins the ad hoc identity "-"; a merge-patch null
+            # hands the choice back to APPLE_SIGNING_IDENTITY.
+            [ -n "$PATCH" ] || PATCH='{}'
+            PATCH=$(jq -c '.bundle.macOS.signingIdentity = null' <<<"$PATCH")
+          fi
+          if [ -n "$PATCH" ]; then
+            cargo tauri build --target aarch64-apple-darwin --config "$PATCH"
+          else
+            cargo tauri build --target aarch64-apple-darwin
+          fi
+
+      # The libpython relocation runs before bundling (beforeBundleCommand,
+      # scripts/patch-prebundle-libpython.sh), so what Tauri signs is what the
+      # .dmg carries. This verification renders a verdict: no `|| true`.
+      - name: Verify the .app signature
+        run: |
+          codesign --verify --verbose=2 \
+            "target/aarch64-apple-darwin/release/bundle/macos/Apollia OS.app"
+
+      # When the signing key is present, `cargo tauri build` emits the updater
+      # archive and its minisign signature next to the .app. Stage them beside
+      # the .dmg so one upload carries everything; their absence is the no-key
+      # build and is said out loud, because latest.json is composed from the
+      # signatures the release job receives.
+      - name: Collect updater artifacts
+        shell: bash
+        run: |
+          BUNDLE=target/aarch64-apple-darwin/release/bundle
+          if [ -f "$BUNDLE/macos/Apollia OS.app.tar.gz.sig" ]; then
+            cp "$BUNDLE/macos/Apollia OS.app.tar.gz" \
+               "$BUNDLE/macos/Apollia OS.app.tar.gz.sig" "$BUNDLE/dmg/"
+          else
+            echo "::warning::no macOS updater artifact (TAURI_SIGNING_PRIVATE_KEY absent): latest.json will not cover darwin-aarch64"
+          fi
+          # GitHub rewrites any character outside [A-Za-z0-9._-] in a release
+          # asset name, so "Apollia OS_..." is served as "Apollia.OS_...". The
+          # file is renamed here rather than the name being guessed downstream:
+          # one name from the runner to the download URL, and a contract a
+          # guard can check on disk.
+          for f in "$BUNDLE/dmg"/"Apollia OS"*; do
+            [ -e "$f" ] || continue
+            mv "$f" "$BUNDLE/dmg/$(basename "$f" | sed 's/^Apollia OS/Apollia-OS/')"
+          done
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/aarch64-apple-darwin/release/bundle
+          format: cyclonedx-json
+          output-file: target/aarch64-apple-darwin/release/bundle/dmg/apollia-desktop-macos-arm64.cdx.json
+          upload-artifact: false
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/aarch64-apple-darwin/release/bundle
+          format: spdx-json
+          output-file: target/aarch64-apple-darwin/release/bundle/dmg/apollia-desktop-macos-arm64.spdx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: apollia-desktop-macos-arm64-dmg
+          path: |
+            target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            target/aarch64-apple-darwin/release/bundle/dmg/*.app.tar.gz
+            target/aarch64-apple-darwin/release/bundle/dmg/*.app.tar.gz.sig
+            target/aarch64-apple-darwin/release/bundle/dmg/apollia-desktop-macos-arm64.cdx.json
+            target/aarch64-apple-darwin/release/bundle/dmg/apollia-desktop-macos-arm64.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Desktop bundle Tauri - Linux x86_64 (.deb + .AppImage)
+  # ────────────────────────────────────────────────────────────────────────────
+  desktop-linux:
+    name: Desktop Linux (x86_64)
+    needs: setup
+    if: needs.setup.outputs.run_desktop == 'true' && (needs.setup.outputs.desktop == 'all' || needs.setup.outputs.desktop == 'linux')
+    # Pinned to 24.04 (noble), the same base as the Linux CLI builds; GitHub
+    # retires the 22.04 image on 2026-09-17.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Tauri / Linux build deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libxdo-dev curl wget file \
+            python3-dev clang cmake \
+            patchelf librsvg2-common libgdk-pixbuf2.0-bin desktop-file-utils
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: desktop-linux-x86_64
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Install frontend deps
+        working-directory: crates/apollia-desktop/ui
+        run: npm ci
+
+      - name: Build Python bundle (x86_64-unknown-linux-gnu)
+        run: |
+          ./packaging/build-python-bundle.sh x86_64-unknown-linux-gnu \
+            target/python-bundle/x86_64-unknown-linux-gnu
+
+      # `createUpdaterArtifacts: true` + `pubkey` make `cargo tauri build`
+      # demand TAURI_SIGNING_PRIVATE_KEY. The build must finish either way:
+      # with the secret it emits updater artifacts, without it it builds with
+      # createUpdaterArtifacts=false and the run summary says so. Configuring
+      # the secret stays a human act.
+      - name: Guard the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not configured: building with createUpdaterArtifacts=false, this build ships no updater artifact"
+            echo "TAURI_SIGNING_PRIVATE_KEY absent : createUpdaterArtifacts=false, no updater artifact" >> "$GITHUB_STEP_SUMMARY"
+            echo 'TAURI_BUNDLE_CONFIG={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Tauri app
+        working-directory: crates/apollia-desktop
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/target/python-bundle/x86_64-unknown-linux-gnu/python/bin/python3.13
+          RUSTFLAGS: -L ${{ github.workspace }}/target/python-bundle/x86_64-unknown-linux-gnu/python/lib
+          APOLLIA_DESKTOP_RUNNERS: "cpu"
+          # The inference engine is Vulkan here, and the STT runner stays CPU.
+          # Vulkan reaches NVIDIA, AMD and Intel from one 32 MB binary, where
+          # the CUDA engine covers NVIDIA alone, weighs 238 MB plus a 373 MB
+          # runtime, and falls back to the CPU on every other card. whisper-rs
+          # has no Vulkan backend, so the STT side has nothing to gain here.
+          APOLLIA_DESKTOP_LLAMA_BACKEND: "vulkan"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # linuxdeploy and its appimage plugin are themselves AppImages, and
+          # an AppImage mounts itself through FUSE 2, which Ubuntu 24.04 does
+          # not ship and whose fallback it blocks by restricting unprivileged
+          # user namespaces. Both ran and died without a word: tauri reports
+          # `failed to run linuxdeploy` and swallows the child's stderr, so the
+          # bundle step spent fifteen seconds producing no diagnosis at all.
+          # This variable makes an AppImage unpack into a temporary directory
+          # and run from there, which needs neither FUSE nor a namespace.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          # --verbose so the bundler passes its children's output through
+          # instead of swallowing it: `failed to run linuxdeploy` twice with no
+          # cause attached is what this flag exists to stop.
+          if [ -n "${TAURI_BUNDLE_CONFIG:-}" ]; then
+            cargo tauri build --verbose --target x86_64-unknown-linux-gnu --config "$TAURI_BUNDLE_CONFIG"
+          else
+            cargo tauri build --verbose --target x86_64-unknown-linux-gnu
+          fi
+
+      # Flat staging: actions/upload-artifact roots the artifact at the
+      # longest common ancestor of its paths, so uploading deb/*.deb and
+      # appimage/*.AppImage as-is buries the installers in sub-folders the
+      # release job's flat globs never see. An unmatched glob here fails the
+      # copy, loudly.
+      # linuxdeploy runs as a child of `cargo tauri build`, which captures its
+      # output and reports only `failed to run linuxdeploy`. Two runs have now
+      # died on that sentence with no cause attached, so this step exists to
+      # take the cause out of the bundler's hands: it runs only on failure, and
+      # replays whatever the bundler left on disk with the output going to the
+      # log instead of into a pipe.
+      #
+      # `|| true` throughout, deliberately: this step reports, it does not
+      # judge. The build step above already failed the job.
+      - name: Say why linuxdeploy failed
+        if: failure()
+        run: |
+          BUNDLE=target/x86_64-unknown-linux-gnu/release/bundle/appimage
+          echo "=== what the bundler left behind"
+          ls -la "$BUNDLE" 2>/dev/null || echo "  no appimage directory at all"
+          echo "=== the AppDir"
+          find "$BUNDLE" -maxdepth 2 -name '*.AppDir' -printf '%p\n' 2>/dev/null || true
+          echo "=== the script the bundler generated, replayed with tracing"
+          SCRIPT=$(find "$BUNDLE" -maxdepth 2 -name 'build_appimage.sh' 2>/dev/null | head -1)
+          if [ -n "$SCRIPT" ]; then
+            echo "  replaying $SCRIPT"
+            ( cd "$(dirname "$SCRIPT")" && bash -x "$(basename "$SCRIPT")" 2>&1 | tail -80 ) || true
+          else
+            echo "  no build_appimage.sh; running linuxdeploy directly"
+            LD=$(find "$BUNDLE" ~/.cache/tauri -maxdepth 2 -name 'linuxdeploy-x86_64.AppImage' 2>/dev/null | head -1)
+            APPDIR=$(find "$BUNDLE" -maxdepth 2 -name '*.AppDir' 2>/dev/null | head -1)
+            if [ -n "$LD" ] && [ -n "$APPDIR" ]; then
+              chmod +x "$LD" || true
+              "$LD" --appdir "$APPDIR" --plugin gtk --output appimage 2>&1 | tail -80 || true
+            else
+              echo "  found neither linuxdeploy ($LD) nor an AppDir ($APPDIR)"
+            fi
+          fi
+          echo "=== the tools the plugin looks for"
+          for t in patchelf gdk-pixbuf-query-loaders gtk-update-icon-cache desktop-file-validate; do
+            printf '  %-28s %s\n' "$t" "$(command -v "$t" || echo ABSENT)"
+          done
+          echo "=== the pkg-config modules it queries"
+          for m in gdk-pixbuf-2.0 librsvg-2.0 pango pangocairo pangoft2 gobject-2.0 gio-2.0; do
+            printf '  %-18s %s\n' "$m" "$(pkg-config --modversion "$m" 2>/dev/null || echo ABSENT)"
+          done
+
+      - name: Collect installers (flat paths)
+        run: |
+          BUNDLE=target/x86_64-unknown-linux-gnu/release/bundle
+          mkdir -p "$BUNDLE/dist"
+          cp "$BUNDLE"/deb/*.deb "$BUNDLE"/appimage/*.AppImage "$BUNDLE/dist/"
+          # The updater signature of the AppImage exists only on a keyed build;
+          # its absence is said out loud, because latest.json is composed from
+          # the signatures the release job receives.
+          if compgen -G "$BUNDLE/appimage/*.AppImage.sig" > /dev/null; then
+            cp "$BUNDLE"/appimage/*.AppImage.sig "$BUNDLE/dist/"
+          else
+            echo "::warning::no Linux updater signature (TAURI_SIGNING_PRIVATE_KEY absent): latest.json will not cover linux-x86_64"
+          fi
+          # GitHub rewrites any character outside [A-Za-z0-9._-] in a release
+          # asset name, so "Apollia OS_..." is served as "Apollia.OS_...". The
+          # file is renamed here rather than the name being guessed downstream:
+          # one name from the runner to the download URL, and a contract a
+          # guard can check on disk.
+          for f in "$BUNDLE/dist"/"Apollia OS"*; do
+            [ -e "$f" ] || continue
+            mv "$f" "$BUNDLE/dist/$(basename "$f" | sed 's/^Apollia OS/Apollia-OS/')"
+          done
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/x86_64-unknown-linux-gnu/release/bundle
+          format: cyclonedx-json
+          output-file: target/x86_64-unknown-linux-gnu/release/bundle/dist/apollia-desktop-linux-x86_64.cdx.json
+          upload-artifact: false
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/x86_64-unknown-linux-gnu/release/bundle
+          format: spdx-json
+          output-file: target/x86_64-unknown-linux-gnu/release/bundle/dist/apollia-desktop-linux-x86_64.spdx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: apollia-desktop-linux-x86_64
+          path: target/x86_64-unknown-linux-gnu/release/bundle/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Desktop bundle Tauri - Windows x86_64 (.msi + .exe NSIS)
+  # ────────────────────────────────────────────────────────────────────────────
+  desktop-windows:
+    name: Desktop Windows (x86_64)
+    needs: setup
+    if: needs.setup.outputs.run_desktop == 'true' && (needs.setup.outputs.desktop == 'all' || needs.setup.outputs.desktop == 'windows')
+    runs-on: windows-latest
+    env:
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: desktop-windows-x86_64
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Install frontend deps
+        working-directory: crates/apollia-desktop/ui
+        run: npm ci
+
+      - name: Build Python bundle (x86_64-pc-windows-msvc)
+        shell: bash
+        run: |
+          ./packaging/build-python-bundle.sh x86_64-pc-windows-msvc \
+            target/python-bundle/x86_64-pc-windows-msvc
+
+      # `createUpdaterArtifacts: true` + `pubkey` make `cargo tauri build`
+      # demand TAURI_SIGNING_PRIVATE_KEY. The build must finish either way:
+      # with the secret it emits updater artifacts, without it it builds with
+      # createUpdaterArtifacts=false and the run summary says so. Configuring
+      # the secret stays a human act.
+      - name: Guard the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not configured: building with createUpdaterArtifacts=false, this build ships no updater artifact"
+            echo "TAURI_SIGNING_PRIVATE_KEY absent : createUpdaterArtifacts=false, no updater artifact" >> "$GITHUB_STEP_SUMMARY"
+            echo 'TAURI_BUNDLE_CONFIG={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Tauri app
+        working-directory: crates/apollia-desktop
+        shell: bash
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/target/python-bundle/x86_64-pc-windows-msvc/python/python.exe
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+          APOLLIA_DESKTOP_RUNNERS: "cpu"
+          # The inference engine is Vulkan here, and the STT runner stays CPU.
+          # Vulkan reaches NVIDIA, AMD and Intel from one 32 MB binary, where
+          # the CUDA engine covers NVIDIA alone, weighs 238 MB plus a 373 MB
+          # runtime, and falls back to the CPU on every other card. whisper-rs
+          # has no Vulkan backend, so the STT side has nothing to gain here.
+          APOLLIA_DESKTOP_LLAMA_BACKEND: "vulkan"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -n "${TAURI_BUNDLE_CONFIG:-}" ]; then
+            cargo tauri build --target x86_64-pc-windows-msvc --config "$TAURI_BUNDLE_CONFIG"
+          else
+            cargo tauri build --target x86_64-pc-windows-msvc
+          fi
+
+      # ── Code signing with signtool (gated by secrets) ──────────────────────
+      # The PFX cert is passed as base64 and signed with signtool of the
+      # Windows SDK (present by default on the windows-latest runner).
+      - name: Sign MSI + NSIS installers (if cert present)
+        if: env.WINDOWS_CERT_PFX_BASE64 != ''
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "code.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $signtool = (Get-ChildItem "C:/Program Files (x86)/Windows Kits/10/bin" -Recurse -Filter signtool.exe |
+              Where-Object { $_.FullName -match 'x64\\signtool.exe$' } |
+              Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          $bundleDir = "target/x86_64-pc-windows-msvc/release/bundle"
+          $targets = @()
+          if (Test-Path "$bundleDir/msi") { $targets += Get-ChildItem "$bundleDir/msi/*.msi" }
+          if (Test-Path "$bundleDir/nsis") { $targets += Get-ChildItem "$bundleDir/nsis/*.exe" }
+          foreach ($t in $targets) {
+              & $signtool sign /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 `
+                  /f $pfx /p $env:WINDOWS_CERT_PASSWORD $t.FullName
+              & $signtool verify /pa $t.FullName
+          }
+
+      # Flat staging, same reason as the Linux job: keep the installers out
+      # of msi/ and nsis/ sub-folders the release job's flat globs never see.
+      # GitHub's pwsh shell runs with $ErrorActionPreference = 'Stop', so an
+      # unmatched glob fails the step.
+      - name: Collect installers (flat paths)
+        shell: pwsh
+        run: |
+          $bundle = "target/x86_64-pc-windows-msvc/release/bundle"
+          New-Item -ItemType Directory -Force -Path "$bundle/dist" | Out-Null
+          Copy-Item "$bundle/msi/*.msi" "$bundle/dist/"
+          Copy-Item "$bundle/nsis/*.exe" "$bundle/dist/"
+          # Updater signatures exist only on a keyed build; their absence is
+          # said out loud, because latest.json is composed from the signatures
+          # the release job receives.
+          $sigs = @(Get-ChildItem "$bundle/msi/*.msi.sig", "$bundle/nsis/*.exe.sig" -ErrorAction SilentlyContinue)
+          if ($sigs.Count -gt 0) {
+              $sigs | Copy-Item -Destination "$bundle/dist/"
+          } else {
+              Write-Output "::warning::no Windows updater signature (TAURI_SIGNING_PRIVATE_KEY absent): latest.json will not cover windows-x86_64"
+          }
+          # GitHub rewrites any character outside [A-Za-z0-9._-] in a release
+          # asset name, so "Apollia OS_..." is served as "Apollia.OS_...". The
+          # file is renamed here rather than the name being guessed downstream:
+          # one name from the runner to the download URL, and a contract a
+          # guard can check on disk.
+          Get-ChildItem "$bundle/dist/Apollia OS*" -ErrorAction SilentlyContinue | ForEach-Object {
+              Rename-Item $_.FullName ($_.Name -replace '^Apollia OS', 'Apollia-OS')
+          }
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/x86_64-pc-windows-msvc/release/bundle
+          format: cyclonedx-json
+          output-file: target/x86_64-pc-windows-msvc/release/bundle/dist/apollia-desktop-windows-x86_64.cdx.json
+          upload-artifact: false
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/x86_64-pc-windows-msvc/release/bundle
+          format: spdx-json
+          output-file: target/x86_64-pc-windows-msvc/release/bundle/dist/apollia-desktop-windows-x86_64.spdx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: apollia-desktop-windows-x86_64
+          path: target/x86_64-pc-windows-msvc/release/bundle/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+
+  desktop-linux-cuda:
+    name: Desktop Linux CUDA (x86_64)
+    needs: [setup, llama-cuda-linux]
+    if: needs.setup.outputs.run_desktop == 'true' && (needs.setup.outputs.desktop == 'all' || needs.setup.outputs.desktop == 'linux-cuda')
+    # Pinned to 24.04 (noble), the same base as the Linux CLI builds; GitHub
+    # retires the 22.04 image on 2026-09-17.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Tauri / Linux build deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev \
+            libasound2-dev libpulse-dev libjack-jackd2-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libxdo-dev curl wget file \
+            python3-dev clang cmake \
+            patchelf librsvg2-common libgdk-pixbuf2.0-bin desktop-file-utils
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: desktop-linux-cuda-x86_64
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Install frontend deps
+        working-directory: crates/apollia-desktop/ui
+        run: npm ci
+
+      # The engine is the one llama-cuda-linux compiled, handed to
+      # bundle-cli.sh through the LLAMA_SERVER_DIR mode it already provides for
+      # local builds. Nothing downloads a CUDA engine here because upstream
+      # publishes none for Linux.
+      - name: Take the CUDA engine built upstream of this job
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: llama-server-cuda-linux-x86_64
+          path: ${{ github.workspace }}/llama-cuda
+      - name: Make the engine executable
+        run: |
+          chmod +x "${{ github.workspace }}/llama-cuda/llama-server"
+          echo "LLAMA_SERVER_DIR=${{ github.workspace }}/llama-cuda" >> $GITHUB_ENV
+
+      - name: Build Python bundle (x86_64-unknown-linux-gnu)
+        run: |
+          ./packaging/build-python-bundle.sh x86_64-unknown-linux-gnu \
+            target/python-bundle/x86_64-unknown-linux-gnu
+
+      # `createUpdaterArtifacts: true` + `pubkey` make `cargo tauri build`
+      # demand TAURI_SIGNING_PRIVATE_KEY. The build must finish either way:
+      # with the secret it emits updater artifacts, without it it builds with
+      # createUpdaterArtifacts=false and the run summary says so. Configuring
+      # the secret stays a human act.
+      - name: Guard the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not configured: building with createUpdaterArtifacts=false, this build ships no updater artifact"
+            echo "TAURI_SIGNING_PRIVATE_KEY absent : createUpdaterArtifacts=false, no updater artifact" >> "$GITHUB_STEP_SUMMARY"
+            echo 'TAURI_BUNDLE_CONFIG={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Tauri app
+        working-directory: crates/apollia-desktop
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/target/python-bundle/x86_64-unknown-linux-gnu/python/bin/python3.13
+          RUSTFLAGS: -L ${{ github.workspace }}/target/python-bundle/x86_64-unknown-linux-gnu/python/lib
+          APOLLIA_DESKTOP_RUNNERS: "cpu"
+          # CUDA here, against Vulkan in the sibling job. The STT runner stays
+          # CPU either way: whisper-rs has no Vulkan backend, and a CUDA one
+          # would drag nvcc into this build for the smaller half of the gain.
+          # LLAMA_SERVER_DIR, set above, is what makes this reachable at all.
+          APOLLIA_DESKTOP_LLAMA_BACKEND: "cuda"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # This bundle asks a different file for its updates than the Vulkan
+          # one. A Tauri manifest keys platforms by triple, so both variants
+          # would claim `linux-x86_64` in a single file and the second written
+          # would win: every installed bundle would then be offered whichever
+          # engine happened to be composed last. The channel is chosen here, at
+          # build time, and baked into the installed app.
+          CHANNEL='{"plugins":{"updater":{"endpoints":["https://github.com/Apollia-OS/apollia-os/releases/latest/download/latest-cuda.json"]}}}'
+          BASE="${TAURI_BUNDLE_CONFIG:-}"
+          [ -n "$BASE" ] || BASE='{}'
+          PATCH=$(jq -c -s '.[0] * .[1]' <<<"$BASE $CHANNEL")
+          # `--bundles deb`, and this is the whole reason the CUDA variant is a
+          # .deb. linuxdeploy refuses an AppDir holding an ELF whose NEEDED it
+          # cannot resolve, and a CUDA engine has one by construction:
+          # `libcuda.so.1` belongs to the NVIDIA driver, so it is absent from a
+          # runner and must never be shipped. Read at the commit the bundler
+          # downloads, its `ldd` parser throws on `=> not found` with no
+          # exception available; the exclusion that would help exists only on
+          # the project's master branch, published under a moving tag. A .deb
+          # needs no such tool, and a Linux user who has an NVIDIA driver
+          # installed can install a .deb. The Vulkan bundle keeps its AppImage
+          # for everyone else.
+          cargo tauri build --verbose --target x86_64-unknown-linux-gnu \
+            --bundles deb --config "$PATCH"
+
+      # Flat staging: actions/upload-artifact roots the artifact at the
+      # longest common ancestor of its paths, so uploading deb/*.deb and
+      # appimage/*.AppImage as-is buries the installers in sub-folders the
+      # release job's flat globs never see. An unmatched glob here fails the
+      # copy, loudly.
+      - name: Collect installers (flat paths)
+        run: |
+          BUNDLE=target/x86_64-unknown-linux-gnu/release/bundle
+          mkdir -p "$BUNDLE/dist"
+          # Tauri names both variants identically, so the CUDA files take a
+          # suffix before they reach a release that already holds the Vulkan
+          # ones. The name is what a download page shows, so it says cuda
+          # rather than a number.
+          for f in "$BUNDLE"/deb/*.deb; do cp "$f" "$BUNDLE/dist/$(basename "${f%.deb}")-cuda.deb"; done
+          # GitHub rewrites any character outside [A-Za-z0-9._-] in a release
+          # asset name, so "Apollia OS_..." is served as "Apollia.OS_...". The
+          # file is renamed here rather than the name being guessed downstream:
+          # one name from the runner to the download URL, and a contract a
+          # guard can check on disk.
+          for f in "$BUNDLE/dist"/"Apollia OS"*; do
+            [ -e "$f" ] || continue
+            mv "$f" "$BUNDLE/dist/$(basename "$f" | sed 's/^Apollia OS/Apollia-OS/')"
+          done
+          # No updater signature is staged, and none is expected: the contract
+          # carries `updater: null` for this platform. Tauri's Linux updater
+          # replaces an AppImage in place and has no path for a .deb, so a
+          # signature here would sign a file nothing could ever install.
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/x86_64-unknown-linux-gnu/release/bundle
+          format: cyclonedx-json
+          output-file: target/x86_64-unknown-linux-gnu/release/bundle/dist/apollia-desktop-linux-x86_64.cdx.json
+          upload-artifact: false
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/x86_64-unknown-linux-gnu/release/bundle
+          format: spdx-json
+          output-file: target/x86_64-unknown-linux-gnu/release/bundle/dist/apollia-desktop-linux-x86_64.spdx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: apollia-desktop-linux-cuda-x86_64
+          path: target/x86_64-unknown-linux-gnu/release/bundle/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Desktop bundle Tauri - Windows x86_64 (.msi + .exe NSIS)
+  # ────────────────────────────────────────────────────────────────────────────
+  desktop-windows-cuda:
+    name: Desktop Windows CUDA (x86_64)
+    needs: setup
+    if: needs.setup.outputs.run_desktop == 'true' && (needs.setup.outputs.desktop == 'all' || needs.setup.outputs.desktop == 'windows-cuda')
+    runs-on: windows-latest
+    env:
+      WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: desktop-windows-cuda-x86_64
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Install frontend deps
+        working-directory: crates/apollia-desktop/ui
+        run: npm ci
+
+      - name: Build Python bundle (x86_64-pc-windows-msvc)
+        shell: bash
+        run: |
+          ./packaging/build-python-bundle.sh x86_64-pc-windows-msvc \
+            target/python-bundle/x86_64-pc-windows-msvc
+
+      # `createUpdaterArtifacts: true` + `pubkey` make `cargo tauri build`
+      # demand TAURI_SIGNING_PRIVATE_KEY. The build must finish either way:
+      # with the secret it emits updater artifacts, without it it builds with
+      # createUpdaterArtifacts=false and the run summary says so. Configuring
+      # the secret stays a human act.
+      - name: Guard the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not configured: building with createUpdaterArtifacts=false, this build ships no updater artifact"
+            echo "TAURI_SIGNING_PRIVATE_KEY absent : createUpdaterArtifacts=false, no updater artifact" >> "$GITHUB_STEP_SUMMARY"
+            echo 'TAURI_BUNDLE_CONFIG={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Tauri app
+        working-directory: crates/apollia-desktop
+        shell: bash
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}/target/python-bundle/x86_64-pc-windows-msvc/python/python.exe
+          CMAKE_MSVC_RUNTIME_LIBRARY: MultiThreaded
+          APOLLIA_DESKTOP_RUNNERS: "cpu"
+          # CUDA here, against Vulkan in the sibling job. Unlike Linux, this
+          # engine is a download: llama.cpp publishes a Windows CUDA build and
+          # its separate runtime archive, both handled by fetch-llama-server.sh.
+          # No CUDA toolchain enters this build, which is why the nvcc crash
+          # against Visual Studio 18 that stops the CLI CUDA preset does not
+          # reach here.
+          APOLLIA_DESKTOP_LLAMA_BACKEND: "cuda"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # Same reasoning as the Linux CUDA job: a Tauri manifest keys
+          # platforms by triple, so this bundle asks a different file for its
+          # updates than the Vulkan one rather than the two fighting over
+          # `windows-x86_64` in a single manifest.
+          CHANNEL='{"plugins":{"updater":{"endpoints":["https://github.com/Apollia-OS/apollia-os/releases/latest/download/latest-cuda.json"]}}}'
+          BASE="${TAURI_BUNDLE_CONFIG:-}"
+          [ -n "$BASE" ] || BASE='{}'
+          PATCH=$(jq -c -s '.[0] * .[1]' <<<"$BASE $CHANNEL")
+          cargo tauri build --target x86_64-pc-windows-msvc --config "$PATCH"
+
+      # ── Code signing with signtool (gated by secrets) ──────────────────────
+      # The PFX cert is passed as base64 and signed with signtool of the
+      # Windows SDK (present by default on the windows-latest runner).
+      - name: Sign MSI + NSIS installers (if cert present)
+        if: env.WINDOWS_CERT_PFX_BASE64 != ''
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "code.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $signtool = (Get-ChildItem "C:/Program Files (x86)/Windows Kits/10/bin" -Recurse -Filter signtool.exe |
+              Where-Object { $_.FullName -match 'x64\\signtool.exe$' } |
+              Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          $bundleDir = "target/x86_64-pc-windows-msvc/release/bundle"
+          $targets = @()
+          if (Test-Path "$bundleDir/msi") { $targets += Get-ChildItem "$bundleDir/msi/*.msi" }
+          if (Test-Path "$bundleDir/nsis") { $targets += Get-ChildItem "$bundleDir/nsis/*.exe" }
+          foreach ($t in $targets) {
+              & $signtool sign /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 `
+                  /f $pfx /p $env:WINDOWS_CERT_PASSWORD $t.FullName
+              & $signtool verify /pa $t.FullName
+          }
+
+      # Flat staging, same reason as the Linux job: keep the installers out
+      # of msi/ and nsis/ sub-folders the release job's flat globs never see.
+      # GitHub's pwsh shell runs with $ErrorActionPreference = 'Stop', so an
+      # unmatched glob fails the step.
+      - name: Collect installers (flat paths)
+        shell: pwsh
+        run: |
+          $bundle = "target/x86_64-pc-windows-msvc/release/bundle"
+          New-Item -ItemType Directory -Force -Path "$bundle/dist" | Out-Null
+          # Tauri names both variants identically, so the CUDA files take a
+          # suffix before they reach a release that already holds the Vulkan
+          # ones. The name is what a download page shows, so it says cuda.
+          Get-ChildItem "$bundle/msi/*.msi" | ForEach-Object {
+              Copy-Item $_ "$bundle/dist/$($_.BaseName)-cuda$($_.Extension)"
+          }
+          Get-ChildItem "$bundle/nsis/*.exe" | ForEach-Object {
+              Copy-Item $_ "$bundle/dist/$($_.BaseName)-cuda$($_.Extension)"
+          }
+          # Updater signatures exist only on a keyed build; their absence is
+          # said out loud, because latest.json is composed from the signatures
+          # the release job receives.
+          $sigs = @(Get-ChildItem "$bundle/msi/*.msi.sig", "$bundle/nsis/*.exe.sig" -ErrorAction SilentlyContinue)
+          if ($sigs.Count -gt 0) {
+              $sigs | ForEach-Object {
+                  Copy-Item $_ "$bundle/dist/$($_.BaseName -replace '(\.msi|\.exe)$', '-cuda$1')$($_.Extension)"
+              }
+          } else {
+              Write-Output "::warning::no Windows CUDA updater signature (TAURI_SIGNING_PRIVATE_KEY absent)"
+          }
+          # GitHub rewrites any character outside [A-Za-z0-9._-] in a release
+          # asset name, so "Apollia OS_..." is served as "Apollia.OS_...". The
+          # file is renamed here rather than the name being guessed downstream:
+          # one name from the runner to the download URL, and a contract a
+          # guard can check on disk.
+          Get-ChildItem "$bundle/dist/Apollia OS*" -ErrorAction SilentlyContinue | ForEach-Object {
+              Rename-Item $_.FullName ($_.Name -replace '^Apollia OS', 'Apollia-OS')
+          }
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/x86_64-pc-windows-msvc/release/bundle
+          format: cyclonedx-json
+          output-file: target/x86_64-pc-windows-msvc/release/bundle/dist/apollia-desktop-windows-cuda-x86_64.cdx.json
+          upload-artifact: false
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: target/x86_64-pc-windows-msvc/release/bundle
+          format: spdx-json
+          output-file: target/x86_64-pc-windows-msvc/release/bundle/dist/apollia-desktop-windows-cuda-x86_64.spdx.json
+          upload-artifact: false
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: apollia-desktop-windows-cuda-x86_64
+          path: target/x86_64-pc-windows-msvc/release/bundle/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Aggregation → GitHub Release draft (tag push uniquement)
+  # ────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release (draft)
+    needs: [cli, desktop-macos, desktop-linux, desktop-linux-cuda, desktop-windows, desktop-windows-cuda]
+    # No `always()`: a missing installer is a broken release, not something a
+    # reviewer discovers after the draft exists. When one platform fails, fix
+    # it or re-run the failed job; the three blocking presets and three
+    # desktop jobs are the contract a tag promises. The draft itself is never
+    # auto-published.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+    permissions:
+      contents: write # publish the release draft
+      id-token: write # cosign keyless OIDC + provenance
+      attestations: write # build-provenance attestation
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      # Say plainly which platforms made it, and refuse an empty set outright.
+      # The job only runs when every producing job succeeded, so a missing
+      # family here means an upload contract broke, not a failed build.
+      - name: Report coverage and refuse an empty draft
+        run: |
+          shopt -s nullglob
+          mapfile -t all < <(find artifacts -type f ! -name '*.sig' ! -name '*.pem' \
+                                            ! -name '*.cdx.json' ! -name '*.spdx.json' | sort)
+          if [ "${#all[@]}" -eq 0 ]; then
+            echo "::error::no artifact was produced; refusing to publish an empty draft"
+            exit 1
+          fi
+          missing=0
+          for probe in "dmg:macOS installer" "deb:Linux .deb" "AppImage:Linux AppImage" \
+                       "msi:Windows installer"; do
+            pat="${probe%%:*}"; label="${probe#*:}"
+            if find artifacts -type f -iname "*.${pat}" -o -type f -iname "*${pat}*" \
+               | grep -q .; then
+              echo "present: ${label}"
+            else
+              echo "::warning::missing ${label}; the draft will not carry it"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ]; then
+            echo "::warning::this draft does not cover every supported platform, \
+                  review before publishing"
+          fi
+
+      # The updater manifest. `cargo tauri build` does NOT emit latest.json:
+      # it emits one minisign signature per updater artifact, and composing
+      # the manifest from them is this step's job (tauri-action does the same
+      # for projects that use it). The version is read from tauri.conf.json,
+      # never from the git tag: SemVer ranks the numeric pre-release `0.1.0-1`
+      # below the alphanumeric `0.1.0-preview`, so a manifest stamped with the
+      # tag would read as permanently newer than every installed build. A
+      # platform whose signature is absent (no signing key on the build) is
+      # left out, and an empty manifest is still published: the updater plugin
+      # reports it as "channel unavailable", which is the true state.
+      - name: Compose the updater manifest (latest.json)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'EOF'
+          import datetime
+          import json
+          import os
+          import pathlib
+          import urllib.parse
+
+          contract = json.loads(pathlib.Path("packaging/artifacts.json").read_text())
+          conf = json.loads(pathlib.Path("crates/apollia-desktop/tauri.conf.json").read_text())
+          version = conf["version"]
+          repo = contract["repo"]
+          tag = os.environ["TAG"]
+          base = f"https://github.com/{repo}/releases/download/{tag}/"
+
+          # One manifest per channel, because a Tauri manifest keys platforms by
+          # triple and two bundles share a triple: the CUDA variants would
+          # otherwise overwrite the default ones and offer an NVIDIA build to
+          # every Windows machine. Each contract entry names the channel it
+          # belongs to, and each bundle was built pointing at that file.
+          channels = {}
+          for entry in contract["desktop"]:
+              # `updater: null` is a bundle that does not self-update. The
+              # Linux CUDA variant is a .deb, and Tauri's Linux updater
+              # replaces an AppImage in place with no path for one, so it
+              # contributes no platform to any channel. Its channel is still
+              # created below, because the Windows CUDA bundle fills it.
+              if entry.get("updater") is None:
+                  channels.setdefault(entry["manifest"], {})
+                  continue
+              artifact = entry["updater"]["artifact"].replace("{version}", version)
+              signature = entry["updater"]["signature"].replace("{version}", version)
+              name = entry["manifest"]
+              sig_path = pathlib.Path("artifacts") / signature
+              if not sig_path.is_file():
+                  print(f"::warning::{signature} missing, {entry['platform']} left out of {name}")
+                  channels.setdefault(name, {})
+                  continue
+              channels.setdefault(name, {})[entry["platform"]] = {
+                  "url": base + urllib.parse.quote(artifact),
+                  "signature": sig_path.read_text().strip(),
+              }
+
+          stamp = (
+              datetime.datetime.now(datetime.timezone.utc)
+              .isoformat(timespec="seconds").replace("+00:00", "Z")
+          )
+          for name in contract["updater_manifests"]:
+              platforms = channels.get(name, {})
+              # A platform key is the triple, so the CUDA channel drops the
+              # suffix that distinguishes the two contract entries: the
+              # installed app asks for `windows-x86_64` whichever variant it is,
+              # and the file it asks in is what tells the two apart.
+              keyed = {p.removesuffix("-cuda"): v for p, v in platforms.items()}
+              manifest = {
+                  "version": version,
+                  "notes": f"Apollia OS {tag}",
+                  "pub_date": stamp,
+                  "platforms": keyed,
+              }
+              out = pathlib.Path("artifacts") / name
+              out.write_text(json.dumps(manifest, indent=2) + "\n")
+              print(f"wrote {out} covering {sorted(keyed)}")
+          EOF
+
+      # One SHA256SUMS covering every artifact. The three per-job files of the
+      # previous shape were homonyms: merged into one directory, two of the
+      # three were silently overwritten.
+      # ── What the release publishes, decided once ───────────────────────────
+      # `artifacts/` holds more than the release ships. The llama-server CUDA
+      # job uploads its whole engine/ directory, which the desktop CUDA bundle
+      # consumes and which no upload pattern publishes; merged flat, its twelve
+      # shared objects sat beside the installers. Steps that walked the
+      # directory rather than the publication list therefore signed twelve
+      # files nobody could download, and listed them in SHA256SUMS, so the
+      # `shasum -a 256 -c SHA256SUMS` that SECURITY.md documents failed twelve
+      # times on a correctly built release.
+      #
+      # The patterns below are the publication list, and the release step at the
+      # bottom of this job repeats them; check_release_artifacts.py holds the
+      # two identical, because a drift between them brings the defect straight
+      # back.
+      - name: Select what the release publishes
+        working-directory: artifacts
+        run: |
+          shopt -s nullglob
+          published=()
+          for pattern in \
+            '*.tar.gz' '*.tar.gz.sha256' '*.zip' '*.zip.sha256' \
+            '*.dmg' '*.deb' '*.AppImage' '*.msi' '*.exe' \
+            'latest.json' 'latest-cuda.json' \
+            '*.cdx.json' '*.spdx.json' '*.sig'; do
+            for f in $pattern; do
+              [ -f "$f" ] && published+=("$f")
+            done
+          done
+          if [ "${#published[@]}" -eq 0 ]; then
+            echo "::error::the publication list is empty; refusing to sign and hash nothing"
+            exit 1
+          fi
+          printf '%s\n' "${published[@]}" | sort -u > "$RUNNER_TEMP/published.txt"
+          echo "published $(wc -l < "$RUNNER_TEMP/published.txt") file(s):"
+          cat "$RUNNER_TEMP/published.txt"
+
+      - name: SHA256SUMS
+        working-directory: artifacts
+        run: |
+          # Reads the publication list rather than the directory: an inventory
+          # that names a file the release does not carry fails on a user's
+          # machine through no fault of theirs.
+          # NUL-separated on principle rather than on need: the desktop jobs
+          # rename their bundles out of the space tauri-bundler puts there, but
+          # a separator that cannot appear in a name costs nothing and does not
+          # depend on that staying true.
+          tr '\n' '\0' < "$RUNNER_TEMP/published.txt" | \
+            xargs -0 shasum -a 256 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: GPG-sign SHA256SUMS (if key present)
+        if: env.GPG_PRIVATE_KEY != ''
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        working-directory: artifacts
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --yes --passphrase "$GPG_PASSPHRASE" \
+            --pinentry-mode loopback \
+            --detach-sign --armor --output SHA256SUMS.asc SHA256SUMS
+
+      # ── Cryptographic signing (cosign keyless, Sigstore OIDC) ───────────────
+      # Every published file gets a Sigstore bundle, which carries its signature
+      # and the signing certificate together.
+      # Verify with: cosign verify-blob --bundle <f>.cosign.bundle
+      #   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      #   --certificate-identity-regexp '^https://github.com/Apollia-OS/' <f>
+      #
+      # A bundle rather than the --output-signature and --output-certificate
+      # pair it replaces, for two reasons. cosign 3 signs in the new bundle
+      # format by default, ignores both flags and then fails on the empty
+      # --bundle it still requires. And writing `$f.sig` collided head-on with
+      # the four updater signatures the contract declares: they are produced by
+      # the desktop jobs, read into latest.json by the step above and hashed
+      # into SHA256SUMS, so overwriting them here published files whose
+      # checksums no longer matched the inventory shipped beside them.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign artifacts (cosign keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          shopt -s nullglob
+          # The publication list, plus the inventory and its detached
+          # signature, which are written after it and are published too.
+          # Walking artifacts/ instead signed twelve build inputs the release
+          # does not carry, and published a bundle for each: a verifier found a
+          # signature for a file they could not download.
+          while IFS= read -r name; do
+            f="artifacts/$name"
+            [ -f "$f" ] || continue
+            cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
+          done < "$RUNNER_TEMP/published.txt"
+          for f in artifacts/SHA256SUMS artifacts/SHA256SUMS.asc; do
+            [ -f "$f" ] || continue
+            cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
+          done
+
+      # ── SLSA build provenance attestation over the binaries + SBOMs ─────────
+      # Verify with: gh attestation verify <file> --repo Apollia-OS/apollia-os
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.dmg
+            artifacts/*.deb
+            artifacts/*.AppImage
+            artifacts/*.msi
+            artifacts/*.exe
+            artifacts/*.cdx.json
+            artifacts/*.spdx.json
+
+      # The draft body is the CHANGELOG.md section that matches the tag, so the
+      # release says what changed rather than dumping a commit list.
+      # `generate_release_notes` still appends GitHub's own summary underneath.
+      - name: Build the release body from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' CHANGELOG.md > RELEASE_BODY.md
+          if [ ! -s RELEASE_BODY.md ]; then
+            echo "::warning::CHANGELOG.md carries no section for ${version}; \
+                  the whole file becomes the body"
+            cp CHANGELOG.md RELEASE_BODY.md
+          fi
+          echo "release body: $(wc -l < RELEASE_BODY.md) line(s)"
+
+      # The upload sends one file per matched path, and a file matched by two
+      # patterns is sent twice: the second send goes to the asset-update
+      # endpoint and races the first, which answers 404 and fails the job after
+      # eighty minutes of building. Measured twice, on 2026-09-04 and
+      # 2026-09-07, on SHA256SUMS.cosign.bundle, caught by both `SHA256SUMS*`
+      # and `*.cosign.bundle`. The patterns are read from this file, so the
+      # check cannot drift from what the step below actually uploads.
+      - name: Refuse a file the upload would send twice
+        run: |
+          python3 - <<'PY'
+          import glob, pathlib, re, sys, collections
+          text = pathlib.Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+          block = re.search(
+              r"name: Create release draft\n.*?\n          files: \|\n((?:            \S+\n)+)",
+              text, re.S)
+          if block is None:
+              print("::error::the upload patterns could not be read from this workflow")
+              sys.exit(2)
+          patterns = [line.strip() for line in block.group(1).splitlines() if line.strip()]
+          seen = collections.Counter()
+          for pattern in patterns:
+              for path in glob.glob(pattern):
+                  seen[pathlib.Path(path).name] += 1
+          twice = sorted(name for name, n in seen.items() if n > 1)
+          print(f"{len(patterns)} pattern(s), {len(seen)} file(s) matched")
+          if twice:
+              print("::error::these files are matched by more than one upload pattern, "
+                    "and the second upload of a name races the first: " + ", ".join(twice))
+              sys.exit(1)
+          PY
+
+      - name: Create release draft
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          body_path: RELEASE_BODY.md
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.tar.gz.sha256
+            artifacts/*.zip
+            artifacts/*.zip.sha256
+            artifacts/*.dmg
+            artifacts/*.deb
+            artifacts/*.AppImage
+            artifacts/*.msi
+            artifacts/*.exe
+            artifacts/latest.json
+            artifacts/latest-cuda.json
+            artifacts/SHA256SUMS
+            artifacts/SHA256SUMS.asc
+            artifacts/*.cdx.json
+            artifacts/*.spdx.json
+            artifacts/*.sig
+            artifacts/*.cosign.bundle
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true

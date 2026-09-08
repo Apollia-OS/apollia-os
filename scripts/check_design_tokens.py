@@ -1,0 +1,652 @@
+#!/usr/bin/env python3
+"""Fail when the desktop UI writes a visual value a design token already covers.
+
+`crates/apollia-desktop/ui/AGENTS.md` section 3 states the rule: never a
+hardcoded colour, spacing, radius or shadow, always the HSL custom properties
+of `src/app.css` through the `tailwind.config.ts` mapping. Nothing enforced it.
+The only tool the rulebook offered was a `grep` for hex and palette classes,
+which answers 347 lines on this tree, most of them `#app`, `&#9201;` and
+identifiers. A rule whose only instrument cries wolf is a rule nobody runs, and
+1020 literals had accumulated behind it.
+
+The reason the rule matters is that its violations are silent. A hardcoded
+`#faf6ec` renders correctly in the light theme and wrong in the dark one; no
+build fails, no test fails, and the defect is only visible to someone who
+toggles the theme on that exact surface.
+
+Two questions, asked in that order. First, is a visual value written by hand?
+Seven families answer it, one per token family that exists:
+
+  color      hex, `rgb()`/`hsl()` with literal numbers, Tailwind palette
+             classes (`bg-white`, `text-neutral-500`) and arbitrary colour
+             classes (`bg-[#fff]`)
+  shadow     `box-shadow:` literals and `shadow-[...]`, against `--shadow-*`
+  radius     `border-radius:` literals and `rounded-[...]`, against `--radius`
+  z-index    `z-index:` literals, `z-[N]` and `z-NN`, against `--z-*`
+  motion     literal durations and `cubic-bezier(...)`, against `--motion-*`
+             and `--ease-*`
+  font-size  `text-[Npx]` and `font-size: Npx`, against the tiers of
+             `app.css` that `tailwind.config.ts` reads
+  size-px    other arbitrary px classes (`w-[12px]`, `gap-[3px]`); Tailwind's
+             spacing scale, plus what the config adds to it, is the token here
+
+Second, does a token carry that value? `w-[88px]` is a hand-written width and
+the spacing scale has no 88 px rung, so there is nothing to migrate it to;
+moving it is a visual decision, not a migration. A guard that answers only the
+first question calls it a defect and sends a reader site by site to discover
+that; one that silently drops what it cannot judge reports success for the
+wrong reason. Both are how a guard earns the reputation that gets it switched
+off. So the scales are read where they are written, `app.css` and
+`tailwind.config.ts`, and a literal outside them is counted with its reason and
+printed on every run, red or green, next to the sizes the type scale still owes
+a tier.
+
+Where it looks is the other half. A literal is a defect where it can style
+something: inside a `<script>` or `<style>` block, inside a tag in the
+template, or anywhere in a `.css` file. A literal sitting in element text
+content is prose, and the showcase routes are full of it, documenting the
+design system by naming its values. The sweep this guard was promoted from read
+whole lines and reported `hsl(28 11% 13%)` written inside a `<code>` span as a
+hardcoded colour.
+
+The ratchet. This tree does not reach zero in one change, so the debt is
+carried as a named allowance per file, in `ALLOWED` below, and the ratchet only
+descends: a file above its allowance fails, a file *below* its allowance also
+fails, with the instruction to lower the number. An allowance that could drift
+downward unnoticed would let the list outlive the debt, and a list nobody
+prunes is the debt with a green light on it.
+
+Exit codes: 0 clean, 1 at least one file off its allowance, 2 nothing measured.
+
+Usage:
+    python3 scripts/check_design_tokens.py
+    python3 scripts/check_design_tokens.py --list          # every finding
+    python3 scripts/check_design_tokens.py --list color    # one family
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+UI = REPO_ROOT / "crates/apollia-desktop/ui"
+APP_CSS = UI / "src/app.css"
+
+TOKEN_DECL = re.compile(r"^\s*--([a-z0-9-]+)\s*:", re.M)
+PALETTE = (
+    "white|black|neutral|gray|grey|slate|zinc|stone|red|orange|amber|yellow|lime|green|"
+    "emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose"
+)
+PROPS = (
+    "bg|text|border|ring|from|to|via|fill|stroke|shadow|outline|divide|placeholder|"
+    "accent|caret|decoration|ring-offset|border-[trblxy]"
+)
+
+SPACING_PROPS = (
+    "w|h|min-w|min-h|max-w|max-h|size|p[xytrbl]?|m[xytrbl]?|gap(?:-[xy])?|space-[xy]|"
+    "inset(?:-[xy])?|top|left|right|bottom|basis|translate-[xy]"
+)
+
+# Tailwind v3 default spacing scale, in px. A px literal that lands on one of
+# these has a rung to move to; one that does not has none, and rounding it is
+# a visual decision this guard is not entitled to take. The rungs the config
+# adds are read from the config itself, below, rather than repeated here.
+SPACING_PX_BASE = {
+    0.0, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 20.0, 24.0, 28.0,
+    32.0, 36.0, 40.0, 44.0, 48.0, 56.0, 64.0, 80.0, 96.0, 112.0, 128.0, 144.0,
+    160.0, 176.0, 192.0, 208.0, 224.0, 240.0, 256.0, 288.0, 320.0, 384.0,
+}
+
+# (family, pattern, verdict). `defect` is decided by the pattern alone; any
+# other value names the second-stage judgement in `judge()` that decides
+# between a defect and a reason no token covers the value.
+RULES: list[tuple[str, re.Pattern[str], str]] = [
+    ("color", re.compile(r"(?<!&)#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b"), "defect"),
+    ("color", re.compile(r"\b(?:rgb|rgba|hsl|hsla)\(\s*\d"), "defect"),
+    ("color", re.compile(r"(?<![\w-])(?:[a-z-]+:)*(?:" + PROPS + r")-(?:" + PALETTE + r")(?:-\d{2,3})?(?:/\d+)?(?![\w-])"), "defect"),
+    ("color", re.compile(r"(?<![\w-])(?:[a-z-]+:)*(?:" + PROPS + r")-\[(?:#[0-9a-fA-F]{3,8}|rgba?\(|hsla?\(\s*\d)[^\]]*\]"), "defect"),
+    ("shadow", re.compile(r"\bbox-shadow\s*:(?!\s*(?:var\(|none|inherit))(?=[^;]*\d)[^;]*"), "shadow_shape"),
+    ("shadow", re.compile(r"(?<![\w-])(?:[a-z-]+:)*shadow-\[[^\]]+\]"), "shadow_shape"),
+    ("radius", re.compile(r"\bborder(?:-(?:top|bottom)-(?:left|right))?-radius\s*:(?!\s*(?:var\(|calc\(\s*(?:var|TOKEN)|0(?![.\d])|50%|100%|9{2,}|inherit))(?=[^;]*\d)[^;]*"), "radius_range"),
+    ("radius", re.compile(r"(?<![\w-])(?:[a-z-]+:)*rounded(?:-[trblse]{1,2})?-\[(?!9{2,}px|50%|100%)[^\]]+\]"), "radius_range"),
+    ("z-index", re.compile(r"\bz-index\s*:(?!\s*(?:var\(|calc\(\s*var|auto|-?1(?![.\d])|0(?![.\d])))\s*-?\d+"), "z_value"),
+    ("z-index", re.compile(r"(?<![\w-])(?:[a-z-]+:)*z-(?:\[\d+\]|(?!0\b|10\b|auto)\d{2,})(?![\w-])"), "z_value"),
+    ("motion", re.compile(r"\b(?:transition|transition-duration|transition-delay)\s*:\s*[^;]*?\b\d+\.?\d*m?s\b"), "motion_range"),
+    ("motion", re.compile(r"\b(?:animation|animation-duration|animation-delay)\s*:\s*[^;]*?\b\d+\.?\d*m?s\b"), "keyframe"),
+    ("motion", re.compile(r"\bcubic-bezier\(\s*[\d.]"), "defect"),
+    ("motion", re.compile(r"(?<![\w-])(?:[a-z-]+:)*duration-(?:\d+|\[[^\]]+\])(?![\w-])"), "motion_range"),
+    ("font-size", re.compile(r"(?<![\w-])(?:[a-z-]+:)*text-\[[\d.]+(?:px|rem)\]"), "defect"),
+    ("font-size", re.compile(r"\bfont-size\s*:(?!\s*(?:var\(|inherit))\s*[\d.]+(?:px|rem)"), "defect"),
+    ("size-px", re.compile(r"(?<![\w-])(?:[a-z-]+:)*(?:" + SPACING_PROPS + r")-\[[\d.]+px\]"), "spacing"),
+    ("size-px", re.compile(r"(?<![\w-])(?:[a-z-]+:)*(?:leading|tracking)-\[[\d.]+px\]"), "no_scale"),
+]
+
+FAMILIES = ("color", "shadow", "radius", "z-index", "motion", "font-size", "size-px")
+
+COMMENT_LINE = re.compile(r"^\s*(?://|/\*|\*|<!--)")
+ALLOWED_LITERALS = re.compile(r"\b(?:transparent|currentColor|inherit)\b")
+
+MASKED = "\x00"
+
+PX_IN_BRACKET = re.compile(r"\[([\d.]+)px\]")
+Z_LITERAL = re.compile(r"(?:z-index\s*:\s*|z-\[?)(-?\d+)")
+Z_DECL_VALUE = re.compile(r"(-?\d+)")
+FONT_PX = re.compile(r"([\d.]+)(px|rem)")
+LENGTH = re.compile(r"(?<![\w.])(-?[\d.]+)(?:px|rem|em)?(?![\w.])")
+COLOR_CALL = re.compile(r"(?:rgba?|hsla?)\([^)]*\)")
+DURATION = re.compile(r"(?<![\w.])([\d.]+)(ms|s)?(?![\w.])")
+
+# ── The ratchet ──────────────────────────────────────────────────────────────
+#
+# Debt carried, file by file, with the count each file is allowed today. The
+# list only shrinks: an entry whose file drops below its number fails until the
+# number follows it down, and an entry whose file reaches zero leaves.
+#
+# `src/routes/`, `src/components/` and `src/lib/` are absent on purpose. They
+# were migrated to the tokens, and their absence is what keeps them migrated:
+# a file with no entry is allowed nothing. `src/app.css` is the last entry, and
+# its 96 are the chat and topbar surfaces that still write their own values.
+ALLOWED: dict[str, int] = {
+    "src/app.css": 75,
+}
+
+
+def _tag_end(text: str, start: int) -> int:
+    """Index of the `>` that closes the tag opened at `start`.
+
+    Quotes and `{}` expressions are tracked, because Svelte attributes carry
+    both: `onclick={() => run()}` holds a `>` that closes nothing.
+    """
+    i = start + 1
+    quote = ""
+    depth = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'`":
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif ch == ">" and depth == 0:
+            return i
+        i += 1
+    return len(text) - 1
+
+
+def flaggable_mask(text: str, suffix: str) -> list[bool]:
+    """Per-character map of where a literal could style something.
+
+    In a `.css` file, everywhere. In a `.svelte` file: the `<script>` body (it
+    is code), the `<style>` body (it is CSS), and the inside of every tag in
+    the template (attributes). Element text content is prose and is left out,
+    which is the single behaviour that separates this guard from the sweep it
+    was promoted from.
+    """
+    n = len(text)
+    if suffix == ".css":
+        return [True] * n
+    mask = [False] * n
+    i = 0
+    while i < n:
+        if text.startswith("<!--", i):
+            end = text.find("-->", i)
+            i = n if end == -1 else end + 3
+            continue
+        for block in ("script", "style"):
+            if text.startswith(f"<{block}", i) and (
+                i + 1 + len(block) >= n or not text[i + 1 + len(block)].isalnum()
+            ):
+                body = _tag_end(text, i) + 1
+                close = text.find(f"</{block}", body)
+                end = n if close == -1 else close
+                for k in range(body, end):
+                    mask[k] = True
+                i = end + 1
+                break
+        else:
+            if text[i] == "<":
+                end = _tag_end(text, i)
+                for k in range(i, min(end + 1, n)):
+                    mask[k] = True
+                i = end + 1
+            else:
+                i += 1
+            continue
+    return mask
+
+
+def declared_motion_ms(css: str) -> list[float]:
+    """The duration of every `--motion-*` token declared in app.css, in ms."""
+    out: list[float] = []
+    for value, unit in re.findall(r"^\s*--motion-[a-z0-9-]+\s*:\s*([\d.]+)(ms|s)\s*;", css, re.M):
+        out.append(float(value) * (1000 if unit == "s" else 1))
+    return sorted(out)
+
+
+def declared_z_values(css: str) -> set[int]:
+    """The integer value of every `--z-*` token declared in app.css."""
+    out: set[int] = set()
+    for _, value in re.findall(r"^\s*--(z-[a-z0-9-]+)\s*:\s*([^;]+);", css, re.M):
+        digits = Z_DECL_VALUE.search(value)
+        if digits:
+            out.add(int(digits.group(1)))
+    return out
+
+
+def declared_font_px(css: str) -> set[float]:
+    """The px size of every `--text-*` tier declared in app.css.
+
+    The tiers live there and `tailwind.config.ts` reads them, so the scale is
+    read where it is written. A tier whose size is a `clamp()` has no single px
+    value and is not a size a literal can land on.
+    """
+    out: set[float] = set()
+    for value in re.findall(r"^\s*--text-[a-z0-9-]+\s*:\s*([\d.]+)rem\s*;", css, re.M):
+        out.add(round(float(value) * 16, 4))
+    return out
+
+
+_SPACING: set[float] = set()
+
+
+def spacing_px() -> set[float]:
+    """The spacing scale in force: Tailwind's own, plus what the config adds.
+
+    `tailwind.config.ts` extends the scale where a surface needed a rung the
+    default scale has no room for. Reading it here is what keeps the guard from
+    calling a literal a defect on a rung nobody declared, and from excusing one
+    on a rung somebody did.
+    """
+    if not _SPACING:
+        _SPACING.update(SPACING_PX_BASE)
+        config = (UI / "tailwind.config.ts").read_text(encoding="utf-8")
+        block = re.search(r"\bspacing:\s*\{(.*?)\n\s*\},", config, re.S)
+        if block is not None:
+            for value, unit in re.findall(
+                r':\s*"([\d.]+)(rem|px)"', block.group(1)
+            ):
+                _SPACING.add(round(float(value) * (16 if unit == "rem" else 1), 4))
+    return _SPACING
+
+
+def px_of(literal: str) -> float | None:
+    """The px size a `text-[N]` class or a `font-size:` declaration writes."""
+    match = FONT_PX.search(literal)
+    if match is None:
+        return None
+    value = float(match.group(1))
+    return round(value * 16, 4) if match.group(2) == "rem" else round(value, 4)
+
+
+def duration_ms(literal: str) -> float | None:
+    """The first duration of a transition declaration or a `duration-N` class."""
+    if "duration-" in literal:
+        match = re.search(r"duration-\[?([\d.]+)(ms|s)?", literal)
+        if match is None:
+            return None
+        value = float(match.group(1))
+        return value * 1000 if match.group(2) == "s" else value
+    body = literal.split(":", 1)[1] if ":" in literal else literal
+    for value, unit in DURATION.findall(body):
+        if unit:
+            return float(value) * (1000 if unit == "s" else 1)
+    return None
+
+
+def has_blur(literal: str) -> bool:
+    """Whether one layer of a box-shadow has a non-zero blur radius.
+
+    The elevation, primary and status scales are shadows with a blur. A layer
+    with none is a ring (`0 0 0 3px`), a hairline (`0 1px 0 0`) or an inset
+    rim, and no token carries one.
+    """
+    body = COLOR_CALL.sub("COLOR", literal).replace("_", " ")
+    body = body.split(":", 1)[1] if ":" in body else body
+    for layer in body.split(","):
+        lengths = LENGTH.findall(layer)
+        if len(lengths) >= 3 and float(lengths[2]) != 0:
+            return True
+    return False
+
+
+def first_length_px(literal: str) -> float | None:
+    """The first length of a declaration or of an arbitrary class, in px."""
+    body = literal.split(":", 1)[1] if ":" in literal else literal
+    match = re.search(r"([\d.]+)(px|rem|em)?", body)
+    if match is None:
+        return None
+    value = float(match.group(1))
+    return round(value * 16, 4) if match.group(2) in ("rem", "em") else round(value, 4)
+
+
+_BOUNDS: dict[str, tuple[float, float]] = {}
+
+
+def scale_bounds() -> dict[str, tuple[float, float]]:
+    """The ends of the motion and radius scales, read from app.css.
+
+    A literal outside them has nothing to round to: the shortest transition the
+    tree names is 120 ms and the largest corner it names is 10 px, so a 55 ms
+    meter or a 32 px card corner would have to be redrawn rather than migrated.
+    """
+    if not _BOUNDS:
+        css = APP_CSS.read_text(encoding="utf-8")
+        motion = declared_motion_ms(css)
+        radius = re.search(r"^\s*--radius\s*:\s*([\d.]+)(px|rem)\s*;", css, re.M)
+        largest = 0.0
+        if radius is not None:
+            largest = float(radius.group(1)) * (16 if radius.group(2) == "rem" else 1)
+        _BOUNDS["motion"] = (motion[0], motion[-1]) if motion else (0.0, 0.0)
+        # `rounded-sm` is the smallest corner the tree names: --radius less the
+        # 4 px the config subtracts for it.
+        _BOUNDS["radius"] = (max(largest - 4.0, 0.0), largest)
+    return _BOUNDS
+
+
+def judge(verdict_name: str, literal: str, z_values: set[int], in_keyframes: bool) -> str:
+    """Second stage: `defect`, or the reason no token carries this value.
+
+    The first stage says a visual value was written by hand. This one says
+    whether a token exists to write it with. A guard that answers only the
+    first question reports `w-[88px]` as a defect and leaves the reader to
+    discover, site by site, that the spacing scale has no 88 px rung; a guard
+    that silently drops what it cannot judge reports success for the wrong
+    reason. The reasons are counted and printed on every run instead.
+    """
+    if verdict_name == "defect":
+        return "defect"
+    if verdict_name == "keyframe":
+        return "uncovered:keyframe-duration"
+    if verdict_name == "shadow_shape":
+        if in_keyframes:
+            return "uncovered:keyframe-shadow"
+        return "defect" if has_blur(literal) else "uncovered:no-ring-token"
+    if verdict_name == "motion_range":
+        length = duration_ms(literal)
+        shortest, longest = scale_bounds()["motion"]
+        if length is None or not (shortest <= length <= longest):
+            return "uncovered:off-motion-scale"
+        return "defect"
+    if verdict_name == "radius_range":
+        size = first_length_px(literal)
+        smallest, largest = scale_bounds()["radius"]
+        if size is None or not (smallest <= size <= largest):
+            return "uncovered:off-radius-scale"
+        return "defect"
+    if verdict_name == "no_scale":
+        return "uncovered:no-px-scale"
+    if verdict_name == "z_value":
+        digits = Z_LITERAL.search(literal)
+        if digits is None:
+            return "uncovered:no-layer-token"
+        return "defect" if int(digits.group(1)) in z_values else "uncovered:no-layer-token"
+    if verdict_name == "spacing":
+        match = PX_IN_BRACKET.search(literal)
+        if match is None:
+            return "uncovered:off-spacing-scale"
+        return "defect" if float(match.group(1)) in spacing_px() else "uncovered:off-spacing-scale"
+    return "defect"
+
+
+def strip_var_refs(line: str) -> str:
+    """Blank out `var(--x)` and `hsl(var(--x) / .5)` so their digits do not trip a rule."""
+    line = re.sub(r"hsla?\(\s*var\(--[a-z0-9-]+\)[^)]*\)", "TOKEN", line)
+    return re.sub(r"var\(--[a-z0-9-]+(?:,[^)]*)?\)", "TOKEN", line)
+
+
+def scan(
+    text: str, suffix: str, is_app_css: bool, z_values: set[int]
+) -> list[tuple[int, str, str, str]]:
+    """Findings in one file, as (line number, family, literal, verdict)."""
+    mask = flaggable_mask(text, suffix)
+    findings: list[tuple[int, str, str, str]] = []
+    in_block_comment = False
+    in_token_decl = False
+    offset = 0
+    # Brace depth, so a box-shadow or a duration written inside a `@keyframes`
+    # block is read as a frame of an animation rather than as the elevation or
+    # the transition of a surface.
+    depth = 0
+    keyframes_at: int | None = None
+    for n, raw in enumerate(text.splitlines(), 1):
+        line_start, offset = offset, offset + len(raw) + 1
+        if in_block_comment:
+            if "*/" in raw or "-->" in raw:
+                in_block_comment = False
+            continue
+        if COMMENT_LINE.match(raw):
+            if (raw.lstrip().startswith("/*") and "*/" not in raw) or (
+                raw.lstrip().startswith("<!--") and "-->" not in raw
+            ):
+                in_block_comment = True
+            continue
+        if in_token_decl:
+            if ";" in raw:
+                in_token_decl = False
+            continue
+        if TOKEN_DECL.match(raw) or (is_app_css and re.match(r"^\s*--", raw)):
+            if ";" not in raw:
+                in_token_decl = True
+            continue
+        if keyframes_at is None and "@keyframes" in raw:
+            keyframes_at = depth
+        in_keyframes = keyframes_at is not None
+        depth += raw.count("{") - raw.count("}")
+        if keyframes_at is not None and depth <= keyframes_at:
+            keyframes_at = None
+        masked = "".join(
+            ch if mask[line_start + i] else MASKED for i, ch in enumerate(raw)
+        )
+        cleaned = strip_var_refs(masked)
+        if suffix != ".css" and "http" not in cleaned:
+            cleaned = re.sub(r"//.*$", "", cleaned)
+        for family, rx, verdict_name in RULES:
+            for m in rx.finditer(cleaned):
+                literal = m.group(0)
+                if ALLOWED_LITERALS.search(literal):
+                    continue
+                findings.append(
+                    (
+                        n,
+                        family,
+                        literal.strip(),
+                        judge(verdict_name, literal.strip(), z_values, in_keyframes),
+                    )
+                )
+    return findings
+
+
+def tracked_files() -> list[Path]:
+    # A pre-commit hook inherits GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE
+    # aimed at the repository root; kept, they would resolve `src` against the
+    # wrong tree and this guard would report nothing measured on every commit.
+    # `check_unimported_files.py` was already bitten by it.
+    environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    out = subprocess.run(
+        ["git", "ls-files", "src"],
+        cwd=UI,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    if out.returncode != 0:
+        return []
+    return [UI / f for f in out.stdout.split() if f.endswith((".svelte", ".css"))]
+
+
+def measure(
+    files: list[Path], z_values: set[int]
+) -> dict[str, list[tuple[int, str, str, str]]]:
+    per_file: dict[str, list[tuple[int, str, str, str]]] = {}
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        found = scan(text, path.suffix, path == APP_CSS, z_values)
+        if found:
+            per_file[str(path.relative_to(UI))] = found
+    return per_file
+
+
+def defects(
+    per_file: dict[str, list[tuple[int, str, str, str]]],
+) -> dict[str, list[tuple[int, str, str, str]]]:
+    """The findings the ratchet counts: those a token already carries."""
+    out: dict[str, list[tuple[int, str, str, str]]] = {}
+    for rel, found in per_file.items():
+        kept = [f for f in found if f[3] == "defect"]
+        if kept:
+            out[rel] = kept
+    return out
+
+
+def scale_gap(
+    per_file: dict[str, list[tuple[int, str, str, str]]],
+) -> dict[float, int]:
+    """The font sizes still written by hand that no `--text-*` tier carries."""
+    tiers = declared_font_px(APP_CSS.read_text(encoding="utf-8"))
+    counts: dict[float, int] = {}
+    for found in per_file.values():
+        for _, family, literal, verdict_name in found:
+            if family != "font-size" or verdict_name != "defect":
+                continue
+            size = px_of(literal)
+            if size is not None and size not in tiers:
+                counts[size] = counts.get(size, 0) + 1
+    return counts
+
+
+def verdict(per_file: dict[str, list[tuple[int, str, str, str]]]) -> list[str]:
+    """Ratchet failures, one line each. Empty when the tree matches its allowance."""
+    failures: list[str] = []
+    for rel, found in sorted(per_file.items()):
+        allowed = ALLOWED.get(rel, 0)
+        if len(found) > allowed:
+            failures.append(
+                f"{rel}: {len(found)} literal(s), {allowed} allowed. "
+                f"Use a token, or raise nothing: this list only descends."
+            )
+        elif len(found) < allowed:
+            failures.append(
+                f"{rel}: {len(found)} literal(s) left, allowance still {allowed}. "
+                f"Lower it to {len(found)} in scripts/check_design_tokens.py."
+            )
+    for rel in sorted(set(ALLOWED) - set(per_file)):
+        failures.append(
+            f"{rel}: allowance of {ALLOWED[rel]} but no literal left. "
+            f"Drop the entry from scripts/check_design_tokens.py."
+        )
+    return failures
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--list",
+        nargs="?",
+        const="all",
+        metavar="FAMILY",
+        help="print every finding, file by file, optionally for one family",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="print the per-file counts as JSON"
+    )
+    args = parser.parse_args(argv)
+
+    if not APP_CSS.exists():
+        print("nothing measured: crates/apollia-desktop/ui/src/app.css is absent")
+        return 2
+    css = APP_CSS.read_text(encoding="utf-8")
+    tokens = set(TOKEN_DECL.findall(css))
+    files = tracked_files()
+    if not files or not tokens:
+        print(
+            f"nothing measured: {len(files)} file(s) listed by git, "
+            f"{len(tokens)} token(s) read from app.css"
+        )
+        return 2
+
+    everything = measure(files, declared_z_values(css))
+    per_file = defects(everything)
+    counts = {rel: len(found) for rel, found in per_file.items()}
+    total = sum(counts.values())
+
+    per_family: dict[str, int] = {}
+    uncovered: dict[str, int] = {}
+    for found in everything.values():
+        for _, family, _, verdict_name in found:
+            if verdict_name == "defect":
+                per_family[family] = per_family.get(family, 0) + 1
+            else:
+                uncovered[verdict_name] = uncovered.get(verdict_name, 0) + 1
+    gap = scale_gap(everything)
+    failures = verdict(per_file)
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "files_scanned": len(files),
+                    "tokens_declared": len(tokens),
+                    "total": total,
+                    "per_family": {f: per_family.get(f, 0) for f in FAMILIES},
+                    "per_file": dict(sorted(counts.items())),
+                    "uncovered": dict(sorted(uncovered.items())),
+                    "scale_gap": {str(k): v for k, v in sorted(gap.items())},
+                    "allowance": sum(ALLOWED.values()),
+                    "failures": failures,
+                },
+                indent=2,
+            )
+        )
+        return 1 if failures else 0
+
+    if args.list:
+        for rel, found in sorted(everything.items()):
+            for n, family, literal, verdict_name in found:
+                if args.list not in ("all", family):
+                    continue
+                print(f"{rel}:{n}  {family:9}  {verdict_name:28}  {literal[:60]}")
+
+    print(
+        f"design tokens: {len(files)} file(s) scanned, {len(tokens)} token(s) "
+        f"declared, {total} literal(s) a token covers in {len(per_file)} file(s)"
+    )
+    for family in FAMILIES:
+        print(f"  {family:9} {per_family.get(family, 0):5d}")
+    print(f"  allowance carried: {sum(ALLOWED.values())} in {len(ALLOWED)} file(s)")
+
+    print("\nvalues no token carries, left in place and counted, by reason:")
+    if uncovered:
+        for reason, count in sorted(uncovered.items()):
+            print(f"  {reason.split(':', 1)[1]:22} {count:5d}")
+    else:
+        print("  none")
+
+    if gap:
+        print("\ntype scale: sizes still written by hand that no tier carries")
+        for size, count in sorted(gap.items()):
+            owed = "a tier is owed" if count >= 5 else "round to the neighbour"
+            print(f"  {size:6.2f}px  {count:4d}  {owed}")
+
+    if failures:
+        print(f"\n{len(failures)} file(s) off their allowance:")
+        for line in failures:
+            print(f"  {line}")
+        return 1
+    print("\nevery file is at or under its allowance")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

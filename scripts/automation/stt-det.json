@@ -1,0 +1,742 @@
+{
+  "name": "stt-det (settings STT + transcriptions, operator + builder; seeded config + transcripts assert populated, mic + file-picker + delete drive to boundary only)",
+  "stopOnError": false,
+  "notes": [
+    "The STT page saves through SettingsSubPage (route='stt', onSave): one shared footer (settings-subpage-footer / settings-subpage-save) and a toast (settings-save-toast-success). The page-local sticky bar and inline saved status are gone.",
+    "stt-language-select is a native <select> over STT_LANGUAGES, driven with selectOption. It is set to 'it' before the first save because the save button only enables on a real change, and neither the seed ('en') nor settings-det.json ('de' discarded, 'es' saved) leaves that value, so the dirty state holds whether this script runs standalone or inside master-det.",
+    "TranscriptCard no longer anchors the source label (it became the EntityCard title); the card metadata row is asserted on transcript-time + transcript-duration + transcript-text.",
+    "Saving hot-reloads the engine: Stt.svelte's onSave sets sttApplied on a successful reloadStt() and only falls back to sttNeedsRestart when the reload throws. The seeded run reloads fine, so the deterministic assertion is stt-applied-notice, not the restart banner.",
+    "stt-load-model-btn is played through a stubbed picker: loadModel (SttEssentialSection.svelte:78-102) calls plugin-dialog `open` (the IPC plugin:dialog|open), the stub resolves ${HOME}/.apollia/models/Phi-3-mini-Q4.gguf once, and import_model_file (commands/model_hub.rs:450-506) treats a source already inside the models directory as a no-op (`if dest != source`, both resolved from std::env::home_dir), so no file is copied or truncated. The picked path lands in config.model_path (:95) and dirties the form, which settings-subpage-reset restores from savedBaseline (Stt.svelte:94-96) before the next selectOption.",
+    "stt-configure-link sits in the stt-status-banner Card (Transcriptions.svelte:99-153, `{#if $sttStatus}`) and navigates to the STT sub-page (navigateToSettings('stt'), router.ts:25-29); the form is opened without edits so the nav guard never fires.",
+    "transcribe-file-error-detail-toggle: handleTranscribeFile (TranscribeFileDialog.svelte:19-28) sets an inline error and RETURNS BEFORE the native picker when $sttStatus exists and model_loaded is false, the state stt-model-not-loaded asserts (Transcriptions.svelte:155). humanize keeps the Error message as detail, so the Disclosure renders and its header composes -toggle (Disclosure.svelte:75). Because stopOnError is false, a `plugin:dialog|open resolve null once` stub is armed right before the click as a safety net (a cancelled picker instead of a hung boot if the guard ever fails) and cleared right after so it cannot swallow a later section's picker. Keep this block out of any recipe that loads a real whisper model.",
+    "chat-mic-button is played in chat-det.json, not here: dictation.toggle() (useComposerDictation.svelte.ts:59-77) calls start_tour_recording and stop_tour_recording with no getUserMedia in front, so both IPCs are answered by the harness and the cpal capture is never opened.",
+    "The load-model picker is answered with the seed's whisper placeholder (ggml-base.bin), never with an LLM GGUF: measured on d1-stt, picking Phi-3-mini-Q4.gguf reached the saved configuration, the engine started on it, and the app stopped answering after the overlay was created.",
+    "stt-test-start and stt-test-stop are played on the settings SttTestCard through the harness: start_tour_recording resolves null (Result<(), String> in commands/stt.rs:976-990, so the real command would open a cpal capture, flow.rs:182-233, and needs an engine the placeholder ggml-base.bin cannot load), which flips recording and swaps the button's testid to stt-test-stop (SttTestCard.svelte:190); stop_tour_recording is rejected with a string, which the catch of toggle (SttTestCard.svelte:128-131) turns into an error toast and a return to stt-test-start, the only scripted end of course since stt-transcribed and stt-dictation-failed are Tauri events no stub can emit (stt-test-result and stt-test-failure stay unreachable). toggle awaits ensureMicPermission first (SttTestCard.svelte:121), a WebView getUserMedia that never throws and whose result is ignored; App.svelte:85-91 already primes it at boot because the seed enables STT, and wry 0.55.1 grants the WebView side (wry_web_view_ui_delegate.rs:126-136), so the click adds no prompt the boot did not already raise."
+  ],
+  "dynamicTestids": [
+    "settings-nav-stt",
+    "sidebar-mode-option-builder",
+    "sidebar-mode-option-operator"
+  ],
+  "steps": [
+    {
+      "kind": "click",
+      "testid": "onboarding-skip",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "onboarding-skip",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-operator"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 30000
+    },
+    {
+      "kind": "goto",
+      "route": "settings"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "click",
+      "testid": "settings-nav-stt"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-config-form",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "01-stt-settings-operator"
+    },
+    {
+      "kind": "expect",
+      "testid": "stt-section-essential"
+    },
+    {
+      "kind": "expect",
+      "testid": "stt-enable-toggle"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-language-select",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-trigger",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "stt-language-select",
+      "value": "it",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "stt-trigger",
+      "value": "push-to-talk",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-subpage-footer",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-unsaved-badge",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "02-stt-dirty-save-footer"
+    },
+    {
+      "kind": "click",
+      "testid": "settings-subpage-save"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-save-toast-success",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "03-stt-saved"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-applied-notice",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "04-stt-applied-notice"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:dialog|open",
+      "resolve": "${HOME}/.apollia/models/ggml-base.bin",
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "stt-load-model-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-unsaved-badge",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "04b-stt-load-model-picked-seed-whisper"
+    },
+    {
+      "kind": "click",
+      "testid": "settings-subpage-reset",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "settings-unsaved-badge",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "stt-language-select",
+      "value": "en",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-section-advanced",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-hotkey-preview",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "05-stt-hotkey-preview"
+    },
+    {
+      "kind": "click",
+      "testid": "stt-hotkey-change-btn"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "hotkey-capture-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "hotkey-capture-chips",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "06-hotkey-capture-boundary"
+    },
+    {
+      "kind": "click",
+      "testid": "hotkey-capture-cancel"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "hotkey-capture-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "stt-hotkey-change-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "hotkey-capture-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "press",
+      "testid": "hotkey-capture-dialog",
+      "key": "k",
+      "meta": true,
+      "shift": true,
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "05b-hotkey-captured"
+    },
+    {
+      "kind": "click",
+      "testid": "hotkey-capture-confirm",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "hotkey-capture-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "setChecked",
+      "testid": "stt-enable-switch",
+      "checked": false
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "setChecked",
+      "testid": "stt-enable-switch",
+      "checked": true
+    },
+    {
+      "kind": "selectOption",
+      "testid": "stt-model-select",
+      "index": 0,
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "stt-input-device",
+      "index": 0,
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "05c-stt-essentials-driven"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-section-performance",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "stt-silence",
+      "text": "-40"
+    },
+    {
+      "kind": "fill",
+      "testid": "stt-max-rec",
+      "text": "60"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-clipboard",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "stt-clipboard",
+      "value": "clipboard",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "stt-clipboard-restore"
+    },
+    {
+      "kind": "expect",
+      "testid": "stt-config-hint"
+    },
+    {
+      "kind": "screenshot",
+      "label": "07-stt-advanced-fields"
+    },
+    {
+      "kind": "click",
+      "testid": "settings-subpage-save"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-save-toast-success",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "08-stt-saved-2"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-section-status",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "stt-status-live-toggle"
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "09-stt-status-live"
+    },
+    {
+      "kind": "click",
+      "testid": "stt-status-refresh-btn"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-status-timestamp",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "10-stt-status-refreshed"
+    },
+    {
+      "kind": "click",
+      "testid": "stt-status-live-toggle"
+    },
+    {
+      "kind": "click",
+      "testid": "stt-reload-btn"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "screenshot",
+      "label": "11-stt-reloaded"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-test-start",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "12-stt-mic-boundary"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "start_tour_recording",
+      "resolve": null
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "stop_tour_recording",
+      "reject": "STT self-test stopped by the automation harness"
+    },
+    {
+      "kind": "click",
+      "testid": "stt-test-start",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-test-stop",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "stt-test-start",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "12b-stt-test-listening (start_tour_recording answered by the harness, no capture opened)"
+    },
+    {
+      "kind": "clearToasts"
+    },
+    {
+      "kind": "click",
+      "testid": "stt-test-stop",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-test-start",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "stt-test-stop",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "toast",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "expect",
+      "testid": "toast-container",
+      "contains": "STT self-test stopped by the automation harness"
+    },
+    {
+      "kind": "screenshot",
+      "label": "12c-stt-test-stopped (stop_tour_recording rejected by the harness, card back to start, error toast)"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "start_tour_recording"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "stop_tour_recording"
+    },
+    {
+      "kind": "goto",
+      "route": "transcriptions"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcriptions-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-model-not-loaded",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "stt-open-settings",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-config-form",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "10b-open-settings-from-transcriptions"
+    },
+    {
+      "kind": "goto",
+      "route": "transcriptions"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcriptions-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13-transcriptions-operator"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-status-banner",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "stt-configure-link",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-config-form",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13b-configure-link-from-status-banner"
+    },
+    {
+      "kind": "goto",
+      "route": "transcriptions"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcriptions-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-model-not-loaded",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcribe-file-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:dialog|open",
+      "resolve": null,
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "transcribe-file-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcribe-file-error",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcribe-file-error-detail-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "transcribe-file-error-detail-toggle"
+    },
+    {
+      "kind": "sleep",
+      "ms": 400
+    },
+    {
+      "kind": "screenshot",
+      "label": "13c-transcribe-file-error-details-expanded"
+    },
+    {
+      "kind": "click",
+      "testid": "transcribe-file-error-detail-toggle"
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "13d-transcribe-file-error-details-collapsed"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "plugin:dialog|open"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcribe-file-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "14-transcriptions-status-banner-besteffort"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcriptions-list",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "transcript-card-",
+      "nth": 0,
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcript-duration",
+      "timeoutMs": 2000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcript-time",
+      "timeoutMs": 2000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcript-text",
+      "timeoutMs": 2000
+    },
+    {
+      "kind": "click",
+      "testidPrefix": "transcript-copy-",
+      "nth": 0,
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "15-transcript-copied"
+    },
+    {
+      "kind": "click",
+      "testidPrefix": "transcript-delete-",
+      "nth": 0,
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "16-transcript-delete-confirming-boundary"
+    },
+    {
+      "kind": "sleep",
+      "ms": 3200
+    },
+    {
+      "kind": "screenshot",
+      "label": "17-transcript-delete-reverted"
+    },
+    {
+      "kind": "screenshot",
+      "label": "18-transcribe-file-boundary"
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-builder"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "settings"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "click",
+      "testid": "settings-nav-stt"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "stt-config-form",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "expect",
+      "testid": "stt-section-status"
+    },
+    {
+      "kind": "screenshot",
+      "label": "19-stt-settings-builder"
+    },
+    {
+      "kind": "goto",
+      "route": "transcriptions"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcriptions-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "transcriptions-list",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "20-transcriptions-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-operator"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "screenshot",
+      "label": "21-back-operator"
+    }
+  ]
+}

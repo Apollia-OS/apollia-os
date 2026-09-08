@@ -1,0 +1,576 @@
+//! MCP protocol types for the Model Context Protocol.
+//!
+//! Pinned to revision **2025-11-25**.
+//! Implements the JSON-RPC payloads for the capabilities Apollia v0.1.0 cares
+//! about: tools (existing), resources, prompts, logging, plus the client-side
+//! capabilities (roots, sampling, elicitation) and the progress / cancellation
+//! notifications.
+//!
+//! Earlier revisions of this file targeted spec `2024-11-05`. Type names stay
+//! stable so external callers do not break; new fields are additive
+//! `Option<…>` or `#[serde(default)]` so existing payloads keep deserializing.
+
+use serde::{Deserialize, Serialize};
+
+/// MCP protocol revision Apollia targets (pinned per `MCP-SPEC-PIN.md`).
+pub const APOLLIA_MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Parameters for the MCP `initialize` request.
+#[derive(Debug, Serialize)]
+pub struct InitializeParams {
+    /// Protocol version the client implements (currently `"2025-11-25"`).
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: String,
+    /// Capabilities the client advertises to the server.
+    pub capabilities: ClientCapabilities,
+    /// Identity of the connecting client.
+    #[serde(rename = "clientInfo")]
+    pub client_info: ClientInfo,
+}
+
+/// Client capability advertisement sent during `initialize`.
+///
+/// All fields are optional; an absent field means "Apollia does not implement
+/// this capability". Apollia v0.1.0 sets none of the three, so the handshake
+/// carries an empty capability object.
+///
+/// `roots`, `sampling` and `elicitation` are deliberately absent: no handler
+/// dispatches an incoming `roots/list`, `sampling/createMessage` or
+/// `elicitation/create`, so advertising one would leave a compliant server
+/// waiting on an answer that never comes. For `sampling` and `elicitation` the
+/// request and result types are not declared either; add both the types and
+/// the handler in the same change that sets those fields. The value actually
+/// sent is built by `session::build_initialize_params`.
+#[derive(Debug, Default, Serialize)]
+pub struct ClientCapabilities {
+    /// Filesystem / resource roots exposed to the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roots: Option<RootsCapability>,
+    /// Server-initiated sampling (LLM completion) requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<SamplingCapability>,
+    /// Server-initiated user elicitation requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elicitation: Option<ElicitationCapability>,
+}
+
+/// Roots capability advertisement.
+#[derive(Debug, Default, Serialize)]
+pub struct RootsCapability {
+    /// Whether the client emits `notifications/roots/list_changed`.
+    #[serde(rename = "listChanged", skip_serializing_if = "Option::is_none")]
+    pub list_changed: Option<bool>,
+}
+
+/// Sampling capability advertisement (presence = enabled).
+#[derive(Debug, Default, Serialize)]
+pub struct SamplingCapability {}
+
+/// Elicitation capability advertisement (presence = enabled).
+#[derive(Debug, Default, Serialize)]
+pub struct ElicitationCapability {}
+
+/// Identity block sent by the client during `initialize`.
+#[derive(Debug, Serialize)]
+pub struct ClientInfo {
+    /// Human-readable client name (e.g. `"apollia-runtime"`).
+    pub name: String,
+    /// Client version string (e.g. `"0.1.0"`).
+    pub version: String,
+}
+
+/// Result returned by the server for the `initialize` request.
+#[derive(Debug, Deserialize)]
+pub struct InitializeResult {
+    /// Protocol version the server implements.
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: String,
+    /// Capabilities advertised by the server.
+    pub capabilities: ServerCapabilities,
+    /// Identity of the connected server.
+    #[serde(rename = "serverInfo")]
+    pub server_info: ServerInfo,
+    /// Free-text operator guidance returned by the server.
+    ///
+    /// Defined by the MCP spec (2025-11-25) as an optional field in the
+    /// `initialize` response. Servers that omit it deserialize to `None`; no
+    /// retry or degradation is triggered. Filtering an empty string (`Some("")`)
+    /// is left to the caller.
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
+/// Capabilities advertised by the server in `initialize` response.
+#[derive(Debug, Default, Deserialize)]
+pub struct ServerCapabilities {
+    /// Tool-related capabilities; `None` if the server exposes no tools.
+    #[serde(default)]
+    pub tools: Option<ToolsCapability>,
+    /// Resource-related capabilities; `None` if the server exposes no resources.
+    #[serde(default)]
+    pub resources: Option<ResourcesCapability>,
+    /// Prompt-related capabilities; `None` if the server exposes no prompts.
+    #[serde(default)]
+    pub prompts: Option<PromptsCapability>,
+    /// Logging capability: when present, the client can call `logging/setLevel`.
+    #[serde(default)]
+    pub logging: Option<serde_json::Value>,
+    /// Completions capability for argument autocompletion (post-v0.1.0).
+    #[serde(default)]
+    pub completions: Option<serde_json::Value>,
+}
+
+/// Tool-specific capability flags from the server.
+#[derive(Debug, Default, Deserialize)]
+pub struct ToolsCapability {
+    /// Whether the server can notify the client when the tool list changes.
+    #[serde(rename = "listChanged", default)]
+    pub list_changed: Option<bool>,
+}
+
+/// Resources capability flags from the server.
+#[derive(Debug, Default, Deserialize)]
+pub struct ResourcesCapability {
+    /// Whether the server supports `resources/subscribe` + `notifications/resources/updated`.
+    #[serde(default)]
+    pub subscribe: Option<bool>,
+    /// Whether the server emits `notifications/resources/list_changed`.
+    #[serde(rename = "listChanged", default)]
+    pub list_changed: Option<bool>,
+}
+
+/// Prompts capability flags from the server.
+#[derive(Debug, Default, Deserialize)]
+pub struct PromptsCapability {
+    /// Whether the server emits `notifications/prompts/list_changed`.
+    #[serde(rename = "listChanged", default)]
+    pub list_changed: Option<bool>,
+}
+
+/// Identity block returned by the server in `initialize` response.
+#[derive(Debug, Deserialize)]
+pub struct ServerInfo {
+    /// Human-readable server name.
+    pub name: String,
+    /// Server version string; may be absent.
+    pub version: Option<String>,
+}
+
+/// A single tool definition from a `tools/list` response.
+#[derive(Debug, Deserialize)]
+pub struct McpToolDefinition {
+    /// Unique tool name within the server (e.g. `"search_pages"`).
+    pub name: String,
+    /// Human-readable description of what the tool does.
+    pub description: Option<String>,
+    /// JSON Schema describing the tool's input arguments.
+    #[serde(rename = "inputSchema")]
+    pub input_schema: serde_json::Value,
+}
+
+/// Result of a `tools/list` request.
+#[derive(Debug, Deserialize)]
+pub struct ToolsListResult {
+    /// All tools exposed by the server.
+    pub tools: Vec<McpToolDefinition>,
+}
+
+/// Parameters for the `tools/call` request.
+#[derive(Debug, Serialize)]
+pub struct ToolCallParams {
+    /// Name of the tool to invoke.
+    pub name: String,
+    /// Input arguments as a JSON object, or `None` for argument-less tools.
+    pub arguments: Option<serde_json::Value>,
+}
+
+/// Result of a `tools/call` request.
+#[derive(Debug, Deserialize)]
+pub struct ToolCallResult {
+    /// Ordered list of content items produced by the tool.
+    pub content: Vec<ToolCallContent>,
+    /// `true` if the tool itself reported an error condition.
+    #[serde(rename = "isError")]
+    pub is_error: Option<bool>,
+}
+
+/// A single content item in a `tools/call` result.
+///
+/// Discriminated by the `"type"` field in the JSON representation.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ToolCallContent {
+    /// Plain-text output.
+    Text {
+        /// The text produced by the tool.
+        text: String,
+    },
+    /// Base-64-encoded binary image.
+    Image {
+        /// Base-64-encoded image data.
+        data: String,
+        /// MIME type of the image (e.g. `"image/png"`).
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
+    /// An embedded resource reference.
+    Resource {
+        /// Resource descriptor (opaque in V1).
+        resource: serde_json::Value,
+    },
+}
+
+/// Collect every [`ToolCallContent::Text`] item and join them with `"\n"`.
+///
+/// Single source for both the executor (LLM-facing output) and the manager
+/// (health classification), so the joined-text shape stays consistent.
+pub(crate) fn extract_text_parts(content: &[ToolCallContent]) -> String {
+    content
+        .iter()
+        .filter_map(|c| match c {
+            ToolCallContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ─── Resources (server capability) ───────────────────────────────────────────
+
+/// A resource exposed by an MCP server.
+///
+/// Resources are addressable by URI (file://, https://, custom schemes). The
+/// agent ReAct loop reads them via the implicit `mcp_resources.read` tool;
+/// users can also pin them through the desktop @-mention picker.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct McpResource {
+    /// Stable URI identifying the resource.
+    pub uri: String,
+    /// Display name for the UI.
+    pub name: String,
+    /// Optional one-line description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// MIME type when known (e.g. `"text/plain"`).
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// Result of `resources/list`.
+#[derive(Debug, Deserialize)]
+pub struct ResourcesListResult {
+    /// Listed resources.
+    pub resources: Vec<McpResource>,
+    /// Pagination cursor for the next page (absent on the last page).
+    #[serde(rename = "nextCursor", default)]
+    pub next_cursor: Option<String>,
+}
+
+/// Parameters for `resources/read`.
+#[derive(Debug, Serialize)]
+pub struct ResourcesReadParams {
+    /// Resource URI to read.
+    pub uri: String,
+}
+
+/// Single resource content payload.
+#[derive(Debug, Deserialize)]
+pub struct ResourceContent {
+    /// Resource URI.
+    pub uri: String,
+    /// MIME type when known.
+    #[serde(rename = "mimeType", default)]
+    pub mime_type: Option<String>,
+    /// Plain text content (when the resource is textual).
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Base64-encoded blob (when the resource is binary).
+    #[serde(default)]
+    pub blob: Option<String>,
+}
+
+/// Result of `resources/read`.
+#[derive(Debug, Deserialize)]
+pub struct ResourcesReadResult {
+    /// All content variants the resource exposes.
+    pub contents: Vec<ResourceContent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_initialize_params_serialization() {
+        // GIVEN
+        let params = InitializeParams {
+            protocol_version: APOLLIA_MCP_PROTOCOL_VERSION.to_string(),
+            capabilities: ClientCapabilities::default(),
+            client_info: ClientInfo {
+                name: "apollia-runtime".to_string(),
+                version: "0.1.0".to_string(),
+            },
+        };
+        // WHEN
+        let value = serde_json::to_value(&params).unwrap();
+        // THEN
+        assert_eq!(value["protocolVersion"], APOLLIA_MCP_PROTOCOL_VERSION);
+        assert!(value.get("clientInfo").is_some());
+        assert_eq!(value["clientInfo"]["name"], "apollia-runtime");
+    }
+
+    #[test]
+    fn test_tools_list_result_deserialization() {
+        // GIVEN
+        let json_str = r#"{
+            "tools": [
+                {"name": "search", "description": "Search pages", "inputSchema": {"type": "object"}},
+                {"name": "create", "description": "Create page", "inputSchema": {"type": "object"}},
+                {"name": "update", "inputSchema": {"type": "object"}}
+            ]
+        }"#;
+        // WHEN
+        let result: ToolsListResult = serde_json::from_str(json_str).unwrap();
+        // THEN
+        assert_eq!(result.tools.len(), 3);
+        assert_eq!(result.tools[0].name, "search");
+        assert_eq!(
+            result.tools[0].description,
+            Some("Search pages".to_string())
+        );
+        assert!(result.tools[2].description.is_none());
+    }
+
+    #[test]
+    fn test_tool_call_result_text_content() {
+        // GIVEN
+        let json_str = r#"{
+            "content": [{"type": "text", "text": "hello"}],
+            "isError": false
+        }"#;
+        // WHEN
+        let result: ToolCallResult = serde_json::from_str(json_str).unwrap();
+        // THEN
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(&result.content[0], ToolCallContent::Text { text } if text == "hello"));
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn test_tool_call_content_image() {
+        // GIVEN
+        let json_str = r#"{"type": "image", "data": "base64data", "mimeType": "image/png"}"#;
+        // WHEN
+        let content: ToolCallContent = serde_json::from_str(json_str).unwrap();
+        // THEN
+        assert!(
+            matches!(content, ToolCallContent::Image { ref data, ref mime_type }
+                if data == "base64data" && mime_type == "image/png"
+            )
+        );
+    }
+
+    #[test]
+    fn test_tool_call_content_resource() {
+        // GIVEN
+        let json_str = r#"{"type": "resource", "resource": {"uri": "file:///test"}}"#;
+        // WHEN
+        let content: ToolCallContent = serde_json::from_str(json_str).unwrap();
+        // THEN
+        assert!(matches!(content, ToolCallContent::Resource { .. }));
+    }
+
+    #[test]
+    fn test_initialize_result_deserialization() {
+        // GIVEN
+        let json_str = r#"{
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {"listChanged": true}},
+            "serverInfo": {"name": "test-server", "version": "1.0.0"}
+        }"#;
+        // WHEN
+        let result: InitializeResult = serde_json::from_str(json_str).unwrap();
+        // THEN
+        assert_eq!(result.protocol_version, "2024-11-05");
+        assert_eq!(result.server_info.name, "test-server");
+        assert!(result.capabilities.tools.is_some());
+    }
+
+    #[test]
+    fn test_initialize_result_with_instructions() {
+        // GIVEN an initialize response that carries server instructions
+        let json_str = r#"{
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "serverInfo": {"name": "notion"},
+            "instructions": "Use this server for Notion pages."
+        }"#;
+        // WHEN deserialized
+        let result: InitializeResult = serde_json::from_str(json_str).unwrap();
+        // THEN the instructions are surfaced verbatim
+        assert_eq!(
+            result.instructions.as_deref(),
+            Some("Use this server for Notion pages.")
+        );
+    }
+
+    #[test]
+    fn test_initialize_result_without_instructions_is_none() {
+        // GIVEN an initialize response that omits the instructions field
+        let json_str = r#"{
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "serverInfo": {"name": "notion"}
+        }"#;
+        // WHEN deserialized
+        let result: InitializeResult = serde_json::from_str(json_str).unwrap();
+        // THEN deserialization succeeds and instructions are absent
+        assert!(result.instructions.is_none());
+    }
+
+    #[test]
+    fn test_initialize_result_empty_instructions_is_some_empty() {
+        // GIVEN an initialize response with an empty instructions string
+        let json_str = r#"{
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "serverInfo": {"name": "notion"},
+            "instructions": ""
+        }"#;
+        // WHEN deserialized
+        let result: InitializeResult = serde_json::from_str(json_str).unwrap();
+        // THEN the empty value is preserved as Some(""), not filtered to None
+        assert_eq!(result.instructions.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_initialize_result_wrong_instructions_type_errors() {
+        // GIVEN an initialize response where instructions is a number
+        let json = json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "serverInfo": {"name": "notion"},
+            "instructions": 42
+        });
+        // WHEN deserialized into InitializeResult
+        let result: Result<InitializeResult, _> = serde_json::from_value(json);
+        // THEN a serde error is produced (no panic), which the session maps to
+        // McpSessionError::InitializeFailed
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tool_call_params_serialization() {
+        // GIVEN
+        let params = ToolCallParams {
+            name: "search_pages".to_string(),
+            arguments: Some(json!({"query": "test"})),
+        };
+        // WHEN
+        let value = serde_json::to_value(&params).unwrap();
+        // THEN
+        assert_eq!(value["name"], "search_pages");
+        assert_eq!(value["arguments"]["query"], "test");
+    }
+
+    #[test]
+    fn test_client_capabilities_serialize_only_the_fields_that_are_set() {
+        // GIVEN a capability set with roots filled in, the shape the day a
+        // `roots/list` handler exists
+        let caps = ClientCapabilities {
+            roots: Some(RootsCapability {
+                list_changed: Some(true),
+            }),
+            sampling: None,
+            elicitation: None,
+        };
+        // WHEN serialized
+        let value = serde_json::to_value(&caps).unwrap();
+        // THEN the field that is set carries its camelCase shape
+        assert_eq!(value["roots"]["listChanged"], true);
+        // AND the fields left unset stay off the wire entirely. What apollia
+        // actually sends is asserted on `session::build_initialize_params`,
+        // which sets none of the three.
+        assert!(value.get("sampling").is_none());
+        assert!(value.get("elicitation").is_none());
+    }
+
+    #[test]
+    fn test_client_capabilities_default_omits_capabilities() {
+        // GIVEN the default (no capability)
+        let caps = ClientCapabilities::default();
+        // WHEN serialized
+        let value = serde_json::to_value(&caps).unwrap();
+        // THEN unset capabilities are absent from the wire payload
+        assert!(value.get("roots").is_none());
+        assert!(value.get("sampling").is_none());
+        assert!(value.get("elicitation").is_none());
+    }
+
+    #[test]
+    fn test_server_capabilities_deserializes_resources_and_prompts_typed() {
+        // GIVEN a server response advertising resources + prompts capabilities
+        let json_str = r#"{
+            "protocolVersion": "2025-11-25",
+            "capabilities": {
+                "resources": { "subscribe": true, "listChanged": true },
+                "prompts": { "listChanged": true }
+            },
+            "serverInfo": { "name": "test" }
+        }"#;
+        // WHEN deserialized
+        let result: InitializeResult = serde_json::from_str(json_str).unwrap();
+        // THEN the typed fields are populated
+        let resources = result.capabilities.resources.expect("resources");
+        assert_eq!(resources.subscribe, Some(true));
+        let prompts = result.capabilities.prompts.expect("prompts");
+        assert_eq!(prompts.list_changed, Some(true));
+    }
+
+    #[test]
+    fn test_resources_list_result_deserializes() {
+        // GIVEN a resources/list result carrying one resource and a next cursor
+        let json_str = r#"{
+            "resources": [
+                { "uri": "file:///doc.txt", "name": "doc", "mimeType": "text/plain" }
+            ],
+            "nextCursor": "page-2"
+        }"#;
+        // WHEN it is deserialised
+        let result: ResourcesListResult = serde_json::from_str(json_str).unwrap();
+        // THEN the resource and the camel-cased cursor are both read
+        assert_eq!(result.resources.len(), 1);
+        assert_eq!(result.resources[0].uri, "file:///doc.txt");
+        assert_eq!(result.next_cursor.as_deref(), Some("page-2"));
+    }
+
+    #[test]
+    fn test_server_capabilities_no_tools() {
+        // GIVEN: a server that advertises no tool capability
+        let json_str = r#"{
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "serverInfo": {"name": "minimal"}
+        }"#;
+        // WHEN
+        let result: InitializeResult = serde_json::from_str(json_str).unwrap();
+        // THEN
+        assert!(result.capabilities.tools.is_none());
+        assert!(result.server_info.version.is_none());
+    }
+
+    #[test]
+    fn test_tool_call_params_no_arguments() {
+        // GIVEN
+        let params = ToolCallParams {
+            name: "ping".to_string(),
+            arguments: None,
+        };
+        // WHEN
+        let value = serde_json::to_value(&params).unwrap();
+        // THEN
+        assert_eq!(value["name"], "ping");
+        assert!(value["arguments"].is_null());
+    }
+}

@@ -1,0 +1,396 @@
+<script lang="ts">
+  /**
+   * Natural-language automation wizard.
+   *
+   * Four steps :
+   *   1. Describe - free-form textarea + templates shortcut.
+   *   2. Schedule - human label preview + natural re-ask if confidence is low.
+   *   3. Agent    - pre-selected if matched, dropdown otherwise.
+   *   4. Preview  - final card plus the "turn this automation on" CTA.
+   *
+   * Invokes `meta_parse_automation` (Tauri IPC) to translate the free-form
+   * description into a `ParsedAutomation` payload. Never exposes a raw cron
+   * expression to the operator ; the builder path (`CreateTriggerDialog`) stays
+   * available behind the advanced-mode toggle.
+   */
+  import { t, locale } from "svelte-i18n";
+  import { fly } from "svelte/transition";
+  import { contentIn } from "$lib/design/routeTransition";
+  import { Dialog, DialogFooter } from "$lib/components/ui/dialog";
+  import { Button } from "$lib/components/ui/button";
+  import { Textarea } from "$lib/components/ui/textarea";
+  import { Select } from "$lib/components/ui/select";
+  import { Input } from "$lib/components/ui/input";
+  import { Stepper } from "$lib/components/ui/stepper";
+  import { FormField } from "$lib/components/ui/form-field";
+  import type { AgentListItem, CreateTriggerRequest } from "$lib/types";
+  import { listAgents } from "$lib/ipc/connections";
+  import { createTrigger } from "$lib/ipc/triggers";
+  import {
+    parseAutomationDescription,
+    type ParsedAutomation,
+    type ParsedSchedule,
+  } from "$lib/automations/wizardClient";
+
+  interface Props {
+    open: boolean;
+    onclose: () => void;
+    oncreated: (triggerId: string) => void;
+    /** Opens the advanced builder dialog (operator/builder bridge). */
+    onswitchadvanced?: () => void;
+  }
+
+  let { open, onclose, oncreated, onswitchadvanced }: Props = $props();
+
+  // ── State ──────────────────────────────────────────────────────────────
+  let step = $state(0);
+  let description = $state("");
+  let parsed = $state<ParsedAutomation | null>(null);
+  let parseError = $state<string | null>(null);
+  let parsing = $state(false);
+  let agents = $state<AgentListItem[]>([]);
+  let selectedAgent = $state<string>("");
+  let creating = $state(false);
+  let createError = $state<string | null>(null);
+
+  const PLACEHOLDERS = [
+    "automations.wizard.placeholder_1",
+    "automations.wizard.placeholder_2",
+    "automations.wizard.placeholder_3",
+  ];
+  const placeholderKey = $derived(PLACEHOLDERS[Date.now() % PLACEHOLDERS.length]);
+
+  const stepLabels = $derived([
+    { label: $t("automations.wizard.step_describe") },
+    { label: $t("automations.wizard.step_schedule") },
+    { label: $t("automations.wizard.step_agent") },
+    { label: $t("automations.wizard.step_preview") },
+  ]);
+
+  const humanSchedule = $derived.by(() => {
+    const s: ParsedSchedule | undefined = parsed?.schedule ?? undefined;
+    if (!s) return "";
+    return ($locale ?? "en").startsWith("fr") ? s.human_label_fr : s.human_label_en;
+  });
+
+  const nextRun = $derived.by(() => {
+    const s: ParsedSchedule | undefined = parsed?.schedule ?? undefined;
+    if (!s) return null;
+    try {
+      return new Date(s.next_run_at).toLocaleString($locale ?? "en");
+    } catch {
+      return s.next_run_at;
+    }
+  });
+
+  const canAdvanceFromDescribe = $derived(description.trim().length >= 4);
+  // The parser may surface several ambiguities. Agent-related ones must NOT
+  // block the schedule step because the wizard has a dedicated Agent step
+  // that already gates on selection. Treat them as informational only.
+  function isAgentAmbiguity(msg: string): boolean {
+    const m = msg.toLowerCase();
+    return m.includes("assistant cible") || m.includes("target assistant") || m.includes("agent");
+  }
+  const allAmbiguities = $derived(parsed?.ambiguities ?? []);
+  const scheduleAmbiguities = $derived(allAmbiguities.filter((m) => !isAgentAmbiguity(m)));
+  const agentAmbiguities = $derived(allAmbiguities.filter((m) => isAgentAmbiguity(m)));
+  const canAdvanceFromSchedule = $derived(!!parsed?.schedule && scheduleAmbiguities.length === 0);
+  const canAdvanceFromAgent = $derived(!!selectedAgent);
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────
+  $effect(() => {
+    if (open) {
+      step = 0;
+      description = "";
+      parsed = null;
+      parseError = null;
+      selectedAgent = "";
+      createError = null;
+      void loadAgents();
+    }
+  });
+
+  async function loadAgents(): Promise<void> {
+    try {
+      agents = await listAgents();
+    } catch {
+      agents = [];
+    }
+  }
+
+  // ── Telemetry (local, never uploaded) ─────────────────────────────────
+
+  // ── Actions ────────────────────────────────────────────────────────────
+  async function runParser() {
+    parsing = true;
+    parseError = null;
+    const knownAgents = agents.map((a) => a.name);
+    const res = await parseAutomationDescription(description.trim(), knownAgents);
+    parsing = false;
+    if (!res.ok) {
+      parseError = res.error;
+      parsed = null;
+      return;
+    }
+    parsed = res.result;
+    if (parsed.agent && parsed.confidence !== "low") {
+      selectedAgent = parsed.agent.agent_id;
+    }
+  }
+
+  async function handleDescribeNext() {
+    if (!canAdvanceFromDescribe) return;
+    await runParser();
+    if (parseError) return;
+    step = 1;
+  }
+
+  function handleRefine(extraHint: string) {
+    if (!extraHint.trim()) return;
+    description = `${description}\n${extraHint.trim()}`;
+    void runParser();
+  }
+
+  function handleScheduleNext() {
+    if (!canAdvanceFromSchedule) return;
+    step = 2;
+  }
+
+  function handleAgentNext() {
+    if (!canAdvanceFromAgent) return;
+    step = 3;
+  }
+
+  function handleBack() {
+    if (step > 0) step -= 1;
+  }
+
+  function buildSourceInput(): CreateTriggerRequest["source"] | null {
+    const s = parsed?.schedule;
+    if (!s) return null;
+    if (s.type === "cron") return { type: "cron", schedule: s.expr };
+    if (s.type === "interval") return { type: "interval", every: s.every };
+    if (s.type === "one_shot") return { type: "oneshot", fire_at: s.fire_at };
+    return null;
+  }
+
+  function buildTriggerId(): string {
+    // Derive a stable, operator-friendly id from the description.
+    return description
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || `automation-${Date.now().toString(36)}`;
+  }
+
+  async function handleActivate() {
+    const source = buildSourceInput();
+    if (!source || !selectedAgent) return;
+    creating = true;
+    createError = null;
+    try {
+      const request: CreateTriggerRequest = {
+        id: buildTriggerId(),
+        agent: selectedAgent,
+        enabled: true,
+        on_busy: "queue",
+        source,
+      };
+      if (parsed?.payload) {
+        request.input_template = parsed.payload;
+      }
+      const created = await createTrigger(request);
+      oncreated(created.id);
+      onclose();
+    } catch (err) {
+      createError = err instanceof Error ? err.message : String(err);
+    } finally {
+      creating = false;
+    }
+  }
+
+  function handleAdvanced() {
+    onclose();
+    onswitchadvanced?.();
+  }
+</script>
+
+<Dialog
+  {open}
+  {onclose}
+  size="lg"
+  title={$t("automations.wizard.title")}
+  data-testid="automation-wizard-dialog"
+>
+  <Stepper steps={stepLabels} current={step} />
+
+  <div class="mt-6 space-y-4">
+    {#key step}
+    <div in:fly={contentIn()}>
+    {#if step === 0}
+      <!-- Step 1 - Describe ------------------------------------------------->
+      <FormField
+        id="automation-describe"
+        label={$t("automations.wizard.describe_prompt")}
+        labelClass="text-sm text-foreground mb-0"
+        hint={$t("automations.wizard.describe_hint")}
+        error={parseError ? $t("automations.wizard.fallback_error") : undefined}
+      >
+        <Textarea
+          id="automation-describe"
+          class="min-h-32"
+          placeholder={$t(placeholderKey)}
+          bind:value={description}
+          data-testid="automation-wizard-describe"
+        />
+      </FormField>
+    {:else if step === 1}
+      <!-- Step 2 - Schedule ------------------------------------------------->
+      <div class="space-y-3">
+        <p class="text-sm text-muted-foreground">{$t("automations.wizard.schedule_intro")}</p>
+        {#if parsed?.schedule}
+          <div class="rounded-md border border-border bg-muted/30 p-4" data-testid="automation-wizard-schedule-card">
+            <p class="text-base font-medium">{humanSchedule}</p>
+            {#if nextRun}
+              <p class="mt-1 text-xs text-muted-foreground">
+                {$t("automations.wizard.next_run", { values: { when: nextRun } })}
+              </p>
+            {/if}
+          </div>
+        {/if}
+
+        {#if scheduleAmbiguities.length > 0}
+          <div class="rounded-md border border-warning/40 bg-warning/10 p-3" data-testid="automation-wizard-ambiguities">
+            <p class="mb-1 text-xs font-medium text-warning-a11y">
+              {$t("automations.wizard.needs_clarification")}
+            </p>
+            <ul class="list-disc space-y-0.5 pl-5 text-xs text-warning-a11y">
+              {#each scheduleAmbiguities as ambiguity}
+                <li>{ambiguity}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+
+        <FormField
+          id="automation-refine"
+          label={$t("automations.wizard.refine_label")}
+          labelClass="font-normal mb-0"
+        >
+          <Input
+            id="automation-refine"
+            placeholder={$t("automations.wizard.refine_placeholder")}
+            onkeydown={(e: KeyboardEvent) => {
+              if (e.key === "Enter") {
+                handleRefine((e.target as HTMLInputElement).value);
+                (e.target as HTMLInputElement).value = "";
+              }
+            }}
+            data-testid="automation-wizard-refine"
+          />
+        </FormField>
+      </div>
+    {:else if step === 2}
+      <!-- Step 3 - Agent ---------------------------------------------------->
+      <div class="space-y-3">
+        <p class="text-sm text-muted-foreground">{$t("automations.wizard.agent_intro")}</p>
+        {#if !parsed?.agent && agentAmbiguities.length > 0}
+          <div class="rounded-md border border-warning/40 bg-warning/10 p-3" data-testid="automation-wizard-agent-hint">
+            <p class="text-xs text-warning-a11y">
+              {$t("automations.wizard.agent_not_matched_hint")}
+            </p>
+          </div>
+        {/if}
+        <Select bind:value={selectedAgent} aria-label={$t("automations.wizard.agent_select_aria")} data-testid="automation-wizard-agent-select">
+          <option value="" disabled>- {$t("automations.wizard.agent_pick")} -</option>
+          {#each agents as agent}
+            <option value={agent.name}>{agent.name}</option>
+          {/each}
+        </Select>
+        {#if parsed?.agent}
+          <p class="text-xs text-muted-foreground">
+            {$t("automations.wizard.agent_inferred", { values: { agent: parsed.agent.agent_id } })}
+          </p>
+        {/if}
+      </div>
+    {:else if step === 3}
+      <!-- Step 4 - Preview -------------------------------------------------->
+      <div class="space-y-3">
+        <p class="text-sm text-muted-foreground">{$t("automations.wizard.preview_intro")}</p>
+        <div class="rounded-md border border-border bg-background p-4 shadow-sm" data-testid="automation-wizard-preview-card">
+          <p class="text-xs uppercase tracking-wide text-muted-foreground">
+            {$t("automations.wizard.preview_label")}
+          </p>
+          <p class="mt-1 text-base font-medium">{humanSchedule}</p>
+          <p class="mt-2 text-sm">
+            <span class="text-muted-foreground">{$t("automations.target_prefix")}:</span>
+            <span class="ml-1 font-medium">{selectedAgent}</span>
+          </p>
+          {#if parsed?.payload}
+            <p class="mt-2 text-xs text-muted-foreground">
+              {$t("automations.wizard.preview_payload", { values: { payload: parsed.payload } })}
+            </p>
+          {/if}
+        </div>
+        {#if createError}
+          <p class="text-sm text-destructive" data-testid="automation-wizard-create-error">{createError}</p>
+        {/if}
+      </div>
+    {/if}
+    </div>
+    {/key}
+  </div>
+
+  <DialogFooter>
+    <Button
+      variant="ghost"
+      size="sm"
+      onclick={handleAdvanced}
+      data-testid="automation-wizard-advanced"
+    >
+      {$t("automations.wizard.switch_advanced")}
+    </Button>
+    <div class="flex-1"></div>
+    {#if step > 0}
+      <Button variant="outline" onclick={handleBack} data-testid="automation-wizard-back">
+        {$t("common.back")}
+      </Button>
+    {/if}
+    {#if step === 0}
+      <Button
+        onclick={handleDescribeNext}
+        disabled={!canAdvanceFromDescribe || parsing}
+        data-testid="automation-wizard-next-{step}"
+      >
+        {parsing ? $t("automations.wizard.parsing") : $t("common.next")}
+      </Button>
+    {:else if step === 1}
+      <Button
+        onclick={handleScheduleNext}
+        disabled={!canAdvanceFromSchedule}
+        data-testid="automation-wizard-next-{step}"
+      >
+        {$t("common.next")}
+      </Button>
+    {:else if step === 2}
+      <Button
+        onclick={handleAgentNext}
+        disabled={!canAdvanceFromAgent}
+        data-testid="automation-wizard-next-{step}"
+      >
+        {$t("common.next")}
+      </Button>
+    {:else}
+      <Button
+        onclick={handleActivate}
+        disabled={creating}
+        data-testid="automation-wizard-activate"
+      >
+        {creating ? $t("triggers.creating") : $t("automations.wizard.activate")}
+      </Button>
+    {/if}
+  </DialogFooter>
+</Dialog>

@@ -1,0 +1,58 @@
+//! E2E test - application startup and SSE infrastructure connectivity.
+
+/// Verifies that the runtime is fully started, the health endpoint confirms a
+/// ready state, and the SSE infrastructure is reachable.
+///
+/// Two signals are checked:
+/// - `GET /api/v1/health` returns `{"status": "ok"}`.
+/// - The SSE task-stream endpoint responds with a structured HTTP reply (not a
+///   connection error), confirming the server accepts event-stream connections.
+#[tokio::test]
+#[ignore = "true once the runtime and the desktop app are up; the e2e-desktop job of nightly.yml starts them and runs this via: cargo test -p apollia-desktop --test e2e -- --ignored"]
+async fn test_startup_sse_connect_dashboard_render() {
+    // GIVEN a runtime and a desktop app already up, as the nightly job starts them
+    // WHEN the health endpoint is read, then the task event stream is opened
+    // THEN health reports ok and the stream answers without a server error, which is what the dashboard needs to render
+    super::with_retry(|| async {
+        let client = super::http_client()?;
+
+        // 1. Health endpoint must report a ready runtime.
+        let health: serde_json::Value = client
+            .get(super::api_url("/api/v1/health"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let status = health
+            .get("status")
+            .and_then(|v| v.as_str())
+            .ok_or("health response missing 'status' field")?;
+
+        if status != "ok" {
+            return Err(format!("expected health status 'ok', got '{status}'").into());
+        }
+
+        // 2. Connect to the SSE task-stream endpoint with a synthetic task id.
+        //    A 200 (stream open) or 404 (task not found) both confirm the SSE
+        //    infrastructure is operational. Only 5xx responses indicate a fault.
+        let sse_resp = client
+            .get(super::api_url("/api/v1/tasks/e2e-probe-startup/stream"))
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .send()
+            .await?;
+
+        let sse_status = sse_resp.status();
+        if sse_status.is_server_error() {
+            return Err(format!(
+                "SSE task-stream endpoint returned server error {}",
+                sse_status.as_u16()
+            )
+            .into());
+        }
+
+        Ok(())
+    })
+    .await;
+}

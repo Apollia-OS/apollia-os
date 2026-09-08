@@ -1,0 +1,77 @@
+[advisories]
+# "all" rather than "workspace": the narrower scope silenced 17 unmaintained
+# advisories carried by transitive dependencies, and a silenced advisory is
+# indistinguishable from a clean tree. Every one the tree carries today is
+# named below with its provenance and its lift condition.
+unmaintained = "all"
+# Advisories we cannot upgrade away in this release window. Each entry is
+# revisited every release; remove once the upstream fix is released or the
+# dependency tree no longer pulls the affected version.
+ignore = [
+    # Transitive from the tauri GTK backend (tao, wry, webkit2gtk), Linux
+    # desktop only, no patch yet: the gtk-rs GTK3 bindings are unmaintained
+    # upstream. Not encountered on macOS/Windows builds (kept for
+    # cross-platform CI). Lift condition: tauri moves off GTK3.
+    "RUSTSEC-2024-0411", # gdkwayland-sys: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0412", # gdk: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0413", # atk: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0414", # gdkx11-sys: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0415", # gtk: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0416", # atk-sys: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0417", # gdkx11: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0418", # gdk-sys: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0419", # gtk3-macros: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0420", # gtk-sys: unmaintained (gtk-rs GTK3)
+    "RUSTSEC-2024-0370", # proc-macro-error: unmaintained, via gtk3-macros
+    # Transitive in apollia-llm via async-openai's HTTP retry layer
+    # (backoff, and instant underneath it). Lift condition: async-openai
+    # migrates off backoff upstream.
+    "RUSTSEC-2025-0012", # backoff: unmaintained
+    "RUSTSEC-2024-0384", # instant: unmaintained, via backoff
+    # Transitive via urlpattern, pulled by tauri. The unic project is
+    # unmaintained; urlpattern has not moved off it. Lift condition:
+    # urlpattern or tauri drops the unic crates.
+    "RUSTSEC-2025-0075", # unic-char-range: unmaintained
+    "RUSTSEC-2025-0080", # unic-common: unmaintained
+    "RUSTSEC-2025-0081", # unic-char-property: unmaintained
+    "RUSTSEC-2025-0098", # unic-ucd-version: unmaintained
+    "RUSTSEC-2025-0100", # unic-ucd-ident: unmaintained
+    # Transitive via indicatif (CLI progress bars) and hf-hub. Lift
+    # condition: indicatif moves off number_prefix.
+    "RUSTSEC-2025-0119", # number_prefix: unmaintained
+    # Transitive via i18n-embed-fl, pulled by age (apollia-auth secret
+    # store). Lift condition: i18n-embed-fl moves off proc-macro-error2.
+    "RUSTSEC-2026-0173", # proc-macro-error2: unmaintained
+    # pyo3 0.24 soundness advisories. The fix lands in pyo3 0.29, a major
+    # upgrade of pyo3 + pyo3-async-runtimes deliberately deferred past this
+    # release window. The affected exploit paths (new_closure, the nth
+    # iterator adapter) are not on any Apollia code path. Lift condition:
+    # the pyo3 0.29 migration.
+    "RUSTSEC-2026-0176", # pyo3: out-of-bounds read
+    "RUSTSEC-2026-0177", # pyo3: missing Sync bound
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "Apache-2.0 WITH LLVM-exception",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "BSL-1.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
