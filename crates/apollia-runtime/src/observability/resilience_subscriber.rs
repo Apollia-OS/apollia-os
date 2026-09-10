@@ -1,0 +1,139 @@
+//! Hydrates the shared [`ResilienceLayer`] from the runtime event stream.
+//!
+//! The CLI / HTTP `/api/v1/resilience/*` surfaces operate on a single shared
+//! [`Arc<Mutex<ResilienceLayer>>`] stored in [`crate::api::server::AppState`].
+//! Per-task ORIA engines do not (yet) update that layer directly, they keep
+//! their own short-lived breakers for local logic. To keep the operator
+//! snapshot meaningful we subscribe to the `EventBus` and mirror every
+//! `ToolCallCompleted` / `ToolCallDenied` into the shared layer:
+//!
+//! - `success = true`  → `record_success(tool)`
+//! - `success = false` → `record_failure(tool, ErrorClass::Transient)`
+//! - `ToolCallDenied { reason = "circuit_open" }` → counted as a transient
+//!   failure too, so the operator sees the breaker keep tripping.
+//!
+//! Tools the layer hasn't seen before are auto-registered with the default
+//! threshold (3) / cooldown (30 s) via [`ResilienceLayer::ensure_tool`], so
+//! the snapshot reflects production traffic without operator intervention.
+
+use std::sync::{Arc, Mutex};
+
+use apollia_core::events::{subscribe_resilient, RuntimeEvent};
+use apollia_oria::{ErrorClass, ResilienceLayer};
+
+use crate::eventbus::EventBusSender;
+
+/// Spawn the subscriber task. Returns the `JoinHandle` for shutdown.
+pub fn spawn_resilience_subscriber(
+    layer: Arc<Mutex<ResilienceLayer>>,
+    event_bus: &EventBusSender,
+) -> tokio::task::JoinHandle<()> {
+    let mut rx = subscribe_resilient(event_bus, "observability.resilience");
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            apply(&layer, event);
+        }
+    })
+}
+
+fn apply(layer: &Mutex<ResilienceLayer>, event: RuntimeEvent) {
+    let (tool_name, outcome) = match event {
+        RuntimeEvent::ToolCallCompleted {
+            tool_name, success, ..
+        } => (tool_name, if success { Outcome::Ok } else { Outcome::Fail }),
+        RuntimeEvent::ToolCallDenied {
+            tool_name, reason, ..
+        } if reason == "circuit_open" => (tool_name, Outcome::Fail),
+        _ => return,
+    };
+
+    let guard = match layer.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                detail = "snapshot updates stop", "resilience.lock.poisoned"
+            );
+            return;
+        }
+    };
+    guard.ensure_tool(&tool_name);
+    match outcome {
+        Outcome::Ok => {
+            if let Err(e) = guard.record_success(&tool_name) {
+                tracing::debug!(tool = %tool_name, error = %e, "resilience.success.record.failed");
+            }
+        }
+        Outcome::Fail => {
+            if let Err(e) = guard.record_failure(&tool_name, &ErrorClass::Transient) {
+                tracing::debug!(tool = %tool_name, error = %e, "resilience.failure.record.failed");
+            }
+        }
+    }
+}
+
+enum Outcome {
+    Ok,
+    Fail,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apollia_core::{AgentId, TaskId};
+
+    fn mk_completed(tool: &str, success: bool) -> RuntimeEvent {
+        RuntimeEvent::ToolCallCompleted {
+            parent_event_id: "evt-1".to_string(),
+            task_id: TaskId::from("t-1".to_string()),
+            agent_id: AgentId::from("a-1"),
+            tool_name: tool.to_string(),
+            output_json: None,
+            exit_code: None,
+            duration_ms: 1,
+            success,
+            run_id: None,
+        }
+    }
+
+    #[test]
+    fn records_success_resets_failure_count() {
+        // GIVEN a resilience layer that has seen one failed call on file_read
+        let layer = Arc::new(Mutex::new(ResilienceLayer::default()));
+        apply(&layer, mk_completed("file_read", false));
+        // WHEN the next call on the same tool succeeds
+        apply(&layer, mk_completed("file_read", true));
+        // THEN the failure count is back to zero and the breaker stays closed
+        let snap = layer.lock().unwrap().snapshot();
+        let entry = snap.iter().find(|e| e.tool_name == "file_read").unwrap();
+        assert_eq!(entry.failure_count, 0);
+        assert_eq!(entry.state, "closed");
+    }
+
+    #[test]
+    fn enough_failures_open_the_breaker() {
+        // GIVEN a layer whose breaker opens at two failures
+        let layer = Arc::new(Mutex::new(ResilienceLayer::new(
+            2,
+            std::time::Duration::from_secs(60),
+        )));
+        // WHEN two calls on the same tool fail in a row
+        apply(&layer, mk_completed("flaky", false));
+        apply(&layer, mk_completed("flaky", false));
+        // THEN the breaker is open and the count is the one that opened it
+        let snap = layer.lock().unwrap().snapshot();
+        let entry = snap.iter().find(|e| e.tool_name == "flaky").unwrap();
+        assert_eq!(entry.state, "open");
+        assert_eq!(entry.failure_count, 2);
+    }
+
+    #[test]
+    fn unknown_event_kind_is_ignored() {
+        // GIVEN a fresh resilience layer
+        let layer = Arc::new(Mutex::new(ResilienceLayer::default()));
+        // WHEN an event that is not a tool outcome goes through the subscriber
+        apply(&layer, RuntimeEvent::AllReady);
+        // THEN nothing is recorded
+        assert!(layer.lock().unwrap().snapshot().is_empty());
+    }
+}

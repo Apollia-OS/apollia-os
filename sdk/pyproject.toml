@@ -1,0 +1,122 @@
+[build-system]
+# setuptools 77 is the floor for the PEP 639 `license` SPDX expression below;
+# the deprecated table form it replaces is removed on 2027-Feb-18.
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apollia-sdk"
+# Tracks the Apollia OS product version: the SDK ships with the runtime and has
+# no release cycle of its own. PEP 440 normalises "-preview" to "rc0", so the
+# built wheel is apollia_sdk-0.1.0rc0; the string here is the one the git tag,
+# the changelog and `apollia.__version__` all use.
+version = "0.1.0-preview"
+description = "Python SDK for Apollia OS agent development"
+# The SDK source runs on Python 3.10+ (no 3.11/3.12-only syntax; the 3.11+
+# typing.Required / NotRequired are imported behind an ImportError fallback in
+# apollia/_internal/inference.py). This is the true source floor. The tested and
+# supported configuration for Apollia as a whole is 3.12+, because the runtime
+# embeds a 3.12+ interpreter that the SDK installs into; that is what the docs'
+# "Python 3.12+" prerequisite refers to.
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+# The wheel declared the expression and carried the text of neither: a
+# `license-files` glob cannot climb out of the package root, so the two
+# files are copied here rather than referenced at ../.
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
+authors = [{name = "Nidal Zoumita", email = "admin@apollia.fr"}]
+dependencies = []
+
+[project.urls]
+Homepage = "https://apollia.fr"
+Repository = "https://github.com/Apollia-OS/apollia-os"
+Issues = "https://github.com/Apollia-OS/apollia-os/issues"
+
+[project.scripts]
+apollia = "apollia.cli.__main__:_entry"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=5.0",
+    "mypy>=1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apollia*"]
+
+[tool.mypy]
+strict = true
+
+[tool.ruff]
+# Must track `requires-python` above, not the interpreter the runtime embeds.
+# On py312 ruff proposes PEP 695 generics (UP047), which are 3.12-only syntax
+# and would break the 3.10 floor the source deliberately holds.
+target-version = "py310"
+line-length = 100
+src = ["apollia", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",       # pycodestyle + pyflakes
+    "I",                  # isort
+    "B",                  # bugbear
+    "UP",                 # pyupgrade
+    "RUF",                # ruff-specific
+    "S",                  # bandit (security)
+    "SIM",                # simplify
+    "ANN",                # annotations
+    "ASYNC",              # async-specific
+    "TC",                 # type-checking
+    "PT",                 # pytest
+    "D",                  # pydocstyle (google)
+]
+ignore = [
+    "D100", "D104",       # missing module/package docstring
+    "COM812",             # trailing comma (conflicts with formatter)
+    "ISC001",             # implicit string concat (conflicts with formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "D", "ANN"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+markers = [
+    "unit: fast unit test",
+    "integration: integration test, may touch the filesystem",
+    "slow: long test; select with `pytest -m 'not slow'` (no conftest skips it)",
+]
+
+[tool.coverage.run]
+source = ["apollia"]
+branch = true
+omit = [
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+]

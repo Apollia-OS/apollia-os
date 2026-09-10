@@ -1,0 +1,75 @@
+---
+title: Connecter un serveur MCP depuis le catalogue
+slug: /operator-help/integrations/connect-an-mcp-server
+sidebar_position: 5
+---
+
+# Connecter un serveur MCP depuis le catalogue
+
+> Pour tout operator qui veut activer un serveur MCP du catalogue (Notion, GitHub, Linear, Atlassian, Stripe, Time, etc.) en quelques clics.
+
+## Prérequis
+
+- Apollia lancé, page **Connexions** accessible.
+- Vous savez quel service vous voulez brancher. Le catalogue est le registre MCP public ; dix-huit de ses entrées portent une couche de présentation Apollia, et ce sont celles que liste la [Vue d'ensemble des intégrations](vue-d-ensemble-integrations.md).
+- Pour les services authentifiés, vos identifiants (clé API ou compte OAuth chez le fournisseur).
+
+## Étapes
+
+1. Dans la sidebar, ouvrez **Connexions**, puis cliquez sur **Ajouter un connecteur** en bas de la barre latérale des connecteurs. Une feuille s'ouvre sur son onglet **Catalogue MCP**.
+
+   ![Page Connexions : le catalogue ouvert sur l'onglet Découvrir, avec sa grille d'entrées](/img/operator-help/integration-connecter-un-serveur-mcp-1.png)
+
+2. Filtrez ou cherchez l'entrée souhaitée, puis cliquez dessus. L'assistant en 4 étapes démarre.
+
+### Étape 1, Disclaimer
+
+Quatre cases à cocher rappellent les implications d'installer un MCP externe (du code tiers s'exécute sur votre machine, des données peuvent être transférées, vous pouvez révoquer à tout moment, les capabilities sont visibles avant install). Cochez les quatre, puis cliquez **Suivant**.
+
+A l'ecran : l'étape 1 de l'assistant, avec les 4 cases à cocher et leurs libellés, et le bouton Suivant grisé tant que tout n'est pas coché.
+
+### Étape 2, Authentification
+
+Apollia détecte automatiquement le type d'authentification requis par le serveur. Trois cas possibles :
+
+- **Aucune authentification** : message *"Pas d'authentification nécessaire"*. Cliquez **Suivant**.
+- **Clé API ou jeton statique** : un champ mot de passe apparaît. Collez votre clé.
+- **OAuth** : un bouton *"Se connecter avec [Provider]"* apparaît avec la liste des scopes demandés. Cliquez, votre navigateur ouvre la page de consentement, autorisez, le retour est automatique.
+
+A l'ecran : l'étape 2 de l'assistant dans le cas OAuth, avec le bouton Se connecter avec [Provider] et la liste des scopes demandés en dessous.
+
+### Étape 3, Test
+
+Cliquez sur **Tester la connexion**. Pendant le test, l'icône pulse. À la fin, un badge affiche le résultat :
+
+- **Vert** : *"X outils détectés"*. Le serveur répond.
+- **Rouge** : message d'erreur précis (clé invalide, URL injoignable, etc.).
+
+Si le test échoue, revenez à l'étape 2 pour corriger.
+
+A l'ecran : l'étape 3 de l'assistant, avec le bouton Tester la connexion et un badge vert indiquant 12 outils détectés.
+
+### Étape 4, Coaching
+
+Apollia affiche quelques cartes d'exemples avec un bouton *"Essayer ce prompt"* qui pré-remplit la zone de chat. Cliquez **Terminer** pour clôturer l'assistant.
+
+A l'ecran : l'étape 4 de l'assistant, avec 3 cartes d'exemples portant chacune un bouton Essayer ce prompt, et le bouton Terminer.
+
+## Vérification
+
+- Le serveur apparaît dans la sidebar **Connexions** avec une pastille verte.
+- Le panneau de détail affiche les outils déclarés par le serveur, avec leur description.
+- Dans le chat libre, lancez un prompt suggéré par l'étape Coaching. L'outil correspondant est appelé.
+
+> **Note - chargement différé :** par défaut, `[mcp] tool_loading = "deferred"`. Les schémas d'outils du serveur ne sont pas tous placés devant le modèle au démarrage : sous `tool_search_limit` l'index entier est déclaré, au-dessus l'assistant appelle `tool_search` pour trouver ce qu'il lui faut. Le nombre d'outils affiché dans l'UI reste complet dans les deux cas. Voir [Configurer le chargement différé des outils MCP](configure-deferred-mcp-loading.md).
+
+## Si ça ne marche pas
+
+- **Le test échoue avec "Authentification refusée"** : votre clé ou token est invalide ou révoqué. Revenez à l'étape 2 et recollez la valeur sans espaces parasites.
+- **Le test échoue avec "Service introuvable"** : le serveur n'est pas joignable. Vérifiez votre connexion ou le statut du fournisseur.
+- **Le serveur installé n'expose aucun outil** : le serveur démarre mais ne déclare rien. Voir [Tester une connexion MCP](test-an-mcp-connection.md) pour relancer le test, puis vérifier les logs côté fournisseur.
+- **Vous voulez brancher un serveur qui n'est pas dans le catalogue** : voir [Câbler son propre serveur MCP](cabler-son-propre-serveur-mcp.md).
+- **L'agent dit qu'il n'a pas accès à l'outil en mode deferred** : `tool_search` est injecté par le runtime dans le seul assistant conversationnel intégré, et aucune clé de manifest ne le déclare. Un agent installé atteint un outil MCP en le nommant dans `tools_required` ou `tools_optional`, sous la forme `mcp:<serveur>/<outil>`. Mettez le manifest à jour, ou augmentez `tool_search_limit` pour que l'index entier soit déclaré d'emblée.
+- **L'agent dit qu'il n'a pas accès à l'outil** : ouvrez la fiche de l'agent, l'onglet Outils liste ce que son manifest déclare. Si l'outil n'y figure pas, c'est l'agent qu'il faut mettre à jour. Voir [Comprendre la portée d'une intégration](understand-integration-scope.md).
+
+> **Référence technique :** [Référence Apollia](/reference) , protocole MCP, transports, trust levels, gouvernance.

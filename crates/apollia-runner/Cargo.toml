@@ -1,0 +1,64 @@
+[package]
+name = "apollia-runner"
+version = "0.1.0-preview"
+edition.workspace = true
+rust-version.workspace = true
+description = "Apollia OS sidecar runner for local speech-to-text (STT) inference"
+license.workspace = true
+
+# One binary per build, named after the active backend feature.
+# The CI/Tauri launcher compiles this crate once per backend with a different name.
+[[bin]]
+name = "apollia-runner"
+path = "src/main.rs"
+
+[features]
+# Exclusive: exactly one backend feature must be active per build.
+# `cargo check --features local-cpu` and so on, as for apollia-llm today.
+default = []
+# The runner is STT-only (whisper). Each backend feature selects the whisper-rs
+# acceleration; local LLM inference runs through the embedded llama-server.
+local-cpu        = ["dep:whisper-rs"]
+local-cuda       = ["local-cpu", "whisper-rs/cuda"]
+local-metal      = ["local-cpu", "whisper-rs/metal"]
+local-rocm       = ["local-cpu", "whisper-rs/hipblas"]
+# Before this line existed, `local-vulkan` was the processor build under
+# another name, so a machine with a Vulkan-only card ran dictation on four
+# processor threads. Needs the Vulkan SDK (`VULKAN_SDK`) at build time.
+# Measured on 2026-09-10 on Windows with a Radeon RX 6900 XT.
+local-vulkan     = ["local-cpu", "whisper-rs/vulkan"]
+
+[dependencies]
+# IPC + serveur HTTP
+axum               = { workspace = true }
+tokio              = { workspace = true, features = ["full"] }
+serde              = { workspace = true, features = ["derive"] }
+serde_json         = { workspace = true }
+uuid               = { workspace = true, features = ["v4", "serde"] }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json"] }
+
+# STT backend (optional, selected by a local-* feature)
+whisper-rs      = { workspace = true, optional = true }
+
+# Audio (always needed for /stt/*)
+hound = { workspace = true }
+rubato = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+reqwest  = { workspace = true, features = ["json", "stream", "blocking"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(kani)'] }
+# Two documented sites: the `Send`/`Sync` impls for the whisper-rs FFI
+# wrapper in `backends/whisper.rs`. See the note in `src/lib.rs`.
+unsafe_code = "allow"
+
+# Cargo does not merge this table with the workspace one: declaring [lints] at
+# all replaces the inheritance wholesale. Restating the workspace clippy lint is
+# therefore not redundant, it is the only way to keep it. Dropping these three
+# lines silently removes `unwrap()` enforcement from this crate, which is how it
+# was lost here in the first place.
+[lints.clippy]
+unwrap_used = "deny"

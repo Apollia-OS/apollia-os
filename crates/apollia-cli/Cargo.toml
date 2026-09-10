@@ -1,0 +1,80 @@
+[package]
+name = "apollia-cli"
+version = "0.1.0-preview"
+edition.workspace = true
+description = "Apollia OS CLI binary (apollia-os)"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "apollia-os"
+path = "src/main.rs"
+
+[features]
+## No `cloud` switch here: `apollia-aip`, `apollia-eval`, `apollia-oria` and
+## `apollia-runtime` each pull `apollia-llm` with its own defaults, so
+## `apollia-llm/cloud` is on for every build of this binary whatever this
+## manifest asks for. A switch that cannot turn the backends off is a switch
+## that lies; the cloud HTTP clients are unconditional and the CLI says so.
+## Documentation generation (CLI reference). Pulls clap-markdown and is excluded
+## from the default build, so the shipped binary carries no doc-tooling surface.
+gen-docs = ["dep:clap-markdown"]
+
+[dependencies]
+apollia-auth      = { workspace = true }
+apollia-connectors = { workspace = true }
+apollia-core      = { workspace = true, features = ["net"] }
+apollia-workspace = { workspace = true }
+apollia-aip      = { workspace = true }
+apollia-mcp      = { workspace = true }
+apollia-permissions = { workspace = true }
+apollia-tools    = { workspace = true }
+apollia-triggers = { workspace = true }
+apollia-memory   = { workspace = true }
+apollia-oria     = { workspace = true }
+apollia-runtime  = { workspace = true }
+apollia-llm      = { workspace = true, default-features = false }
+apollia-eval     = { workspace = true }
+chrono           = { workspace = true }
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+serde_yaml         = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap               = { workspace = true }
+clap_complete      = { workspace = true }
+clap-markdown      = { workspace = true, optional = true }
+uuid               = { workspace = true }
+hyper              = { workspace = true }
+hyper-util         = { workspace = true }
+http-body-util     = { workspace = true }
+toml               = { workspace = true }
+toml_edit          = { workspace = true }
+rpassword          = { workspace = true }
+pyo3               = { workspace = true }
+async-trait        = { workspace = true }
+futures            = { workspace = true }
+hf-hub             = { workspace = true }
+indicatif          = { workspace = true }
+semver             = { workspace = true }
+scopeguard         = { workspace = true }
+sha2               = { workspace = true }
+reqwest            = { workspace = true }
+rustyline          = { workspace = true }
+open               = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
+# Mock credential store only: pins the `connector revoke` exit-code contract
+# without touching the platform keyring. Already a workspace dependency
+# (apollia-auth), not a new sovereignty surface.
+keyring = { workspace = true }
+
+[lints]
+workspace = true

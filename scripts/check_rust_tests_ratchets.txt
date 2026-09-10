@@ -1,0 +1,36 @@
+# Ratchets of scripts/check_rust_tests.py.
+#
+# Two tables, one per rule that carries named debt. Both descend only, and both
+# fail in both directions: a file above its entry is red, and a file below its
+# entry is red too, until the number follows it down in the commit that removed
+# the sites. A ratchet that only failed upward outlives the debt.
+#
+# Format: one `path count` per line, `#` starts a comment, a `[rule]` line
+# opens a section.
+#
+# [gwt-markers]
+#   Tests missing at least one of GIVEN, WHEN and THEN. The corpus declares the
+#   rule twice, in `AGENTS.md` and in `docs/agents/FORBIDDEN.md`, and nothing
+#   read a test body until this guard, so the whole tree is in the table. It is
+#   emptied crate by crate, not by annotating: a test whose GIVEN cannot be
+#   named is a test that cannot fail for the reason it claims, and is rewritten
+#   or removed instead.
+#
+# [home-read]
+#   Tests that resolve the operator's home. Reading `home_dir_or_temp()` under
+#   a substituted HOME is legitimate; reading it under the real one is how a
+#   suite writes into `~/.apollia`. The table freezes who reads it, so a new
+#   reader is argued rather than discovered after the fact.
+
+[gwt-markers]
+
+[home-read]
+crates/apollia-cli/src/commands/doctor.rs 1
+crates/apollia-core/src/paths.rs 1
+crates/apollia-desktop/src/commands/chat/export.rs 1
+crates/apollia-desktop/src/commands/config/system.rs 1
+crates/apollia-desktop/tests/e2e/test_agents.rs 1
+crates/apollia-mcp/src/config.rs 2
+crates/apollia-runtime/src/chat/builtin_agent/tests.rs 1
+crates/apollia-runtime/src/embedded.rs 1
+crates/apollia-tools/src/sandbox_path.rs 2

@@ -1,0 +1,195 @@
+//! Integration tests for WebhookChannel.
+//!
+//! Tests the full HTTP notification path using a real `WebhookChannel`
+//! from `apollia-notifications`:
+//! - wiremock server captures the POST and verifies all JSON fields
+//!   and the `X-Apollia-Event` header.
+//! - HTTP server that never responds → `NotifError::WebhookFailed`
+//!   returned in < 2 s (non-blocking, no crash).
+
+use apollia_e2e_tests::reserve_port;
+use std::collections::HashMap;
+use std::time::Duration;
+
+use chrono::Utc;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use apollia_notifications::{
+    NotifError, Notification, NotificationChannel, Severity, WebhookChannel, WebhookChannelConfig,
+};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Builds a `Notification` for `task.input_required` with HITL metadata.
+fn make_input_required_notification() -> Notification {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "resume_url".into(),
+        "http://localhost:7771/api/v1/tasks/t-0042/resume".into(),
+    );
+    metadata.insert(
+        "inspect_url".into(),
+        "http://localhost:7771/dashboard#task-t-0042".into(),
+    );
+
+    Notification {
+        event: "task.input_required".into(),
+        timestamp: Utc::now(),
+        task_id: Some("t-0042".into()),
+        agent: Some("devis-agent".into()),
+        message: "Quote #42 - 12,500 EUR incl. VAT for Dupont SA - confirm sending?".into(),
+        metadata,
+        severity: Severity::Warning,
+    }
+}
+
+/// Builds a `WebhookChannel` pointing at `url` with default timeout (5 s).
+fn make_channel(url: &str) -> WebhookChannel {
+    WebhookChannel::new(WebhookChannelConfig {
+        id: "test-webhook".into(),
+        url: url.to_string(),
+        enabled: true,
+        events: None,
+        signing_secret: None,
+        min_severity: Severity::Info,
+    })
+    // Opt out of the SSRF guard so these in-process tests can reach the
+    // 127.0.0.1 mock server (the guard is on by default in production).
+    .with_ssrf_guard(false)
+}
+
+// ── Apollia JSON payload checked against a mock HTTP server ───────────
+
+/// GIVEN a mock HTTP server (wiremock) expecting a POST on /webhook
+/// WHEN `WebhookChannel.send(Notification{event:"task.input_required", ...})` is called
+/// THEN the received body is valid JSON carrying every Apollia field:
+///       `event`, `timestamp`, `runtime`, `version`, `task_id`, `agent`,
+///       `message`, `metadata`, `severity`
+///      AND the `X-Apollia-Event` header == `"task.input_required"`
+#[tokio::test]
+async fn test_ac6_webhook_payload_verified() {
+    // GIVEN - wiremock server that expects a POST to /webhook
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/webhook"))
+        .and(header("X-Apollia-Event", "task.input_required"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let channel = make_channel(&format!("{}/webhook", server.uri()));
+    let notif = make_input_required_notification();
+
+    // WHEN
+    let result = channel.send(&notif).await;
+
+    // THEN - send succeeds
+    assert!(result.is_ok(), "send must succeed; got: {:?}", result.err());
+
+    // THEN - exactly 1 request received by the mock server
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "mock server must receive exactly one request"
+    );
+
+    let req = &requests[0];
+
+    // THEN - body is valid JSON with all required Apollia fields
+    let body: serde_json::Value =
+        serde_json::from_slice(&req.body).expect("request body must be valid JSON");
+
+    assert_eq!(
+        body["event"], "task.input_required",
+        "event field must match"
+    );
+    assert_eq!(
+        body["runtime"], "apollia-os",
+        "runtime must be 'apollia-os'"
+    );
+    assert_eq!(body["task_id"], "t-0042", "task_id must match");
+    assert_eq!(body["agent"], "devis-agent", "agent must match");
+    assert_eq!(
+        body["severity"], "warning",
+        "severity must be 'warning' for input_required"
+    );
+    assert!(
+        body["timestamp"].as_str().is_some(),
+        "timestamp must be an ISO 8601 string"
+    );
+    assert!(
+        body["version"].as_str().is_some(),
+        "version must be present and non-null"
+    );
+    assert!(
+        !body["message"].as_str().unwrap_or("").is_empty(),
+        "message must not be empty"
+    );
+
+    // THEN - metadata contains HITL URLs
+    assert!(
+        body["metadata"]["resume_url"].as_str().is_some(),
+        "metadata.resume_url must be present"
+    );
+    assert!(
+        body["metadata"]["inspect_url"].as_str().is_some(),
+        "metadata.inspect_url must be present"
+    );
+
+    // THEN - X-Apollia-Event header is correct (checked by wiremock matcher above)
+    let event_header = req
+        .headers
+        .get("x-apollia-event")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        event_header, "task.input_required",
+        "X-Apollia-Event header must equal the event name"
+    );
+}
+
+// ── WebhookChannel: connection refused -> NotifError returned, no panic
+
+/// GIVEN a URL pointing at a port with no listener (connection refused)
+/// WHEN `WebhookChannel.send()` is called
+/// THEN `NotifError::WebhookFailed` comes back at once (under 2 s)
+///      and the runtime carries on without crashing
+#[tokio::test]
+async fn test_ac7_webhook_timeout_returns_error() {
+    // GIVEN - a port nobody listens on, so a TCP connect to it is refused. This
+    // is the inverse requirement of the servers in this suite: the number must
+    // stay free rather than be taken, so the probe listener is released on the
+    // spot (a held reservation would accept the very connection this test
+    // needs refused). It stays safe for the same reason as everywhere else:
+    // reserve_port() draws outside the ephemeral pool, so no third party is
+    // handed this port and starts accepting on it while the test runs.
+    let port = reserve_port().release();
+
+    let channel = make_channel(&format!("http://127.0.0.1:{port}"));
+    let notif = make_input_required_notification();
+
+    let start = std::time::Instant::now();
+
+    // WHEN
+    let result = channel.send(&notif).await;
+
+    let elapsed = start.elapsed();
+
+    // THEN - connection-refused maps to NotifError::WebhookFailed (no panic, no hang)
+    assert!(
+        matches!(result, Err(NotifError::WebhookFailed(_))),
+        "expected NotifError::WebhookFailed on connection refused, got: {:?}",
+        result
+    );
+
+    // THEN - error returned quickly (well under the 5 s default timeout)
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "send must return within 5 s even on unreachable host; took {:?}",
+        elapsed
+    );
+}

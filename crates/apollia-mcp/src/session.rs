@@ -1,0 +1,899 @@
+//! MCP session: transport lifecycle, JSON-RPC routing, and initialize handshake.
+//!
+//! Each [`McpSession`] owns one [`McpTransport`] and one background dispatch task:
+//! - the **dispatch task** calls [`McpTransport::recv`] in a loop, parses each
+//!   JSON-RPC response, and routes it to the caller waiting on the matching
+//!   [`oneshot`] channel.
+//!
+//! Request/response correlation is handled via a shared `pending` map keyed by
+//! request ID. The transport handles all byte-level I/O.
+
+mod retry;
+mod rpc;
+mod tools;
+
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+
+use apollia_core::McpHealth;
+use tokio::sync::{oneshot, Mutex};
+use tracing::{debug, warn};
+
+use crate::config::{McpServerConfig, SecretResolver};
+use crate::jsonrpc::JsonRpcResponse;
+use crate::protocol::{
+    ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, McpToolDefinition,
+    ServerCapabilities, ServerInfo, APOLLIA_MCP_PROTOCOL_VERSION,
+};
+use crate::transport::{create_transport, McpTransport};
+
+// ─── errors ──────────────────────────────────────────────────────────────────
+
+/// Errors that can arise during MCP session operations.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum McpSessionError {
+    /// The server subprocess could not be spawned.
+    #[error("failed to spawn server '{server}': {cause}")]
+    SpawnFailed { server: String, cause: String },
+
+    /// The `initialize` handshake completed but the response was malformed.
+    #[error("server '{server}' initialize handshake failed: {cause}")]
+    InitializeFailed { server: String, cause: String },
+
+    /// The `initialize` handshake did not complete within the configured timeout.
+    ///
+    /// `stderr_hint` carries the last few lines emitted by the subprocess (or
+    /// the empty string for non-stdio transports) so the operator sees why the
+    /// child stalled without having to attach a debugger.
+    #[error("server '{server}' initialize timed out after {timeout_secs}s{stderr_hint}")]
+    InitializeTimeout {
+        server: String,
+        timeout_secs: u64,
+        stderr_hint: String,
+    },
+
+    /// A `tools/call` request failed on the server side.
+    #[error("server '{server}' tool call '{tool}' failed: {cause}")]
+    ToolCallFailed {
+        server: String,
+        tool: String,
+        cause: String,
+    },
+
+    /// A `tools/call` request did not complete within the configured timeout.
+    #[error("server '{server}' tool call '{tool}' timed out after {timeout_secs}s")]
+    ToolCallTimeout {
+        server: String,
+        tool: String,
+        timeout_secs: u64,
+    },
+
+    /// The server process exited before the operation completed.
+    #[error("server '{server}' process exited unexpectedly")]
+    ServerExited { server: String },
+
+    /// The server returned a JSON-RPC error object.
+    #[error("JSON-RPC error from server '{server}': [{code}] {message}")]
+    JsonRpcError {
+        server: String,
+        code: i64,
+        message: String,
+    },
+
+    /// A JSON-RPC message could not be serialised or deserialised.
+    #[error("failed to serialize/deserialize JSON-RPC message: {0}")]
+    SerdeError(String),
+
+    /// The transport's send channel was closed.
+    ///
+    /// `cause` carries the underlying transport error message when available
+    /// (e.g. `"HTTP 401"` for an unauthorized remote, `"timeout"`, or the
+    /// raw `reqwest` / IO error). Surfaces as a richer UI hint than the
+    /// previous bare "channel closed" message.
+    #[error("server '{server}' transport closed: {cause}")]
+    StdinClosed { server: String, cause: String },
+
+    /// A hot reload was requested for a server that is not currently managed.
+    #[error("cannot reload server '{server}': not found in managed sessions")]
+    ConfigReload { server: String },
+
+    /// The tool call was suspended because HITL approval is required.
+    ///
+    /// The caller should surface `approval_id` to the operator so they can
+    /// run `apollia-os mcp set-approval` to unblock future calls.
+    #[error("tool call to '{server}/{tool}' requires human approval (id={approval_id})")]
+    PendingApproval {
+        /// MCP server name.
+        server: String,
+        /// Tool name within the server.
+        tool: String,
+        /// UUID of the pending approval request created in the approval store.
+        approval_id: String,
+    },
+
+    /// A tool call arrived while the server is being hot-reloaded.
+    ///
+    /// The server has been disconnected but the new session is not yet established.
+    /// Callers should retry the operation after a short delay.
+    #[error("server '{server}' is currently being reloaded")]
+    ServerReloading { server: String },
+
+    /// The remote MCP server returned HTTP 401 Unauthorized during the handshake
+    /// or a tool call. `www_authenticate` carries the verbatim
+    /// `WWW-Authenticate` header (RFC 6750), which orchestration layers parse
+    /// to drive the MCP HTTP OAuth 2.1 flow.
+    #[error("server '{server}' returned 401 Unauthorized; OAuth handshake required")]
+    Unauthorized {
+        /// MCP server name.
+        server: String,
+        /// `WWW-Authenticate` header value verbatim (empty when the server
+        /// omitted the header, unusual but technically allowed).
+        www_authenticate: String,
+    },
+
+    /// The full schema for a tool could not be fetched on demand.
+    ///
+    /// Produced by [`McpSession::fetch_tool_schema`] when the tool name is not
+    /// known to the server, or when the on-demand `tools/list` round-trip fails
+    /// at the transport level. In [`LoadingMode::Deferred`] this is the typed
+    /// failure that replaces a silently empty schema (principle: fail fast).
+    #[error("server '{server}' schema fetch failed for tool '{tool}': {cause}")]
+    SchemaFetchFailed {
+        /// MCP server name.
+        server: String,
+        /// Tool name within the server.
+        tool: String,
+        /// Underlying cause: a transport error message or `"tool not found"`.
+        cause: String,
+    },
+}
+
+/// Build the human-readable `stderr_hint` suffix for handshake / call timeout
+/// errors. Empty input → empty hint (no leading separator added). When lines
+/// are present, they are concatenated oldest-first with ` | ` so an operator
+/// reading a single-line error message can still see what the subprocess said.
+pub(crate) fn format_stderr_hint(tail: &[String]) -> String {
+    if tail.is_empty() {
+        return String::new();
+    }
+    format!("; stderr: {}", tail.join(" | "))
+}
+
+// ─── loading mode ──────────────────────────────────────────────────────────
+
+/// Strategy for loading MCP tool schemas at session start.
+///
+/// `Eager` preserves the historical behavior: every tool schema is fetched at
+/// boot via `tools/list` and stored in [`McpSession::tools`]. `Deferred` fetches
+/// only a lightweight name/description index at boot
+/// ([`McpSession::tool_index`]); full schemas are fetched and cached on first
+/// use via [`McpSession::fetch_tool_schema`]. Deferred mode keeps the context
+/// cost near zero for large MCP ecosystems on local models with narrow windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadingMode {
+    /// Load all tool schemas during `start()`. This is the default and the
+    /// backward-compatible path for [`McpSession::start`].
+    Eager,
+    /// Load only the index of tool names and descriptions at boot. Full schemas
+    /// are fetched and cached on first use.
+    Deferred,
+}
+
+impl From<apollia_core::McpToolLoading> for LoadingMode {
+    /// Map the operator-facing config value to the session loading mode.
+    fn from(value: apollia_core::McpToolLoading) -> Self {
+        match value {
+            apollia_core::McpToolLoading::Eager => Self::Eager,
+            apollia_core::McpToolLoading::Deferred => Self::Deferred,
+        }
+    }
+}
+
+/// A lightweight entry in the deferred tool index.
+///
+/// Populated from a `tools/list` response when running in
+/// [`LoadingMode::Deferred`]. The entry stays cheap in the prompt, which is
+/// what deferring is about: the schema is held in memory but never advertised
+/// to the model unless the whole index fits the search limit.
+#[derive(Debug, Clone)]
+pub struct ToolIndexEntry {
+    /// Tool name within the server (e.g. `"search_pages"`).
+    pub name: String,
+    /// Human-readable description, when provided by the server.
+    pub description: Option<String>,
+}
+
+impl ToolIndexEntry {
+    /// The fully qualified name this tool answers to, `mcp:{server}/{tool}`.
+    #[must_use]
+    pub fn full_name(&self, server_name: &str) -> String {
+        format!("mcp:{server_name}/{}", self.name)
+    }
+}
+
+// ─── session ─────────────────────────────────────────────────────────────────
+
+/// Active session with a single MCP server.
+///
+/// Manages the JSON-RPC message routing and request/response correlation.
+/// The underlying byte-level I/O is handled by the [`McpTransport`] implementation.
+/// One session per server; owned by `McpClientManager`.
+pub struct McpSession {
+    /// Server configuration (name, timeouts, command, etc.).
+    config: McpServerConfig,
+    /// Transport that handles all byte-level send/recv with the server.
+    transport: Arc<dyn McpTransport>,
+    /// Pending in-flight requests: request ID → reply oneshot.
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    /// Monotonically increasing request ID counter.
+    next_id: AtomicU64,
+    /// Server capabilities received during the initialize handshake.
+    capabilities: ServerCapabilities,
+    /// Protocol revision the server answered with in `initialize`.
+    ///
+    /// The server picks it, not the client: a server is free to answer a
+    /// revision other than the one [`APOLLIA_MCP_PROTOCOL_VERSION`] offered.
+    /// Empty only before the handshake has landed.
+    protocol_version: String,
+    /// Server identity received during the initialize handshake.
+    server_info: ServerInfo,
+    /// Free-text operator guidance returned by the server in `initialize`,
+    /// or `None` when the server omitted the `instructions` field.
+    instructions: Option<String>,
+    /// Tools discovered via `tools/list`. Populated in [`LoadingMode::Eager`];
+    /// stays empty in [`LoadingMode::Deferred`] (see `tool_index`).
+    tools: Vec<McpToolDefinition>,
+    /// Loading strategy chosen at construction time.
+    loading_mode: LoadingMode,
+    /// Lightweight index of tool names and descriptions.
+    ///
+    /// Populated by `discover_tools_index` in [`LoadingMode::Deferred`] after the
+    /// boot `tools/list`. Empty in [`LoadingMode::Eager`] (schemas live in
+    /// `tools`).
+    tool_index: Vec<ToolIndexEntry>,
+    /// Cache of full JSON schemas keyed by tool name.
+    ///
+    /// Populated lazily by [`McpSession::fetch_tool_schema`] in
+    /// [`LoadingMode::Deferred`]. Stays empty in [`LoadingMode::Eager`], where
+    /// schemas are read directly from `tools`. Owned by the session, never shared
+    /// across actors.
+    schema_cache: HashMap<String, serde_json::Value>,
+    /// Instant at which the session was successfully started.
+    started_at: std::time::Instant,
+    /// Operational health, mutated by the manager after each operation.
+    ///
+    /// Initialised to `Healthy { verified: false }`: the handshake passed but no
+    /// real operation has yet proven the server's scopes/grants. Lives here so
+    /// it stays owned by the manager actor (no shared lock across actors).
+    health: McpHealth,
+    /// Background dispatch task: reads from the transport and routes responses.
+    _dispatch_task: tokio::task::JoinHandle<()>,
+}
+
+impl McpSession {
+    /// Connect the transport and perform the MCP `initialize` handshake in the
+    /// default [`LoadingMode::Eager`].
+    ///
+    /// Resolves `${VAR}` placeholders in `config.env` before spawning. Placeholders
+    /// prefixed with `APOLLIA_SECRET:` are resolved via `secret_store` when provided.
+    /// On success, returns a session whose every tool schema is already loaded and
+    /// ready to accept `tools/list` and `tools/call` requests.
+    ///
+    /// Equivalent to [`McpSession::start_with_mode`] with [`LoadingMode::Eager`];
+    /// the signature is preserved for backward compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McpSessionError`] when the subprocess cannot be spawned, the
+    /// `initialize` handshake fails or times out, or `tools/list` cannot be read.
+    pub async fn start(
+        config: McpServerConfig,
+        secret_store: Option<&dyn SecretResolver>,
+    ) -> Result<Self, McpSessionError> {
+        Self::start_with_mode(config, secret_store, LoadingMode::Eager).await
+    }
+
+    /// Connect the transport and perform the MCP `initialize` handshake with an
+    /// explicit [`LoadingMode`].
+    ///
+    /// In [`LoadingMode::Eager`] this behaves exactly like [`McpSession::start`]:
+    /// all tool schemas are fetched at boot. In [`LoadingMode::Deferred`] only the
+    /// lightweight tool index (names and descriptions) is populated at boot;
+    /// schemas are fetched on demand via [`McpSession::fetch_tool_schema`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McpSessionError`] when the subprocess cannot be spawned, the
+    /// `initialize` handshake fails or times out, or the boot `tools/list` cannot
+    /// be read.
+    pub async fn start_with_mode(
+        config: McpServerConfig,
+        secret_store: Option<&dyn SecretResolver>,
+        mode: LoadingMode,
+    ) -> Result<Self, McpSessionError> {
+        let resolved_env =
+            config
+                .resolve_env(secret_store)
+                .await
+                .map_err(|e| McpSessionError::SpawnFailed {
+                    server: config.name.clone(),
+                    cause: e.to_string(),
+                })?;
+
+        let transport: Arc<dyn McpTransport> =
+            Arc::from(create_transport(&config, resolved_env).map_err(|e| {
+                McpSessionError::SpawnFailed {
+                    server: config.name.clone(),
+                    cause: e.to_string(),
+                }
+            })?);
+
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let dispatch_task = spawn_dispatch_task(Arc::clone(&transport), Arc::clone(&pending));
+
+        let mut session = McpSession {
+            config,
+            transport,
+            pending,
+            next_id: AtomicU64::new(1),
+            capabilities: ServerCapabilities::default(),
+            protocol_version: String::new(),
+            server_info: ServerInfo {
+                name: String::new(),
+                version: None,
+            },
+            instructions: None,
+            tools: Vec::new(),
+            loading_mode: mode,
+            tool_index: Vec::new(),
+            schema_cache: HashMap::new(),
+            started_at: std::time::Instant::now(),
+            health: McpHealth::Healthy { verified: false },
+            _dispatch_task: dispatch_task,
+        };
+
+        session.initialize().await?;
+        match mode {
+            LoadingMode::Eager => session.discover_tools().await?,
+            LoadingMode::Deferred => session.discover_tools_index().await?,
+        }
+
+        Ok(session)
+    }
+
+    /// Perform the MCP `initialize` handshake.
+    ///
+    /// Sends the `initialize` request with the client identity and capabilities,
+    /// stores the server's capabilities and identity, then sends the
+    /// `notifications/initialized` notification to complete the handshake.
+    async fn initialize(&mut self) -> Result<(), McpSessionError> {
+        let params = build_initialize_params();
+
+        let params_value = serde_json::to_value(&params)
+            .map_err(|e| McpSessionError::SerdeError(e.to_string()))?;
+
+        let timeout_secs = self.config.init_timeout_secs;
+        let result = self
+            .send_request("initialize", Some(params_value), timeout_secs)
+            .await?;
+
+        let init_result: InitializeResult =
+            serde_json::from_value(result).map_err(|e| McpSessionError::InitializeFailed {
+                server: self.config.name.clone(),
+                cause: e.to_string(),
+            })?;
+
+        debug!(
+            server = %self.config.name,
+            protocol_version = %init_result.protocol_version,
+            "mcp.handshake.completed"
+        );
+
+        self.capabilities = init_result.capabilities;
+        self.protocol_version = init_result.protocol_version;
+        self.server_info = init_result.server_info;
+        self.instructions = crate::sanitize::sanitize_free_text(
+            init_result.instructions,
+            crate::sanitize::MAX_INSTRUCTIONS_LEN,
+        );
+
+        self.send_notification("notifications/initialized", None)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Returns the server name from the configuration.
+    pub fn server_name(&self) -> &str {
+        &self.config.name
+    }
+
+    /// Returns the server capabilities received during the initialize handshake.
+    pub fn capabilities(&self) -> &ServerCapabilities {
+        &self.capabilities
+    }
+
+    /// Returns the server identity received during the initialize handshake.
+    pub fn server_info(&self) -> &ServerInfo {
+        &self.server_info
+    }
+
+    /// Returns the protocol revision the server answered with during the
+    /// `initialize` handshake.
+    ///
+    /// This is what the server said, not what the client offered: report it
+    /// rather than [`APOLLIA_MCP_PROTOCOL_VERSION`] wherever a negotiated
+    /// version is promised.
+    pub fn protocol_version(&self) -> &str {
+        &self.protocol_version
+    }
+
+    /// Returns the server-level `instructions` from the `initialize` handshake,
+    /// or `None` when the server omitted them.
+    ///
+    /// The value is returned verbatim; an empty string is reported as
+    /// `Some("")`, leaving the decision to treat it as absent to the caller.
+    pub fn instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
+    }
+
+    /// Returns whether every tool call to this server requires HITL approval.
+    pub fn requires_approval(&self) -> bool {
+        self.config.requires_approval
+    }
+
+    /// Update whether tool calls to this server require HITL approval.
+    ///
+    /// The change takes effect immediately for future calls; no process restart
+    /// is required. Callers are responsible for persisting the change to `mcp.toml`.
+    pub fn set_requires_approval(&mut self, requires_approval: bool) {
+        self.config.requires_approval = requires_approval;
+    }
+
+    /// Returns the OS process ID of the server process, if applicable.
+    ///
+    /// Delegates to the transport; subprocess-based transports return the child PID.
+    /// Network-based transports return `None`.
+    pub fn pid(&self) -> Option<u32> {
+        self.transport.pid()
+    }
+
+    /// Returns the number of seconds elapsed since this session was started.
+    pub fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+
+    /// Returns the configuration used to start this session.
+    pub fn config(&self) -> &McpServerConfig {
+        &self.config
+    }
+
+    /// Returns the current operational health of this session.
+    pub fn health(&self) -> &McpHealth {
+        &self.health
+    }
+
+    /// Overwrite the operational health. Called by the manager after each
+    /// operation has been classified.
+    pub(crate) fn set_health(&mut self, health: McpHealth) {
+        self.health = health;
+    }
+
+    /// Gracefully shut down the session.
+    ///
+    /// 1. Sends a `notifications/cancelled` notification (best-effort; silently
+    ///    ignored if the transport is already closed).
+    /// 2. Shuts down the transport (terminates the subprocess or closes the connection).
+    pub async fn shutdown(self) {
+        let _ = self
+            .send_notification("notifications/cancelled", None)
+            .await;
+        let _ = self.transport.shutdown().await;
+        tracing::info!(server = %self.config.name, "mcp.session.shutdown.completed");
+    }
+}
+
+// ─── handshake ───────────────────────────────────────────────────────────────
+
+/// Build the `initialize` parameters sent to every MCP server.
+///
+/// Lives outside [`McpSession`] so the advertised capability set can be
+/// asserted without a live transport.
+///
+/// The three client capabilities stay absent, and that is the point rather
+/// than an oversight. An advertised capability is a promise the server acts
+/// on: a compliant one sends `roots/list`, `sampling/createMessage` or
+/// `elicitation/create` and waits for an answer. The dispatch task routes
+/// responses onto pending requests and drops everything else, so no
+/// server-initiated request is answered here. Advertising one leaves a
+/// compliant server waiting, and in the case of `roots` it also reads as a
+/// filesystem boundary that does not exist.
+///
+/// `protocol` declares no request or result type for sampling or elicitation:
+/// the types and the handler land in the same change that sets those fields,
+/// never before. `roots` goes back on the wire the day a handler answers
+/// `roots/list` with declared directories.
+fn build_initialize_params() -> InitializeParams {
+    InitializeParams {
+        protocol_version: APOLLIA_MCP_PROTOCOL_VERSION.to_string(),
+        capabilities: ClientCapabilities {
+            roots: None,
+            sampling: None,
+            elicitation: None,
+        },
+        client_info: ClientInfo {
+            name: "apollia-runtime".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    }
+}
+
+// ─── background tasks ────────────────────────────────────────────────────────
+
+/// Spawn the dispatch task.
+///
+/// Calls [`McpTransport::recv`] in a loop, deserialises each line as a
+/// [`JsonRpcResponse`], and routes it to the caller waiting on the matching
+/// entry in `pending`. Exits when the transport closes (recv returns an error).
+///
+/// On exit it drains `pending`, dropping every reply sender. That drop is the
+/// only signal a caller gets that the server died: without it a request in
+/// flight waits out its whole timeout, and a child that exits during the
+/// handshake is reported as a slow server rather than a dead one.
+fn spawn_dispatch_task(
+    transport: Arc<dyn McpTransport>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        dispatch_loop(transport.as_ref(), &pending).await;
+        let dropped = pending.lock().await.drain().count();
+        if dropped > 0 {
+            warn!(
+                pending = dropped,
+                "mcp.dispatch.closed_with_pending_requests"
+            );
+        }
+    })
+}
+
+/// Route responses until the transport closes.
+async fn dispatch_loop(
+    transport: &dyn McpTransport,
+    pending: &Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>,
+) {
+    while let Ok(line) = transport.recv().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<JsonRpcResponse>(&line) {
+            Ok(response) => {
+                if let Some(id) = response.id {
+                    let mut map = pending.lock().await;
+                    if let Some(sender) = map.remove(&id) {
+                        // The receiver may have been dropped on timeout, which is expected.
+                        let _ = sender.send(response);
+                    }
+                }
+                // Notifications (no id) are intentionally ignored in V1.
+            }
+            Err(e) => {
+                warn!(error = %e, "mcp.jsonrpc.line.parse.failed");
+            }
+        }
+    }
+}
+
+// ─── tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::retry::{compute_backoff_delay, with_transport_retry, McpRetryConfig};
+    use super::*;
+    use crate::protocol::ToolsListResult;
+    use std::collections::HashMap;
+
+    fn make_config(
+        name: &str,
+        command: &str,
+        args: Vec<String>,
+        init_timeout_secs: u64,
+        call_timeout_secs: u64,
+    ) -> McpServerConfig {
+        McpServerConfig {
+            format_version: 1,
+            name: name.to_string(),
+            command: command.to_string(),
+            args,
+            env: HashMap::new(),
+            transport: "stdio".to_string(),
+            url: None,
+            requires_approval: false,
+            init_timeout_secs,
+            call_timeout_secs,
+            max_response_bytes: 8 * 1024 * 1024,
+            max_tools: 256,
+            tags: vec![],
+        }
+    }
+
+    #[test]
+    fn test_handshake_advertises_no_unanswered_capability() {
+        // GIVEN the initialize parameters apollia sends to every MCP server
+        let params = build_initialize_params();
+        // WHEN they are serialized onto the wire
+        let value = serde_json::to_value(&params).unwrap();
+        // THEN no client capability is advertised, because nothing here
+        // answers a server-initiated request: `roots/list`,
+        // `sampling/createMessage` and `elicitation/create` would all wait
+        // forever. Flip one of these assertions only in the change that adds
+        // the handler for it.
+        assert!(value["capabilities"].get("roots").is_none());
+        assert!(value["capabilities"].get("sampling").is_none());
+        assert!(value["capabilities"].get("elicitation").is_none());
+    }
+
+    #[test]
+    fn test_tools_list_result_parsing() {
+        // GIVEN a tools/list response with three tools
+        let json = serde_json::json!({
+            "tools": [
+                {"name": "search", "description": "Search pages", "inputSchema": {"type": "object"}},
+                {"name": "create", "inputSchema": {"type": "object"}},
+                {"name": "delete", "description": "Delete a page", "inputSchema": {"type": "object"}}
+            ]
+        });
+        // WHEN
+        let result: ToolsListResult = serde_json::from_value(json).unwrap();
+        // THEN
+        assert_eq!(result.tools.len(), 3);
+        assert_eq!(result.tools[0].name, "search");
+        assert_eq!(result.tools[1].description, None);
+    }
+
+    #[test]
+    fn test_empty_tools_list_is_valid() {
+        // GIVEN a tools/list response with no tools
+        let json = serde_json::json!({"tools": []});
+        // WHEN
+        let result: ToolsListResult = serde_json::from_value(json).unwrap();
+        // THEN
+        assert!(result.tools.is_empty());
+    }
+
+    #[test]
+    fn test_session_error_display() {
+        // GIVEN
+        let error = McpSessionError::SpawnFailed {
+            server: "notion".to_string(),
+            cause: "command not found".to_string(),
+        };
+        // WHEN / THEN
+        assert!(error.to_string().contains("notion"));
+        assert!(error.to_string().contains("command not found"));
+    }
+
+    #[test]
+    fn test_schema_fetch_failed_display() {
+        // GIVEN a deferred-mode schema fetch failure
+        let error = McpSessionError::SchemaFetchFailed {
+            server: "notion".to_string(),
+            tool: "search_pages".to_string(),
+            cause: "tool not found".to_string(),
+        };
+        // WHEN / THEN the message carries server, tool, and cause
+        let display = error.to_string();
+        assert!(display.contains("notion"));
+        assert!(display.contains("search_pages"));
+        assert!(display.contains("tool not found"));
+    }
+
+    #[test]
+    fn test_loading_mode_is_copy_and_comparable() {
+        // GIVEN the two loading modes
+        let eager = LoadingMode::Eager;
+        // WHEN copied (Copy) and compared (Eq)
+        let also_eager = eager;
+        // THEN equality and inequality hold without moving the value
+        assert_eq!(eager, also_eager);
+        assert_ne!(LoadingMode::Eager, LoadingMode::Deferred);
+    }
+
+    #[test]
+    fn test_initialize_timeout_error_display() {
+        // GIVEN
+        let error = McpSessionError::InitializeTimeout {
+            server: "notion".to_string(),
+            timeout_secs: 30,
+            stderr_hint: String::new(),
+        };
+        // WHEN / THEN
+        assert!(error.to_string().contains("30s"));
+    }
+
+    #[test]
+    fn test_initialize_timeout_error_includes_stderr_hint() {
+        // GIVEN an initialize timeout carrying a tail of the child's stderr
+        let error = McpSessionError::InitializeTimeout {
+            server: "filesystem".to_string(),
+            timeout_secs: 30,
+            stderr_hint: "; stderr: npm: command not found".to_string(),
+        };
+        // WHEN the error is rendered
+        let msg = error.to_string();
+        // THEN the operator reads the child's own message, not only the timeout
+        assert!(msg.contains("npm: command not found"));
+        assert!(msg.contains("stderr"));
+    }
+
+    #[test]
+    fn test_format_stderr_hint() {
+        // GIVEN an empty stderr tail, then one line, then three
+        // WHEN each is formatted into a hint
+        // THEN an empty tail yields no hint at all
+        assert_eq!(format_stderr_hint(&[]), "");
+        // THEN a single line is carried behind the stderr prefix
+        let hint = format_stderr_hint(&["boom".to_string()]);
+        assert!(hint.contains("boom"));
+        assert!(hint.starts_with("; stderr: "));
+        // THEN several lines are kept oldest first, joined by a pipe
+        let hint = format_stderr_hint(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(hint.contains("a | b | c"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_invalid_command_fails() {
+        // GIVEN a command that does not exist on this system
+        let config = make_config("test", "nonexistent-binary-12345", vec![], 5, 10);
+        // WHEN
+        let result = McpSession::start(config, None).await;
+        // THEN
+        assert!(matches!(result, Err(McpSessionError::SpawnFailed { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_handshake_timeout_when_server_never_responds() {
+        // GIVEN `cat` spawns successfully but never writes a JSON-RPC response
+        let config = make_config("timeout-test", "cat", vec![], 1, 10);
+        // WHEN
+        let result = McpSession::start(config, None).await;
+        // THEN the timeout fires and an error is returned
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tool_call_params_serialization() {
+        use crate::protocol::ToolCallParams;
+        // GIVEN
+        let params = ToolCallParams {
+            name: "search".to_string(),
+            arguments: Some(serde_json::json!({"query": "test"})),
+        };
+        // WHEN
+        let value = serde_json::to_value(&params).unwrap();
+        // THEN
+        assert_eq!(value["name"], "search");
+        assert_eq!(value["arguments"]["query"], "test");
+    }
+
+    #[test]
+    fn test_jsonrpc_error_display() {
+        // GIVEN
+        let error = McpSessionError::JsonRpcError {
+            server: "notion".to_string(),
+            code: -32600,
+            message: "Invalid Request".to_string(),
+        };
+        // WHEN / THEN
+        let display = error.to_string();
+        assert!(display.contains("-32600"));
+        assert!(display.contains("Invalid Request"));
+    }
+
+    #[test]
+    fn test_tool_call_result_with_is_error() {
+        use crate::protocol::ToolCallResult;
+        // GIVEN
+        let json = serde_json::json!({
+            "content": [{"type": "text", "text": "tool not found"}],
+            "isError": true
+        });
+        // WHEN
+        let result: ToolCallResult = serde_json::from_value(json).unwrap();
+        // THEN
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn test_shutdown_notification_method() {
+        // GIVEN the cancellation notification method name
+        let method = "notifications/cancelled";
+        // WHEN its namespace is checked
+        // THEN it conforms to the MCP protocol notification namespace
+        assert!(method.starts_with("notifications/"));
+    }
+
+    #[test]
+    fn test_tool_call_timeout_error_display() {
+        // GIVEN
+        let error = McpSessionError::ToolCallTimeout {
+            server: "notion".to_string(),
+            tool: "search".to_string(),
+            timeout_secs: 60,
+        };
+        // WHEN / THEN
+        let display = error.to_string();
+        assert!(display.contains("60s"));
+        assert!(display.contains("search"));
+    }
+
+    #[test]
+    fn test_mcp_transport_error_backoff_exponential() {
+        // GIVEN the default retry config
+        let cfg = McpRetryConfig::DEFAULT;
+
+        // WHEN computing delays for attempts 0, 1, 2
+        let delay0 = compute_backoff_delay(0, cfg.base_delay_secs, cfg.max_delay_secs);
+        let delay1 = compute_backoff_delay(1, cfg.base_delay_secs, cfg.max_delay_secs);
+        let delay2 = compute_backoff_delay(2, cfg.base_delay_secs, cfg.max_delay_secs);
+
+        // THEN delays follow base * 2^attempt, capped at max_delay_secs
+        assert_eq!(delay0, 1, "attempt 0 → 1s");
+        assert_eq!(delay1, 2, "attempt 1 → 2s");
+        assert_eq!(delay2, 4, "attempt 2 → 4s");
+
+        // AND large attempts are capped at max_delay_secs
+        let delay_large = compute_backoff_delay(10, cfg.base_delay_secs, cfg.max_delay_secs);
+        assert_eq!(
+            delay_large, cfg.max_delay_secs,
+            "large attempt → max_delay_secs"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_transport_error_retries_3_times() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        // GIVEN a call that fails with StdinClosed for the first 3 attempts and succeeds on the 4th.
+        // Zero-delay config so the test does not sleep.
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        let cfg = McpRetryConfig {
+            max_retries: 3,
+            base_delay_secs: 0,
+            max_delay_secs: 0,
+        };
+
+        // WHEN the call is driven through the transport retry
+        let result = with_transport_retry(&cfg, "test-server", || {
+            let count = call_count_clone.clone();
+            async move {
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 3 {
+                    Err(McpSessionError::StdinClosed {
+                        server: "test-server".to_string(),
+                        cause: "simulated".to_string(),
+                    })
+                } else {
+                    Ok(42u32)
+                }
+            }
+        })
+        .await;
+
+        // THEN the call succeeds after 3 retries (4 total attempts)
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 42u32);
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            4,
+            "expected 4 total attempts (1 + 3 retries)"
+        );
+    }
+}

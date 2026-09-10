@@ -1,0 +1,64 @@
+name: Auto-close external PRs
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+# OpenSSF Dangerous-Workflow note: this workflow uses `pull_request_target`,
+# which runs with a base-repo write token. It is safe here because it never
+# checks out or executes PR-authored code. There is no actions/checkout of the
+# PR head, and the github-script step below only reads the PR number (an
+# integer) and calls the GitHub REST API. No PR-controlled value is ever
+# interpolated into a shell `run:`. Keep it that way.
+jobs:
+  close:
+    # The policy targets external human contributors only. Dependabot and the
+    # github-actions bot are repository tooling, not external contributors, and
+    # neither bot login equals the repository owner: without the two exclusions
+    # below, the filter closes their pull requests as well.
+    if: >
+      github.event.pull_request.user.login != github.repository_owner &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment, label, close
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const number = context.payload.pull_request.number;
+
+            const body = [
+              "Thanks for opening this pull request.",
+              "",
+              "Apollia OS is currently a single-maintainer preview.",
+              "Pull requests are auto-closed by policy so external contributors do not",
+              "get stuck waiting for a review that will not come.",
+              "",
+              "If you have a concrete bug or feature idea, please open an issue instead:",
+              "  - Bug: https://github.com/" + owner + "/" + repo + "/issues/new?template=bug_report.yml",
+              "  - Build failure: https://github.com/" + owner + "/" + repo + "/issues/new?template=build_failure.yml",
+              "  - Feature: https://github.com/" + owner + "/" + repo + "/issues/new?template=feature_request.yml",
+              "",
+              "For usage questions, please use Discussions Q&A.",
+              "",
+              "Thanks again for your interest in the project."
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: number, body
+            });
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: number, labels: ["wontfix-policy"]
+            });
+
+            await github.rest.pulls.update({
+              owner, repo, pull_number: number, state: "closed"
+            });

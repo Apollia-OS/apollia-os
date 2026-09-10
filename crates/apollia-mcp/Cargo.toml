@@ -1,0 +1,33 @@
+[package]
+name = "apollia-mcp"
+version = "0.1.0-preview"
+edition.workspace = true
+rust-version.workspace = true
+description = "Apollia OS - MCP client: config, JSON-RPC, session, manager, executor"
+license.workspace = true
+
+[dependencies]
+apollia-core  = { workspace = true, features = ["net"] }
+apollia-auth  = { workspace = true }
+apollia-tools = { workspace = true }
+async-trait   = { workspace = true }
+futures       = { workspace = true }
+reqwest       = { workspace = true }
+serde         = { workspace = true }
+rusqlite      = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }
+toml          = { workspace = true }
+tracing       = { workspace = true }
+mdns-sd       = { workspace = true }
+uuid          = { workspace = true }
+chrono        = { workspace = true }
+
+[dev-dependencies]
+axum     = { workspace = true }
+tempfile = { workspace = true }
+tokio    = { workspace = true }
+
+[lints]
+workspace = true

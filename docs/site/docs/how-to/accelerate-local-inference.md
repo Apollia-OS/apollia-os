@@ -1,0 +1,152 @@
+---
+sidebar_position: 9
+title: Get the most from local inference
+---
+
+# Get the most from local inference
+
+Local LLM inference is served by an embedded `llama-server` (upstream
+llama.cpp) that the daemon spawns and supervises over its OpenAI-compatible HTTP
+API. This is the built-in and only local engine: there is no separate process to
+install, run, or point Apollia at. It ships prebuilt inside the desktop app, and
+on a source build the daemon finds `llama-server` on your `PATH` (see
+[Install and run the runtime](/how-to/install-and-run#local-gguf-inference)).
+
+Two capabilities that used to require an extra, hand-run server are now on by
+default, because the embedded engine is that server:
+
+- **Continuous batching.** The engine decodes several sequences in the same GPU
+  pass, so concurrent and batch requests share the hardware instead of
+  serializing one behind another. Nothing to enable.
+- **Native tool calling.** The engine is driven with `--jinja`, so tool calls go
+  through the model's own chat template rather than a bespoke grammar path. Local
+  models call your tools reliably, with no tuning on your side.
+
+Tracking upstream llama.cpp also widens model coverage: newer architectures land
+in the engine as they land upstream.
+
+## Which engine ships with which artifact
+
+The engine is chosen when the artifact is built, one per artifact, so there is
+nothing to select at install time. What ships:
+
+| Artifact | Engine | Covers |
+|---|---|---|
+| Desktop app, macOS | Metal | Apple Silicon |
+| Desktop app, Windows and Linux, default bundle | Vulkan | NVIDIA, AMD and Intel |
+| Desktop app, Windows and Linux, `-cuda` bundle | CUDA | NVIDIA |
+| CLI, `*-cpu` presets | CPU | any machine, no GPU offload |
+| CLI, `*-vulkan` presets | Vulkan | NVIDIA, AMD and Intel |
+
+Vulkan in the default desktop bundle is a deliberate trade. One 32 MB binary
+reaches all three vendors, where the CUDA engine covers NVIDIA alone, weighs
+238 MB plus a 373 MB runtime, and falls back to the processor on every other
+card. So NVIDIA owners get a second bundle rather than a heavier default one:
+the release pipeline compiles a CUDA `llama-server` itself, for Windows and for
+Linux, and hands it to the `-cuda` bundles. They are on the download page
+alongside the default ones.
+
+The command-line archives have no CUDA preset, on any platform. If you run the
+daemon from the CLI on an NVIDIA card and want CUDA rather than Vulkan, point it
+at a build of your own, below.
+
+## Configure a local backend
+
+Register a `.gguf` model as a local backend and let the daemon serve it. The
+provider name is `llama-cpp`:
+
+```sh
+apollia-os llm setup --local --model /path/to/model.gguf
+apollia-os llm reload
+apollia-os llm status
+```
+
+The daemon starts the embedded `llama-server` for that model on demand and routes
+inference to it. SSE streaming and tool calls travel the same path, already wired
+and tested.
+
+## Get good throughput
+
+The engine handles the mechanics (GPU offload, batching, KV cache). The choices
+that move throughput are upstream of it:
+
+- **Pick a model sized to your hardware.** A mixture-of-experts (MoE) model
+  activates only a fraction of its parameters per token, so it can beat a dense
+  model of similar quality on both speed and batch throughput. Prefer a
+  quantization that leaves headroom for the KV cache.
+- **Serve one model per server process.** The engine loads a single-file GGUF
+  model. Switching the default backend switches which model the daemon serves.
+- **Provision the slots before expecting concurrency.** Continuous batching is
+  on by default, but the engine starts with a single decode slot, so requests
+  queue rather than decode together. Raise `APOLLIA_LLAMA_N_PARALLEL` (below).
+
+## Tune the embedded engine
+
+<!-- claim:llama-server-env-overrides -->
+
+The embedded engine reads thirteen environment variables at every start, so a knob
+can be turned without a source build. Set them in the environment of whatever
+launches the daemon.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `APOLLIA_LLAMA_N_CTX` | `32768` | Context window in tokens. The default is a fixed value, not read from the model. |
+| `APOLLIA_LLAMA_N_GPU_LAYERS` | `999` | Layers offloaded to the GPU; `0` forces CPU. |
+| `APOLLIA_LLAMA_N_BATCH` | engine default | Logical batch size. |
+| `APOLLIA_LLAMA_N_UBATCH` | engine default | Physical micro-batch size. |
+| `APOLLIA_LLAMA_N_PARALLEL` | `1` | Decode slots served concurrently. |
+| `APOLLIA_LLAMA_CONT_BATCHING` | `true` | Continuous batching. |
+| `APOLLIA_LLAMA_CACHE_TYPE_K` | engine default | KV cache quantization, keys. |
+| `APOLLIA_LLAMA_CACHE_TYPE_V` | engine default | KV cache quantization, values. |
+| `APOLLIA_LLAMA_FLASH_ATTN` | `on` | Flash attention mode. |
+| `APOLLIA_LLAMA_CACHE_REUSE` | engine default | Prefix-reuse threshold. |
+| `APOLLIA_LLAMA_METRICS` | `false` | Exposes the engine's metrics endpoint. |
+| `APOLLIA_LLAMA_LOG_VERBOSITY` | `4` | Engine log level (`-lv`). At `4` the load names its device and its offload tally, which the daemon's journal reports as `llama.server.device`, `llama.server.offload` and `llama.server.buffer`. |
+| `APOLLIA_LLAMA_EXTRA_ARGS` | empty | Extra flags passed through verbatim. |
+
+Raising `N_PARALLEL` is what turns continuous batching into real concurrency: at
+the default of one slot, requests queue.
+
+To check that a model really loaded on the accelerator, read the daemon's
+journal at the next engine start: `llama.server.offload` carries the layers
+placed against the model's total, and `llama.server.buffer` the size of each
+buffer per device.
+
+The full list, including the secret-storage and diagnostic variables, is in
+[Environment variables](/reference/environment-variables).
+
+## Run an engine of your own
+
+On a source build the daemon uses the `llama-server` it finds on your `PATH`
+rather than a bundled binary. The repository ships a recipe to start one for
+local testing:
+
+```sh
+just llama-server /path/to/model.gguf
+```
+
+That recipe runs the upstream binary, so the usual llama.cpp options apply when
+you experiment locally: total context (`-c`) split across parallel slots (`-np`),
+GPU offload (`-ngl`), flash attention (`--flash-attn on`), and a quantized KV
+cache (`-ctk q8_0 -ctv q8_0`, which needs flash attention). These are upstream
+llama.cpp flags, useful for probing what your hardware sustains before you settle
+on a model and quantization.
+
+`APOLLIA_LLAMA_SERVER_BIN` points the daemon at a binary of your choosing, and
+it wins over the bundled one:
+
+```sh
+export APOLLIA_LLAMA_SERVER_BIN=/opt/llama.cpp/build/bin/llama-server
+```
+
+This is also the supported path for a CUDA build on Linux, where upstream
+publishes none. An operator running NVIDIA cards usually already has a
+llama.cpp compiled for those cards and tuned for that load; Apollia uses it
+rather than replacing it with a build of its own.
+
+## Related
+
+- [Install and run the runtime](/how-to/install-and-run) for the build and the
+  `PATH` requirement on a source build.
+- [Deploy in production](/how-to/deploy-in-production) for serving on a server.
+- The [CLI reference](/reference/cli) for the `llm` commands.

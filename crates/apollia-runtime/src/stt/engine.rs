@@ -1,0 +1,686 @@
+//! SttEngine, Tokio actor orchestrating Speech-to-Text transcriptions.
+//!
+//! The actor processes [`SttCommand`] messages received via a bounded `mpsc`
+//! channel. Callers interact exclusively through [`SttEngineHandle`], which is
+//! `Clone + Send + Sync`.
+//!
+//! Transcription runs in `spawn_blocking` because [`SttBackend::transcribe`]
+//! is synchronous (CPU-bound inference). Results are persisted in
+//! [`SttRepository`] fire-and-forget and broadcast via the [`EventBus`].
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{info, warn};
+
+use apollia_core::{EventBusSender, RuntimeEvent, SttConfigRow};
+use apollia_stt::{SttBackend, SttError, SttRepository, TranscriptResult};
+
+/// Bounded channel capacity for the actor mailbox.
+const CHANNEL_CAPACITY: usize = 32;
+
+// ── Public types ────────────────────────────────────────────────────
+
+/// Source of a transcription request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TranscriptSource {
+    /// Triggered by the global hotkey.
+    Hotkey,
+    /// Transcription of a file at the given path.
+    File(String),
+    /// Submitted via the REST API.
+    Api,
+}
+
+impl TranscriptSource {
+    /// Returns the string tag persisted in the repository (`"hotkey"`, `"file"`, `"api"`).
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Hotkey => "hotkey",
+            Self::File(_) => "file",
+            Self::Api => "api",
+        }
+    }
+}
+
+/// Runtime status of the STT engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SttStatus {
+    /// Whether STT is enabled in configuration.
+    pub enabled: bool,
+    /// Whether the model is loaded and ready for inference.
+    pub model_loaded: bool,
+    /// Filesystem path of the loaded model.
+    pub model_path: String,
+    /// Short model name (derived from filename without extension).
+    pub model_name: String,
+    /// Name of the active backend (e.g. `"whisper-cpp"`).
+    pub backend_name: String,
+    /// `true` when compiled with Apple Metal GPU acceleration.
+    pub metal_enabled: bool,
+    /// `true` when compiled with NVIDIA CUDA GPU acceleration.
+    pub cuda_enabled: bool,
+}
+
+/// Errors specific to the [`SttEngineHandle`] lifecycle and communication.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SttEngineError {
+    /// The underlying STT backend returned an error.
+    #[error("STT backend error: {0}")]
+    Backend(#[from] SttError),
+
+    /// The actor channel is closed, the engine has been shut down.
+    #[error("STT engine channel closed")]
+    ChannelClosed,
+}
+
+// ── Internal command enum ───────────────────────────────────────────
+
+/// Command sent to the SttEngine actor via its handle.
+enum SttCommand {
+    /// Request a transcription from an audio buffer.
+    Transcribe {
+        audio: Vec<f32>,
+        sample_rate: u32,
+        source: TranscriptSource,
+        /// Per-request language override; `None` falls back to the configured
+        /// hint. Distinguishing "not supplied" from "auto-detect" is why this is
+        /// a nested option rather than a plain one.
+        language: Option<Option<String>>,
+        reply: oneshot::Sender<Result<TranscriptResult, SttError>>,
+    },
+    /// Query the current engine status.
+    GetStatus { reply: oneshot::Sender<SttStatus> },
+    /// Request a graceful shutdown.
+    Shutdown,
+}
+
+// ── Public handle ───────────────────────────────────────────────────
+
+/// Clonable, `Send + Sync` handle to the [`SttEngine`] actor.
+///
+/// All public methods send a command over the bounded channel and await
+/// the response via a `oneshot` reply channel.
+#[derive(Clone)]
+pub struct SttEngineHandle {
+    tx: mpsc::Sender<SttCommand>,
+}
+
+impl SttEngineHandle {
+    /// Spawn the SttEngine actor and return its handle.
+    ///
+    /// Emits [`RuntimeEvent::SttModelLoaded`] on the EventBus after the actor
+    /// is spawned. The caller is responsible for loading the backend and opening
+    /// the repository before calling this function.
+    pub fn start(
+        backend: Box<dyn SttBackend>,
+        repository: SttRepository,
+        config: SttConfigRow,
+        event_bus: EventBusSender,
+    ) -> Self {
+        let model_name = std::path::Path::new(&config.model_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let backend_name = backend.name().to_owned();
+        let model_path_display = config.model_path.clone();
+
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+
+        let engine = SttEngine {
+            backend: Arc::from(backend),
+            repository: std::sync::Mutex::new(repository),
+            event_bus: event_bus.clone(),
+            config,
+            model_name: model_name.clone(),
+            // Nothing has been loaded yet: `builder.rs` checks that the model file
+            // exists and hands over a backend that posts to the runner sidecar,
+            // which loads on its first transcription. Starting therefore proves the
+            // file is present, never that it is a model the engine can read.
+            model_loaded: false,
+        };
+        tokio::spawn(engine.run(rx));
+
+        let _ = event_bus.send(RuntimeEvent::SttModelLoaded {
+            backend: backend_name,
+            model_path: model_path_display,
+            model_name,
+        });
+
+        Self { tx }
+    }
+
+    /// Request a transcription of the given audio buffer.
+    ///
+    /// The actual inference runs in `spawn_blocking`; the result is persisted
+    /// and broadcast before the reply is sent.
+    pub async fn transcribe(
+        &self,
+        audio: Vec<f32>,
+        sample_rate: u32,
+        source: TranscriptSource,
+    ) -> Result<TranscriptResult, SttEngineError> {
+        self.transcribe_inner(audio, sample_rate, source, None)
+            .await
+    }
+
+    /// Request a transcription with a per-request language hint.
+    ///
+    /// `language` is `Some(Some(code))` to force a language, `Some(None)` to
+    /// force auto-detection, and `None` to use the configured hint. The HTTP
+    /// route uses this so the `language` field it accepts actually reaches the
+    /// model; before it existed the field was parsed and then discarded.
+    pub async fn transcribe_with_language(
+        &self,
+        audio: Vec<f32>,
+        sample_rate: u32,
+        source: TranscriptSource,
+        language: Option<String>,
+    ) -> Result<TranscriptResult, SttEngineError> {
+        self.transcribe_inner(audio, sample_rate, source, Some(language))
+            .await
+    }
+
+    async fn transcribe_inner(
+        &self,
+        audio: Vec<f32>,
+        sample_rate: u32,
+        source: TranscriptSource,
+        language: Option<Option<String>>,
+    ) -> Result<TranscriptResult, SttEngineError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(SttCommand::Transcribe {
+                audio,
+                sample_rate,
+                source,
+                language,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| SttEngineError::ChannelClosed)?;
+        reply_rx
+            .await
+            .map_err(|_| SttEngineError::ChannelClosed)?
+            .map_err(SttEngineError::Backend)
+    }
+
+    /// Query the current status of the engine.
+    ///
+    /// Returns `None` if the actor has shut down.
+    pub async fn status(&self) -> Option<SttStatus> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(SttCommand::GetStatus { reply: reply_tx })
+            .await
+            .ok()?;
+        reply_rx.await.ok()
+    }
+
+    /// Request a graceful shutdown of the actor.
+    ///
+    /// The backend's [`SttBackend::unload`] is called before the actor exits.
+    pub async fn shutdown(&self) {
+        let _ = self.tx.send(SttCommand::Shutdown).await;
+    }
+}
+
+// ── Private actor ───────────────────────────────────────────────────
+
+/// Private actor struct, owns the mutable state.
+///
+/// Spawned as a Tokio task by [`SttEngineHandle::start`]. Processes one
+/// command at a time from the bounded `mpsc` receiver.
+///
+/// `SttRepository` is wrapped in `std::sync::Mutex` because `rusqlite::Connection`
+/// is `Send` but not `Sync`; the Mutex makes `&SttEngine` `Send` across awaits.
+/// Since the actor is single-threaded, the lock is never contended.
+struct SttEngine {
+    backend: Arc<dyn SttBackend>,
+    repository: std::sync::Mutex<SttRepository>,
+    event_bus: EventBusSender,
+    config: SttConfigRow,
+    model_name: String,
+    /// Whether a transcription has ever come back from the backend.
+    ///
+    /// The API contract calls this "the model is loaded and ready for
+    /// inference", and it was a literal `true` in the status reply: every
+    /// caller was told the engine was ready the moment the actor answered.
+    /// `builder.rs` only checks that the model file exists, and the runner
+    /// sidecar loads it on the first transcription, so a started actor proved
+    /// the presence of a file and nothing about its contents. A seeded tree
+    /// carrying a 4 KiB placeholder reported `STT Engine: ready`.
+    model_loaded: bool,
+}
+
+impl SttEngine {
+    /// Main actor loop, processes commands until `Shutdown` or channel close.
+    async fn run(mut self, mut rx: mpsc::Receiver<SttCommand>) {
+        info!("stt.engine.started");
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                SttCommand::Transcribe {
+                    audio,
+                    sample_rate,
+                    source,
+                    language,
+                    reply,
+                } => {
+                    let result = self
+                        .handle_transcribe(audio, sample_rate, &source, language)
+                        .await;
+                    // The sidecar loads the model on its first transcription, so a
+                    // reading that came back is the only proof this daemon has that
+                    // the model on disk is one the engine can load.
+                    if result.is_ok() {
+                        self.model_loaded = true;
+                    }
+                    let _ = reply.send(result);
+                }
+                SttCommand::GetStatus { reply } => {
+                    let _ = reply.send(SttStatus {
+                        enabled: self.config.enabled,
+                        model_loaded: self.model_loaded,
+                        model_path: self.config.model_path.clone(),
+                        model_name: self.model_name.clone(),
+                        backend_name: self.backend.name().to_owned(),
+                        // Local STT acceleration is selected inside the apollia-runner
+                        // sidecar, not by daemon compile-time features, so the daemon
+                        // never reports an in-process GPU backend.
+                        metal_enabled: false,
+                        cuda_enabled: false,
+                    });
+                }
+                SttCommand::Shutdown => {
+                    self.backend.unload();
+                    break;
+                }
+            }
+        }
+        info!("stt.engine.stopped");
+    }
+
+    /// Runs transcription in `spawn_blocking`, persists result, and emits event.
+    async fn handle_transcribe(
+        &self,
+        audio: Vec<f32>,
+        sample_rate: u32,
+        source: &TranscriptSource,
+        language: Option<Option<String>>,
+    ) -> Result<TranscriptResult, SttError> {
+        let backend = Arc::clone(&self.backend);
+        // A per-request hint wins over the configured one; absent a request
+        // hint, the persisted configuration decides.
+        let language_hint = language.unwrap_or_else(|| self.config.language.clone());
+
+        let result = tokio::task::spawn_blocking(move || {
+            backend.transcribe(&audio, sample_rate, language_hint.as_deref())
+        })
+        .await
+        .map_err(|e| SttError::Internal(format!("spawn_blocking join failed: {e}")))?;
+
+        match &result {
+            Ok(transcript) => {
+                let source_str = source.as_str();
+                match self.repository.lock() {
+                    Ok(repo) => {
+                        if let Err(e) = repo.insert(source_str, transcript, Some(&self.model_name))
+                        {
+                            warn!(error = %e, "stt.transcription.persist.failed");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            detail = "skipping persistence",
+                            "stt.repository.lock.poisoned"
+                        );
+                    }
+                }
+                let _ = self.event_bus.send(RuntimeEvent::SttTranscribed {
+                    text: transcript.full_text.clone(),
+                    language: transcript.language.clone(),
+                    source: source_str.to_owned(),
+                    duration_ms: transcript.audio_duration_ms,
+                    processing_time_ms: transcript.processing_time_ms,
+                });
+            }
+            Err(e) => {
+                let _ = self.event_bus.send(RuntimeEvent::SttTranscriptionFailed {
+                    reason: e.to_string(),
+                });
+            }
+        }
+
+        result
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apollia_stt::TranscriptSegment;
+    use tokio::sync::broadcast;
+
+    /// Fake backend for unit tests, returns a fixed transcript.
+    ///
+    /// Records the language hint it was handed so tests can assert what
+    /// actually reached the model rather than what the caller passed in.
+    struct FakeBackend {
+        should_fail: bool,
+        seen_language: Arc<std::sync::Mutex<Option<Option<String>>>>,
+    }
+
+    impl SttBackend for FakeBackend {
+        fn name(&self) -> &str {
+            "fake"
+        }
+
+        fn transcribe(
+            &self,
+            _audio: &[f32],
+            _sample_rate: u32,
+            _language_hint: Option<&str>,
+        ) -> Result<TranscriptResult, SttError> {
+            if let Ok(mut guard) = self.seen_language.lock() {
+                *guard = Some(_language_hint.map(str::to_owned));
+            }
+            if self.should_fail {
+                return Err(SttError::TranscriptionFailed {
+                    reason: "forced failure".to_owned(),
+                });
+            }
+            Ok(TranscriptResult {
+                full_text: "Bonjour le monde".to_owned(),
+                segments: vec![TranscriptSegment {
+                    text: "Bonjour le monde".to_owned(),
+                    start_ms: 0,
+                    end_ms: 1500,
+                    confidence: Some(0.95),
+                }],
+                language: Some("fr".to_owned()),
+                audio_duration_ms: 1500,
+                processing_time_ms: 200,
+            })
+        }
+    }
+
+    fn test_config() -> SttConfigRow {
+        SttConfigRow {
+            enabled: true,
+            model_path: "/tmp/test-model.bin".to_owned(),
+            language: Some("fr".to_owned()),
+            ..SttConfigRow::default()
+        }
+    }
+
+    fn start_test_engine(
+        should_fail: bool,
+    ) -> (SttEngineHandle, broadcast::Receiver<RuntimeEvent>) {
+        let (handle, rx, _) = start_test_engine_observing_language(should_fail);
+        (handle, rx)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn start_test_engine_observing_language(
+        should_fail: bool,
+    ) -> (
+        SttEngineHandle,
+        broadcast::Receiver<RuntimeEvent>,
+        Arc<std::sync::Mutex<Option<Option<String>>>>,
+    ) {
+        let (event_tx, event_rx) = broadcast::channel(64);
+        let repo_dir = tempfile::tempdir().expect("tempdir");
+        let repo = SttRepository::open(&repo_dir.path().join("stt.db")).expect("open repo");
+        let seen_language = Arc::new(std::sync::Mutex::new(None));
+        let backend = Box::new(FakeBackend {
+            should_fail,
+            seen_language: Arc::clone(&seen_language),
+        });
+        let handle = SttEngineHandle::start(backend, repo, test_config(), event_tx);
+        // Leak tempdir to keep it alive (tests are short-lived)
+        std::mem::forget(repo_dir);
+        (handle, event_rx, seen_language)
+    }
+
+    #[tokio::test]
+    async fn transcribe_success_returns_transcript_and_emits_event() {
+        // GIVEN
+        let (handle, mut event_rx) = start_test_engine(false);
+
+        // Drain the SttModelLoaded event
+        let model_event = event_rx.recv().await.expect("model event");
+        assert!(matches!(model_event, RuntimeEvent::SttModelLoaded { .. }));
+
+        // WHEN
+        let result = handle
+            .transcribe(vec![0.0; 16000], 16000, TranscriptSource::Hotkey)
+            .await;
+
+        // THEN
+        let transcript = result.expect("transcribe should succeed");
+        assert_eq!(transcript.full_text, "Bonjour le monde");
+        assert_eq!(transcript.language.as_deref(), Some("fr"));
+
+        let event = event_rx.recv().await.expect("transcribed event");
+        match event {
+            RuntimeEvent::SttTranscribed { text, source, .. } => {
+                assert_eq!(text, "Bonjour le monde");
+                assert_eq!(source, "hotkey");
+            }
+            other => unreachable!("unexpected event in test mock: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn per_request_language_reaches_the_backend() {
+        // GIVEN an engine configured with French
+        let (handle, _rx, seen) = start_test_engine_observing_language(false);
+
+        // WHEN a caller asks for English on this request only
+        handle
+            .transcribe_with_language(
+                vec![0.0; 16000],
+                16000,
+                TranscriptSource::Api,
+                Some("en".to_owned()),
+            )
+            .await
+            .expect("transcribe should succeed");
+
+        // THEN the backend is driven with English, not the configured French
+        let observed = seen.lock().expect("lock").clone();
+        assert_eq!(observed, Some(Some("en".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn per_request_auto_detect_overrides_the_configured_language() {
+        // GIVEN an engine configured with French
+        let (handle, _rx, seen) = start_test_engine_observing_language(false);
+
+        // WHEN a caller explicitly asks for auto-detection
+        handle
+            .transcribe_with_language(vec![0.0; 16000], 16000, TranscriptSource::Api, None)
+            .await
+            .expect("transcribe should succeed");
+
+        // THEN no hint is forced on the backend
+        let observed = seen.lock().expect("lock").clone();
+        assert_eq!(observed, Some(None));
+    }
+
+    #[tokio::test]
+    async fn without_a_request_language_the_configured_hint_applies() {
+        // GIVEN an engine configured with French
+        let (handle, _rx, seen) = start_test_engine_observing_language(false);
+
+        // WHEN a caller does not mention a language at all
+        handle
+            .transcribe(vec![0.0; 16000], 16000, TranscriptSource::Hotkey)
+            .await
+            .expect("transcribe should succeed");
+
+        // THEN the persisted configuration decides
+        let observed = seen.lock().expect("lock").clone();
+        assert_eq!(observed, Some(Some("fr".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn transcribe_error_emits_failure_event() {
+        // GIVEN
+        let (handle, mut event_rx) = start_test_engine(true);
+        let _ = event_rx.recv().await; // drain SttModelLoaded
+
+        // WHEN
+        let result = handle
+            .transcribe(vec![0.0; 16000], 16000, TranscriptSource::Api)
+            .await;
+
+        // THEN
+        assert!(result.is_err());
+        let event = event_rx.recv().await.expect("error event");
+        assert!(matches!(event, RuntimeEvent::SttTranscriptionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn status_returns_engine_info() {
+        // GIVEN an engine that has answered nothing yet
+        let (handle, _rx) = start_test_engine(false);
+
+        // WHEN its status is read
+        let status = handle.status().await.expect("status should succeed");
+
+        // THEN it describes its configuration, and reports the model as not
+        // loaded: the sidecar loads on the first transcription, so nothing has
+        // proved the file on disk is a model this engine can read
+        assert!(status.enabled);
+        assert!(!status.model_loaded);
+        assert_eq!(status.backend_name, "fake");
+        assert!(status.model_path.contains("test-model"));
+        assert_eq!(status.model_name, "test-model");
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_model_loaded_only_after_a_reading_came_back() {
+        // GIVEN an engine whose backend answers
+        let (handle, _rx) = start_test_engine(false);
+        assert!(
+            !handle
+                .status()
+                .await
+                .expect("status should succeed")
+                .model_loaded,
+            "nothing has been transcribed yet"
+        );
+
+        // WHEN one transcription comes back
+        handle
+            .transcribe(vec![0.0; 16000], 16000, TranscriptSource::Hotkey)
+            .await
+            .expect("transcription should succeed");
+
+        // THEN the status says so, which is the only proof this daemon has that
+        // the model is one the engine can load
+        assert!(
+            handle
+                .status()
+                .await
+                .expect("status should succeed")
+                .model_loaded
+        );
+    }
+
+    #[tokio::test]
+    async fn status_keeps_the_model_unloaded_when_the_backend_fails() {
+        // GIVEN an engine whose backend refuses every reading
+        let (handle, _rx) = start_test_engine(true);
+
+        // WHEN a transcription is attempted and fails
+        let attempt = handle
+            .transcribe(vec![0.0; 16000], 16000, TranscriptSource::Hotkey)
+            .await;
+        assert!(attempt.is_err(), "the fake backend must refuse");
+
+        // THEN the status still reports the model as not loaded: a failed
+        // reading proves nothing was loaded, and the flag that used to be a
+        // literal `true` would have said otherwise
+        assert!(
+            !handle
+                .status()
+                .await
+                .expect("status should succeed")
+                .model_loaded
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_actor_gracefully() {
+        // GIVEN
+        let (handle, _rx) = start_test_engine(false);
+
+        // WHEN
+        handle.shutdown().await;
+
+        // THEN, subsequent calls fail with ChannelClosed
+        let result = handle.status().await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn transcribe_after_shutdown_returns_channel_closed() {
+        // GIVEN
+        let (handle, _rx) = start_test_engine(false);
+        handle.shutdown().await;
+        // Allow actor task to exit
+        tokio::task::yield_now().await;
+
+        // WHEN
+        let result = handle
+            .transcribe(vec![0.0; 100], 16000, TranscriptSource::Api)
+            .await;
+
+        // THEN
+        assert!(matches!(result, Err(SttEngineError::ChannelClosed)));
+    }
+
+    #[tokio::test]
+    async fn model_loaded_event_emitted_on_start() {
+        // GIVEN / WHEN
+        let (_handle, mut event_rx) = start_test_engine(false);
+
+        // THEN
+        let event = event_rx.recv().await.expect("model loaded event");
+        match event {
+            RuntimeEvent::SttModelLoaded {
+                backend,
+                model_name,
+                ..
+            } => {
+                assert_eq!(backend, "fake");
+                assert_eq!(model_name, "test-model");
+            }
+            other => unreachable!("unexpected event in test mock: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_source_serializes_correctly() {
+        // GIVEN the three transcript sources, each paired with the name it is
+        // stored under
+        let sources = vec![
+            (TranscriptSource::Hotkey, "hotkey"),
+            (TranscriptSource::File("/tmp/audio.wav".into()), "file"),
+            (TranscriptSource::Api, "api"),
+        ];
+
+        // WHEN each is rendered for the database
+        // THEN it is that stored name, so an old row still reads back
+        for (source, expected) in sources {
+            assert_eq!(source.as_str(), expected);
+        }
+    }
+}

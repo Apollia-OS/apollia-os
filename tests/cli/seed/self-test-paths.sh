@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Every absolute path a seeded database names must exist on disk.
+#
+# This exists because it went wrong silently. `load.sh` builds into a staging
+# directory and moves the result, so a path baked from the build directory
+# points at something the script deletes on its way out. The agent files landed
+# correctly, `agents.db` named a directory under /var/folders that no longer
+# existed, the boot loader found nothing, and the guide and onboarding agents
+# were simply absent from the application. Nothing failed, nothing logged an
+# error, the screens were just empty.
+#
+# Usage: bash tests/cli/seed/self-test-paths.sh <SEED_DATA_DIR>
+#
+# The directory is required, and there is no default. Its two callers both pass
+# an explicit one: self-test.sh names the seed it has just built under its own
+# throwaway directory, load.sh names the profile directory it has just moved the
+# seed into. A default would put an operator's real profile under a checker that
+# opens every database it finds, which is exactly what the fallback this
+# argument replaces used to do.
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+  echo "usage: bash tests/cli/seed/self-test-paths.sh <SEED_DATA_DIR>" >&2
+  echo "       no default: name the seed directory to check." >&2
+  # 2, not 1: 1 means paths are missing, this means nothing was measured, and an
+  # exit code that says "I checked nothing" must never read as "all is well".
+  exit 2
+fi
+
+DATA="$1"
+if [ ! -d "$DATA" ]; then
+  echo "no data directory at $DATA" >&2
+  exit 1
+fi
+
+# Every root database in the directory must be named by the catalogue. The
+# reference list is generated from the sibling schemas/ directory, which
+# scripts/check_data_layout.py holds equal to the DataFile catalogue of
+# crates/apollia-core/src/paths.rs, so a database the catalogue does not know
+# fails here instead of drifting silently.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+unknown=0
+for db in "$DATA"/*.db; do
+  [ -e "$db" ] || continue
+  name="$(basename "$db" .db)"
+  if [ ! -f "$HERE/schemas/$name.sql" ]; then
+    echo "unknown root database: $(basename "$db") (no schemas/$name.sql, not in the catalogue)" >&2
+    unknown=$((unknown + 1))
+  fi
+done
+if [ "$unknown" -ne 0 ]; then
+  exit 1
+fi
+
+python3 - "$DATA" <<'PY'
+import glob, os, re, sqlite3, sys
+
+data = sys.argv[1]
+# An absolute POSIX path, long enough not to catch a stray "/" in prose.
+PATH_RE = re.compile(r"(/[A-Za-z0-9._@%+-]+){2,}")
+missing, checked = [], 0
+
+for db in sorted(glob.glob(os.path.join(data, "*.db"))):
+    # Copy rather than open read-only: a WAL database whose -shm is owned by a
+    # running application refuses a read-only handle, and the seed is meant to
+    # be checked while the app is up.
+    import shutil, tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    try:
+        shutil.copy2(db, tmp.name)
+        for ext in ("-wal", "-shm"):
+            if os.path.exists(db + ext):
+                shutil.copy2(db + ext, tmp.name + ext)
+        con = sqlite3.connect(tmp.name)
+    except (OSError, sqlite3.Error):
+        os.unlink(tmp.name)
+        continue
+    try:
+        tables = [r[0] for r in con.execute(
+            "select name from sqlite_master where type='table'")]
+        for table in tables:
+            try:
+                cols = [r[1] for r in con.execute(f'pragma table_info("{table}")')]
+                rows = con.execute(f'select {",".join(chr(34)+c+chr(34) for c in cols)} '
+                                   f'from "{table}"').fetchall()
+            except sqlite3.Error:
+                continue
+            for row in rows:
+                for col, value in zip(cols, row):
+                    if not isinstance(value, str):
+                        continue
+                    for match in PATH_RE.finditer(value):
+                        candidate = match.group(0)
+                        # Only judge paths that claim to be inside a profile or a
+                        # temporary directory: the rest belong to the host.
+                        if "/.apollia" not in candidate and "/tmp." not in candidate \
+                           and "/var/folders/" not in candidate:
+                            continue
+                        checked += 1
+                        if not os.path.exists(candidate):
+                            missing.append(
+                                f"{os.path.basename(db)} / {table}.{col}: {candidate}")
+    finally:
+        con.close()
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(tmp.name + suffix)
+            except OSError:
+                pass
+
+print(f"{checked} absolute path(s) named by the seeded databases")
+if not missing:
+    print("every one of them exists on disk")
+    sys.exit(0)
+
+print(f"\n{len(missing)} path(s) named in a database do not exist:", file=sys.stderr)
+for m in sorted(set(missing)):
+    print(f"  {m}", file=sys.stderr)
+print("\nA path under /var/folders means the seed was built in a staging "
+      "directory and the rows kept the build path instead of the final one. "
+      "Rebuild with APOLLIA_SEED_HOME_ALIAS set, which is what load.sh does.",
+      file=sys.stderr)
+sys.exit(1)
+PY

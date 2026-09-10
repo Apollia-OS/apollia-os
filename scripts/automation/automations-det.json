@@ -1,0 +1,1045 @@
+{
+  "name": "automations-det (automations page, operator + builder, seeded triggers: asserts table + rows + filters + delete-dialog cancel + history sheet + edit dialog driven then cancelled)",
+  "stopOnError": false,
+  "notes": [
+    "automations-filter-bar stays unplayed on purpose: the id sits on the FilterChipBar wrapper <div> (FilterChipBar.svelte:58-64 renders it with a class and the data-testid only, no on* attribute; Automations.svelte:269 passes the id), and the only handlers are the chips' onclick (FilterChipBar.svelte:73), which the automations-filter-* steps all click. uncovered.py files the wrapper as a gesture; a click on it dispatches an event nothing listens to, would pass and prove nothing.",
+    "create-trigger-submit-btn is played on a webhook definition (path plus generated secret) because the cron builder exposes no testid for its presets and emits no default expression, so the cron card can never be valid from a script. The created trigger is deleted through the row menu and the delete dialog before the filter counts are asserted; neither create nor delete refreshes the list on its own, hence the automations-refresh-btn clicks around them.",
+    "automations-load-error-details-toggle needs a rejected list_triggers: a stubInvoke rejects it around a refresh, then clearStubs and a second refresh repaint the seeded table. The triggers store keeps its rows meanwhile (a failed refresh never clears it), so the table stays behind the banner.",
+    "automation-edit-cancel is played on a second opening of the edit dialog after the submitted one, so the cancelled definition is the stored one and no update_trigger call is made."
+  ],
+  "dynamicTestids": [
+    "automation-delete-automation-probe-trigger",
+    "automation-delete-seed-trigger-daily-digest",
+    "automation-edit-advanced-toggle",
+    "automation-edit-agent",
+    "automation-edit-cron",
+    "automation-edit-enabled",
+    "automation-edit-id-readonly",
+    "automation-edit-input-template",
+    "automation-edit-on-busy",
+    "automation-edit-secret",
+    "automation-edit-secret-generate",
+    "automation-edit-secret-warning",
+    "automation-edit-seed-trigger-daily-digest",
+    "automation-edit-type-cron",
+    "automation-edit-type-webhook",
+    "automation-enabled-toggle-seed-trigger-daily-digest",
+    "automation-history-seed-trigger-daily-digest",
+    "automation-menu-automation-probe-trigger",
+    "automation-menu-seed-trigger-daily-digest",
+    "automation-wizard-next-0",
+    "automation-wizard-next-1",
+    "automation-wizard-next-2",
+    "automations-filter-active",
+    "automations-filter-all",
+    "automations-filter-error",
+    "automations-filter-paused",
+    "sidebar-mode-option-builder",
+    "sidebar-mode-option-operator",
+    "trigger-logs-filter-all",
+    "trigger-logs-filter-fired",
+    "trigger-type-card-cron",
+    "trigger-type-card-file_watch",
+    "trigger-type-card-interval",
+    "trigger-type-card-oneshot",
+    "trigger-type-card-webhook"
+  ],
+  "steps": [
+    {
+      "kind": "click",
+      "testid": "onboarding-skip",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "onboarding-skip",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-operator"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 30000
+    },
+    {
+      "kind": "goto",
+      "route": "automations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "01-automations-operator"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-filter-bar",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "02-automations-filter-bar"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "automation-row",
+      "nth": 0,
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "automation-run-now",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "03-automations-table"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-refresh-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "sleep",
+      "ms": 900
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "automation-row",
+      "nth": 0,
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "03a-automations-refreshed"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_triggers",
+      "reject": "seeded triggers failure"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-refresh-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-load-error",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "03a2-automations-load-error"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-load-error-details-toggle",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "03a3-automations-load-error-details-open"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-load-error-details-toggle",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_triggers"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-refresh-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "automations-load-error",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "automation-row",
+      "nth": 0,
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "click",
+      "testid": "automations-new-btn"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-wizard-dialog"
+    },
+    {
+      "kind": "screenshot",
+      "label": "03b-automation-wizard"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-wizard-advanced"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "trigger-create-dialog"
+    },
+    {
+      "kind": "screenshot",
+      "label": "03c-trigger-create-advanced"
+    },
+    {
+      "kind": "selectOption",
+      "testid": "trigger-input-agent",
+      "index": 1
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-type-card-cron"
+    },
+    {
+      "kind": "expect",
+      "testid": "trigger-input-cron"
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-type-card-interval",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "expect",
+      "testid": "trigger-input-interval"
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-type-card-oneshot",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "trigger-fire-at-input",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "trigger-fire-at-input",
+      "text": "2026-12-31"
+    },
+    {
+      "kind": "fill",
+      "testid": "trigger-fire-at-time-input",
+      "text": "09:00"
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-type-card-file_watch",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "trigger-input-filepath",
+      "text": "/tmp/seed-watch",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-event-create",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-event-modify",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-event-delete",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "setChecked",
+      "testid": "trigger-recursive-toggle",
+      "checked": true
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-type-card-webhook",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "trigger-input-webhook-path",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "trigger-input-webhook-path",
+      "text": "/hooks/automation"
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-secret-generate-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "setChecked",
+      "testid": "trigger-enabled-toggle",
+      "checked": true
+    },
+    {
+      "kind": "screenshot",
+      "label": "03e-trigger-types-covered"
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-type-card-cron",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-advanced-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "trigger-input-template-textarea",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "trigger-input-template-textarea",
+      "text": "{{payload}}"
+    },
+    {
+      "kind": "fill",
+      "testid": "trigger-input-name",
+      "text": "seed manual trigger (not saved)"
+    },
+    {
+      "kind": "selectOption",
+      "testid": "trigger-on-busy-select",
+      "index": 0
+    },
+    {
+      "kind": "screenshot",
+      "label": "03d-trigger-create-filled"
+    },
+    {
+      "kind": "expect",
+      "testid": "create-trigger-submit-btn"
+    },
+    {
+      "kind": "click",
+      "testid": "create-trigger-cancel-btn"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "trigger-create-dialog"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-new-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-wizard-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "automation-wizard-advanced",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "trigger-create-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "trigger-input-agent",
+      "index": 1,
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-type-card-webhook",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "trigger-input-webhook-path",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "trigger-input-webhook-path",
+      "text": "/hooks/automation-probe"
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-secret-generate-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "trigger-input-name",
+      "text": "automation-probe-trigger"
+    },
+    {
+      "kind": "screenshot",
+      "label": "03f-trigger-create-valid (webhook, generated secret, custom identifier)"
+    },
+    {
+      "kind": "click",
+      "testid": "create-trigger-submit-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "trigger-create-dialog",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "click",
+      "testid": "automations-refresh-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "sleep",
+      "ms": 600
+    },
+    {
+      "kind": "click",
+      "testid": "automations-filter-all",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-menu-automation-probe-trigger",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "03g-trigger-created"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-menu-automation-probe-trigger",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-delete-automation-probe-trigger",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "automation-delete-automation-probe-trigger",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "delete-automation-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "delete-automation-confirm",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitGone",
+      "testid": "delete-automation-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "automations-refresh-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "automation-menu-automation-probe-trigger",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "03h-trigger-deleted (the probe removed, the four seeded triggers untouched)"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-filter-all",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "automations-filter-active",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "automation-row",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "04-filter-active"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-filter-paused",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "automation-row",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "05-filter-paused"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-filter-error",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-empty-filter",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "06-filter-error-empty"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-filter-all",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "07-automations-table-all"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-menu-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-delete-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-enabled-toggle-seed-trigger-daily-digest",
+      "timeoutMs": 2000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-history-seed-trigger-daily-digest",
+      "timeoutMs": 2000
+    },
+    {
+      "kind": "screenshot",
+      "label": "08-automation-menu-open"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-delete-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "delete-automation-dialog",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "expect",
+      "testid": "delete-automation-skip"
+    },
+    {
+      "kind": "setChecked",
+      "testid": "delete-automation-skip",
+      "checked": true
+    },
+    {
+      "kind": "sleep",
+      "ms": 150
+    },
+    {
+      "kind": "setChecked",
+      "testid": "delete-automation-skip",
+      "checked": false
+    },
+    {
+      "kind": "expect",
+      "testid": "delete-automation-confirm"
+    },
+    {
+      "kind": "screenshot",
+      "label": "09-delete-automation-dialog"
+    },
+    {
+      "kind": "click",
+      "testid": "delete-automation-cancel",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitGone",
+      "testid": "delete-automation-dialog",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "10-delete-cancelled"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-menu-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "automation-edit-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-dialog",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-agent",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "automation-edit-type-cron"
+    },
+    {
+      "kind": "expect",
+      "testid": "automation-edit-cron"
+    },
+    {
+      "kind": "expect",
+      "testid": "automation-edit-enabled"
+    },
+    {
+      "kind": "screenshot",
+      "label": "10b-automation-edit-loaded (stored definition, cron)"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-edit-advanced-toggle",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-id-readonly",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-on-busy",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-input-template",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "10c-automation-edit-advanced (identifier immutable on the edit path)"
+    },
+    {
+      "kind": "selectOption",
+      "testid": "automation-edit-on-busy",
+      "value": "drop",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "automation-edit-type-webhook",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-secret",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "automation-edit-secret-generate",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-secret-warning",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "10d-automation-edit-secret-rotation-warned"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-edit-type-cron",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "automation-edit-submit",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "automation-edit-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "10e-automation-edit-submitted"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-menu-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "automation-edit-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-dialog",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-edit-agent",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "10f-automation-edit-reopened"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-edit-cancel",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "automation-edit-dialog",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "10g-automation-edit-cancelled (nothing sent)"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-menu-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "automation-history-seed-trigger-daily-digest",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "trigger-logs-sheet",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "11-trigger-logs-sheet"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "trigger-logs-filter-all",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "trigger-logs-filter-fired",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "12-trigger-logs-filtered"
+    },
+    {
+      "kind": "press",
+      "key": "Escape",
+      "testid": "trigger-logs-filter-all"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "trigger-logs-sheet",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "13-trigger-logs-closed"
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-builder"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "automations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "14-automations-builder"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-filter-bar",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "automation-row",
+      "nth": 0,
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "15-automations-table-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-filter-active",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "automation-row",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "16-filter-active-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "automations-filter-all",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "automations-new-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-wizard-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "fill",
+      "testid": "automation-wizard-describe",
+      "text": "every 2 hours, run seed-classifier"
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "click",
+      "testid": "automation-wizard-next-0",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-wizard-schedule-card",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "automation-wizard-back",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-wizard-describe",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "automation-wizard-next-0",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-wizard-schedule-card",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "automation-wizard-next-1",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-wizard-agent-select",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "automation-wizard-agent-select",
+      "value": "seed-classifier",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "automation-wizard-next-2",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automation-wizard-preview-card",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "16b-wizard-preview"
+    },
+    {
+      "kind": "click",
+      "testid": "automation-wizard-activate",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "automation-wizard-dialog",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "screenshot",
+      "label": "16c-wizard-activated"
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-operator"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "screenshot",
+      "label": "17-back-operator"
+    }
+  ]
+}

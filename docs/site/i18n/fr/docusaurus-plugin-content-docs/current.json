@@ -1,0 +1,86 @@
+{
+  "version.label": {
+    "message": "Next",
+    "description": "The label for version current"
+  },
+  "sidebar.docs.category.Tutorials": {
+    "message": "Tutoriels",
+    "description": "The label for category 'Tutorials' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.How-to guides": {
+    "message": "Guides pratiques",
+    "description": "The label for category 'How-to guides' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Reference": {
+    "message": "Référence",
+    "description": "The label for category 'Reference' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.SDK / ctx contract": {
+    "message": "SDK / contrat ctx",
+    "description": "The label for category 'SDK / ctx contract' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.api": {
+    "message": "api",
+    "description": "The label for category 'api' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Explanation": {
+    "message": "Explication",
+    "description": "The label for category 'Explanation' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Architecture": {
+    "message": "Architecture",
+    "description": "The label for category 'Architecture' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Installation": {
+    "message": "Installation",
+    "description": "The label for category 'Installation' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Agents": {
+    "message": "Agents",
+    "description": "The label for category 'Agents' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Chat": {
+    "message": "Chat",
+    "description": "The label for category 'Chat' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Automations": {
+    "message": "Automatisations",
+    "description": "The label for category 'Automations' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Control": {
+    "message": "Contrôle",
+    "description": "The label for category 'Control' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Integrations": {
+    "message": "Intégrations",
+    "description": "The label for category 'Integrations' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Memory": {
+    "message": "Mémoire",
+    "description": "The label for category 'Memory' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Projects": {
+    "message": "Projets",
+    "description": "The label for category 'Projects' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Notifications": {
+    "message": "Notifications",
+    "description": "The label for category 'Notifications' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Observability": {
+    "message": "Observabilité",
+    "description": "The label for category 'Observability' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Cross-cutting": {
+    "message": "Transversal",
+    "description": "The label for category 'Cross-cutting' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Troubleshooting": {
+    "message": "Dépannage",
+    "description": "The label for category 'Troubleshooting' in sidebar 'docs'"
+  },
+  "sidebar.docs.category.Help center": {
+    "message": "Guide utilisateur",
+    "description": "The label for category 'Operator help' in sidebar 'docs'"
+  }
+}

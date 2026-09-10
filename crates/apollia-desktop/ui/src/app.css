@@ -1,0 +1,1803 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════════════════════
+   Design tokens v2
+   Elevation, warmth dark, rim lights, primary
+   scale. The only source of truth for shadows / brand surfaces.
+   ═══════════════════════════════════════════════════════════ */
+@layer base {
+  :root {
+    /* ── Brand palette - V4 indigo iris (softer than original blue) ── */
+    --primary: 237 47% 57%;
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 237 47% 53%;
+    --primary-active: 237 47% 49%;
+    --secondary: 261 36% 61%;
+    --secondary-foreground: 0 0% 100%;
+    --accent: 237 47% 57%;
+    --accent-foreground: 0 0% 100%;
+
+    /* ── Primary gradient ── */
+    --primary-gradient-from: 237 47% 57%;
+    --primary-gradient-to: 261 36% 61%;
+
+    /* ── Brand signature gradient stops (indigo -> violet) ──
+       Deployed sparingly as a semantic signature: the reasoning spark, its
+       soft halo, and a faint hairline under strip/section headers. Solid
+       --primary stays the quieter tier. Aliased onto the primary gradient
+       triples so both themes resolve automatically (.dark redefines those). */
+    --grad-a: var(--primary-gradient-from);
+    --grad-b: var(--primary-gradient-to);
+
+    /* ── Logo paper ──
+       The symbol is a light-background artwork: its inner counter is painted
+       in the cream it was drawn against, and its dominant swoosh runs from
+       #0053da to #001eb4. Measured against the dark surfaces, every end of
+       that gradient falls short: 2.39 and 2.76 for the light end on card and
+       background, 1.36 and 1.57 for the dark end. The whole range sits under
+       the 3:1 floor WCAG 1.4.11 sets for a non-text graphic, so the body of
+       the mark drops out and only the violet crescent survives. There is no dark artwork to
+       switch to, and inventing one means inventing brand colours.
+       This token is the paper the mark expects, held identical in both themes
+       on purpose: `.dark` must not override it. Any surface that renders the
+       symbol above ~24px composes `.logo-plaque` on top of it. */
+    --logo-paper: 40 40% 94%;
+
+    /* ── Surfaces - V4 warm gray (greige), vibe Vercel/Arc ── */
+    --background: 33 11% 95%;
+    --foreground: 33 13% 9%;
+    --surface-1: 40 14% 98%;
+    --surface-2: 33 12% 93%;
+    --surface-3: 33 12% 86%;
+    --card: 40 14% 98%;
+    --card-foreground: 33 13% 9%;
+    --popover: 40 14% 98%;
+    --popover-foreground: 33 13% 9%;
+    --muted: 33 12% 90%;
+    --muted-foreground: 33 7% 46%;
+
+    /* ── Borders ── */
+    --border: 33 10% 84%;
+    --input: 33 10% 84%;
+    --ring: 237 47% 57%;
+    --radius: 0.625rem;
+
+    /* ── Glass borders ── */
+    --glass-border-light: 237 47% 57% / 0.10;
+    --glass-border-light-hover: 237 47% 57% / 0.18;
+    --glass-border-dark: 237 47% 70% / 0.12;
+    --glass-border-dark-hover: 237 47% 70% / 0.22;
+    --glass-border: var(--glass-border-light);
+    --glass-border-hover: var(--glass-border-light-hover);
+    --glass-inset: 237 47% 57% / 0.06;
+
+    /* ── Layout ── */
+    --touch-target-min: 2.75rem;
+
+    /* ── Semantic colors ── */
+    --destructive: 11 57% 42%;
+    --destructive-foreground: 0 0% 98%;
+    --info: 212 36% 45%;
+    --info-foreground: 212 36% 30%;
+    --warning: 38 70% 39%;
+    --warning-foreground: 38 70% 25%;
+    --success: 144 33% 37%;
+    --success-foreground: 144 33% 22%;
+
+    /* ── Chat tool-body rendering (per-tool operator/builder layers) ── */
+    --faint-foreground: 33 7% 58%;
+    --border-soft: 33 10% 88%;
+    --code-bg: 33 12% 96%;
+    /* Light-theme terminal: a soft light surface with dark ink, so the builder
+       terminal block adapts to the light theme instead of staying dark. */
+    --term-bg: 33 20% 94%;
+    --term-fg: 33 16% 24%;
+    /* User turn bubble - a light greige surface, one shade off surface-2. */
+    --user-bubble: 33 12% 91%;
+
+    /* ── Text tokens ── */
+    --text-muted: 33 7% 40%;
+    --text-success: 144 38% 26%;
+    --text-warning: 38 80% 26%;
+    --text-danger: 11 60% 38%;
+
+    /* ── Chart palette ── */
+    --chart-1: #6366f1;
+    --chart-2: #3b82f6;
+    --chart-3: #10b981;
+    --chart-4: #f59e0b;
+    --chart-5: #ef4444;
+    --chart-6: #ec4899;
+    --chart-7: #06b6d4;
+    --chart-8: #84cc16;
+
+    /* ── Elevation - V4 hairline + subtle warmth ── */
+    --shadow-elev-0:
+      0 1px 0 rgba(255,255,255,0.60) inset,
+      0 1px 2px rgba(26,24,20,0.04);
+    --shadow-elev-1:
+      0 1px 0 rgba(255,255,255,0.70) inset,
+      0 1px 2px rgba(26,24,20,0.04),
+      0 2px 6px -1px rgba(26,24,20,0.04);
+    --shadow-elev-2:
+      0 1px 0 rgba(255,255,255,0.70) inset,
+      0 4px 12px -4px rgba(26,24,20,0.08);
+    --shadow-elev-3:
+      0 1px 0 rgba(255,255,255,0.70) inset,
+      0 12px 32px -12px rgba(26,24,20,0.16);
+    --shadow-elev-4:
+      0 1px 0 rgba(255,255,255,0.70) inset,
+      0 24px 64px -16px rgba(26,24,20,0.22);
+
+    /* ── Primary-tinted shadows ── */
+    --shadow-primary-sm: 0 2px 8px -1px hsl(237 47% 57% / 0.30);
+    --shadow-primary-md: 0 4px 16px -2px hsl(237 47% 57% / 0.35);
+    --shadow-primary-lg: 0 6px 24px -2px hsl(237 47% 57% / 0.40);
+    --shadow-primary-xl: 0 12px 48px -8px hsl(261 36% 61% / 0.35);
+
+    /* ── Semantic shadows ── */
+    --shadow-success-md: 0 4px 16px -2px hsl(144 33% 37% / 0.35);
+    --shadow-destructive-md: 0 4px 16px -2px hsl(11 57% 42% / 0.30);
+    /* Warm focus glow - applied on the chat composer when the textarea
+       receives focus. Pure rgba (not hsl) so the terracotta tone keeps its
+       hand-crafted feel against the parchment surface. */
+    --shadow-warm-focus: 0 0 0 1px rgba(255, 180, 120, 0.35),
+                         0 4px 14px -6px rgba(255, 150, 80, 0.45);
+    /* Status dot halos - 3px clear ring against the background,
+       then a 4px coloured aura. Used by the topbar runtime status
+       indicator (OperatorBreadcrumb) and any future health dot. */
+    --shadow-status-ok: 0 0 0 3px hsl(var(--background)),
+                        0 0 0 4px hsl(142 70% 45% / 0.35);
+    --shadow-status-warn: 0 0 0 3px hsl(var(--background)),
+                          0 0 0 4px hsl(40 92% 50% / 0.35);
+    --shadow-status-error: 0 0 0 3px hsl(var(--background)),
+                           0 0 0 4px hsl(0 84% 60% / 0.35);
+
+    /* ── Backdrop ── */
+    --backdrop: rgba(26, 24, 20, 0.40);
+    --backdrop-subtle: rgba(26, 24, 20, 0.25);
+
+    /* ── Motion ── */
+    --motion-fast: 120ms;
+    --motion-base: 220ms;
+    --motion-slow: 420ms;
+    --ease-apple: cubic-bezier(0.32, 0.72, 0, 1);
+    --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-accel: cubic-bezier(0.4, 0, 1, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+    /* ── Project swatches ──
+       The colours the project picker offers, next to the two brand tokens.
+       A palette of choices rather than a role: nothing in the interface is
+       "swatch coloured", the user picks one for a project. They are held here
+       so no component writes a hex by hand. */
+    --swatch-green: 160 84% 39%;
+    --swatch-amber: 38 92% 50%;
+    --swatch-red: 0 84% 60%;
+    --swatch-sky: 199 89% 48%;
+    --swatch-pink: 330 81% 60%;
+    --swatch-slate: 215 16% 47%;
+
+    /* ── Z-index stack ──
+       Page-level chrome sits under the app-wide backdrop: a drawer scrim
+       dims one pane, not the window. The values below are what the routes,
+       the sidebar and the topbar already wrote as `z-30` and `z-40`; naming
+       them changed no number. Two names share rung 30 because two things
+       live there, the same arrangement `--z-backdrop` and `--z-toast`
+       already have at 40. `tailwind.config.ts` maps the whole stack onto
+       `z-*` classes so a stacking decision reads as a layer rather than as a
+       number. */
+    --z-sticky: 30;
+    --z-drawer-backdrop: 30;
+    --z-drawer: 40;
+    --z-backdrop: 40;
+    --z-toast: 40;
+    --z-overlay: 50;
+    --z-tooltip: 70;
+
+    /* ── Type scale ──
+       One declaration per tier, and the single source of the sizes: the
+       `fontSize` table of tailwind.config.ts reads these, and holds the
+       line-height, letter-spacing and weight that go with each tier. A style
+       block cannot write a Tailwind class, so a component that sizes text in
+       CSS reads the tier from here rather than repeating its rem value.
+       The five chrome tiers (`caption-lg` and the `micro-*`) carry a size and
+       nothing else: they name the sizes between 9 and 11.5 px the reading
+       scale had no palier for,
+       and every site that uses one already carries its own weight, tracking
+       and leading. `overline` keeps 10.5 px as a role (uppercase eyebrow,
+       600, wide tracking); `micro-lg` is the same size without the role. */
+    --text-display-xl: clamp(3rem, 2rem + 3.2vw, 4.5rem);
+    --text-display-lg: clamp(2.25rem, 1.5rem + 2.2vw, 3.25rem);
+    --text-display-md: clamp(1.75rem, 1.25rem + 1.4vw, 2.25rem);
+    --text-display-sm: 1.5rem;
+    --text-heading-lg: 1.25rem;
+    --text-heading-md: 1.125rem;
+    --text-heading-sm: 1rem;
+    --text-body-lg: 1rem;
+    --text-body-md: 0.875rem;
+    --text-body-sm: 0.875rem;
+    --text-body-xs: 0.8125rem;
+    --text-label-md: 0.875rem;
+    --text-label-sm: 0.8125rem;
+    --text-code-sm: 0.8125rem;
+    --text-caption-lg: 0.8125rem;
+    --text-caption: 0.78125rem;
+    --text-overline: 0.65625rem;
+    --text-micro-lg: 0.6875rem;
+    --text-micro: 0.6875rem;
+    --text-micro-sm: 0.65625rem;
+    --text-micro-xs: 0.65625rem;
+
+    /* ── Hover ── */
+    --hover-surface-lift: -2px;
+    --hover-scale: 1.01;
+    --hover-glow-primary: 0 8px 24px -6px hsl(var(--primary) / 0.30);
+
+    /* ── Gradients ── */
+    --gradient-primary: linear-gradient(
+      135deg,
+      hsl(var(--primary-gradient-from)) 0%,
+      hsl(var(--primary-gradient-to)) 100%
+    );
+    --gradient-surface: linear-gradient(
+      180deg,
+      hsl(var(--surface-1)) 0%,
+      hsl(var(--surface-2)) 100%
+    );
+    --gradient-accent: linear-gradient(
+      135deg,
+      hsl(var(--primary) / 0.10) 0%,
+      hsl(var(--secondary) / 0.05) 100%
+    );
+
+    /* ── Onboarding ── */
+    --onboarding-bg: hsl(var(--background));
+    --onboarding-card-bg: hsl(var(--surface-1));
+    --onboarding-card-border: hsl(var(--border));
+
+    /* ── V4 grain texture ── */
+    --grain-url: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.92' numOctaves='2' seed='7'/><feColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.05 0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>");
+
+    /* ── V4 warm accent (terracotta, for HITL / warmth accents) ── */
+    --warm-accent: 15 47% 56%;
+    --warm-accent-bg: 15 47% 56% / 0.10;
+
+    /* ── User avatar gradient (terracotta) - used by the sidebar avatar
+       and any future "current user" badge. Hardcoded hex preserves the
+       hand-tuned tone independently of brand palette shifts. ── */
+    --avatar-gradient-warm: linear-gradient(135deg, #c2715a, #9a4f3c);
+  }
+
+  .dark {
+    --background: 33 13% 9%;
+    --foreground: 33 12% 92%;
+    --surface-1: 33 10% 14%;
+    --surface-2: 33 11% 13%;
+    --surface-3: 33 8% 10%;
+
+    --glass-border: var(--glass-border-dark);
+    --glass-border-hover: var(--glass-border-dark-hover);
+    --glass-inset: 33 30% 78% / 0.14;
+    --card: 33 10% 14%;
+    --card-foreground: 33 12% 92%;
+    --popover: 33 10% 14%;
+    --popover-foreground: 33 12% 92%;
+    --muted: 33 7% 18%;
+    --muted-foreground: 33 8% 62%;
+
+    --border: 33 8% 22%;
+    --input: 33 7% 18%;
+    --ring: 237 52% 64%;
+
+    --primary: 237 52% 64%;
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 237 52% 68%;
+    --primary-active: 237 52% 60%;
+    --secondary: 261 40% 67%;
+    --secondary-foreground: 0 0% 100%;
+    --accent: 237 52% 64%;
+    --accent-foreground: 0 0% 100%;
+
+    --primary-gradient-from: 237 52% 64%;
+    --primary-gradient-to: 261 40% 67%;
+
+    --destructive: 11 65% 58%;
+    --destructive-foreground: 0 0% 98%;
+    --info: 212 40% 60%;
+    --info-foreground: 212 40% 82%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 38 90% 82%;
+    --success: 144 40% 50%;
+    --success-foreground: 144 40% 82%;
+
+    /* ── Chat tool-body rendering (per-tool operator/builder layers) ── */
+    --faint-foreground: 33 8% 50%;
+    --border-soft: 33 8% 18%;
+    --code-bg: 33 10% 11%;
+    --term-bg: 33 12% 8%;
+    --term-fg: 33 10% 82%;
+    --user-bubble: 33 8% 18%;
+
+    --text-muted: 33 8% 72%;
+    --text-success: 144 45% 68%;
+    --text-warning: 38 90% 72%;
+    --text-danger: 11 75% 72%;
+
+    --chart-1: #818cf8;
+    --chart-2: #60a5fa;
+    --chart-3: #34d399;
+    --chart-4: #fbbf24;
+    --chart-5: #f87171;
+    --chart-6: #f472b6;
+    --chart-7: #22d3ee;
+    --chart-8: #a3e635;
+
+    --shadow-elev-0:
+      0 1px 0 rgba(255,255,255,0.06) inset,
+      0 1px 0 rgba(0,0,0,0.20);
+    --shadow-elev-1:
+      0 1px 0 rgba(255,255,255,0.08) inset,
+      0 1px 2px rgba(0,0,0,0.35),
+      0 2px 6px -1px rgba(0,0,0,0.25);
+    --shadow-elev-2:
+      0 1px 0 rgba(255,255,255,0.10) inset,
+      0 4px 12px -4px rgba(0,0,0,0.35);
+    --shadow-elev-3:
+      0 1px 0 rgba(255,255,255,0.12) inset,
+      0 12px 32px -12px rgba(0,0,0,0.50);
+    --shadow-elev-4:
+      0 1px 0 rgba(255,255,255,0.14) inset,
+      0 24px 64px -16px rgba(52,53,245,0.35);
+
+    --shadow-primary-sm: 0 2px 8px -1px hsl(237 52% 64% / 0.45);
+    --shadow-primary-md: 0 4px 16px -2px hsl(237 52% 64% / 0.50);
+    --shadow-primary-lg: 0 6px 24px -2px hsl(237 52% 64% / 0.55);
+    --shadow-primary-xl: 0 12px 48px -8px hsl(261 40% 67% / 0.50);
+
+    --hover-glow-primary: 0 8px 24px -6px hsl(var(--primary) / 0.45);
+
+    --shadow-success-md: 0 4px 16px -2px hsl(144 40% 55% / 0.45);
+    --shadow-destructive-md: 0 4px 16px -2px hsl(11 65% 58% / 0.45);
+
+    --backdrop: hsl(33 10% 5% / 0.70);
+    --backdrop-subtle: hsl(33 10% 5% / 0.50);
+
+    --gradient-accent: linear-gradient(
+      135deg,
+      hsl(var(--primary) / 0.16) 0%,
+      hsl(var(--secondary) / 0.10) 100%
+    );
+  }
+
+  /* Light token scope - re-asserts every :root light value that .dark
+     overrides, so a `.light` subtree renders the light palette even nested
+     under .dark (and a nested .dark restores the dark palette). Values mirror
+     :root exactly; do not diverge from the light source of truth above. */
+  .light {
+    --background: 33 11% 95%;
+    --foreground: 33 13% 9%;
+    --surface-1: 40 14% 98%;
+    --surface-2: 33 12% 93%;
+    --surface-3: 33 12% 86%;
+
+    --glass-border: var(--glass-border-light);
+    --glass-border-hover: var(--glass-border-light-hover);
+    --glass-inset: 237 47% 57% / 0.06;
+    --card: 40 14% 98%;
+    --card-foreground: 33 13% 9%;
+    --popover: 40 14% 98%;
+    --popover-foreground: 33 13% 9%;
+    --muted: 33 12% 90%;
+    --muted-foreground: 33 7% 46%;
+
+    --border: 33 10% 84%;
+    --input: 33 10% 84%;
+    --ring: 237 47% 57%;
+
+    --primary: 237 47% 57%;
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 237 47% 53%;
+    --primary-active: 237 47% 49%;
+    --secondary: 261 36% 61%;
+    --secondary-foreground: 0 0% 100%;
+    --accent: 237 47% 57%;
+    --accent-foreground: 0 0% 100%;
+
+    --primary-gradient-from: 237 47% 57%;
+    --primary-gradient-to: 261 36% 61%;
+
+    --destructive: 11 57% 42%;
+    --destructive-foreground: 0 0% 98%;
+    --info: 212 36% 45%;
+    --info-foreground: 212 36% 30%;
+    --warning: 38 70% 39%;
+    --warning-foreground: 38 70% 25%;
+    --success: 144 33% 37%;
+    --success-foreground: 144 33% 22%;
+
+    /* ── Chat tool-body rendering (per-tool operator/builder layers) ── */
+    --faint-foreground: 33 7% 58%;
+    --border-soft: 33 10% 88%;
+    --code-bg: 33 12% 96%;
+    --term-bg: 33 20% 94%;
+    --term-fg: 33 16% 24%;
+    --user-bubble: 33 12% 91%;
+
+    --text-muted: 33 7% 40%;
+    --text-success: 144 38% 26%;
+    --text-warning: 38 80% 26%;
+    --text-danger: 11 60% 38%;
+
+    --chart-1: #6366f1;
+    --chart-2: #3b82f6;
+    --chart-3: #10b981;
+    --chart-4: #f59e0b;
+    --chart-5: #ef4444;
+    --chart-6: #ec4899;
+    --chart-7: #06b6d4;
+    --chart-8: #84cc16;
+
+    --shadow-elev-0:
+      0 1px 0 rgba(255,255,255,0.60) inset,
+      0 1px 2px rgba(26,24,20,0.04);
+    --shadow-elev-1:
+      0 1px 0 rgba(255,255,255,0.70) inset,
+      0 1px 2px rgba(26,24,20,0.04),
+      0 2px 6px -1px rgba(26,24,20,0.04);
+    --shadow-elev-2:
+      0 1px 0 rgba(255,255,255,0.70) inset,
+      0 4px 12px -4px rgba(26,24,20,0.08);
+    --shadow-elev-3:
+      0 1px 0 rgba(255,255,255,0.70) inset,
+      0 12px 32px -12px rgba(26,24,20,0.16);
+    --shadow-elev-4:
+      0 1px 0 rgba(255,255,255,0.70) inset,
+      0 24px 64px -16px rgba(26,24,20,0.22);
+
+    --shadow-primary-sm: 0 2px 8px -1px hsl(237 47% 57% / 0.30);
+    --shadow-primary-md: 0 4px 16px -2px hsl(237 47% 57% / 0.35);
+    --shadow-primary-lg: 0 6px 24px -2px hsl(237 47% 57% / 0.40);
+    --shadow-primary-xl: 0 12px 48px -8px hsl(261 36% 61% / 0.35);
+
+    --hover-glow-primary: 0 8px 24px -6px hsl(var(--primary) / 0.30);
+
+    --shadow-success-md: 0 4px 16px -2px hsl(144 33% 37% / 0.35);
+    --shadow-destructive-md: 0 4px 16px -2px hsl(11 57% 42% / 0.30);
+
+    --backdrop: rgba(26, 24, 20, 0.40);
+    --backdrop-subtle: rgba(26, 24, 20, 0.25);
+
+    --gradient-accent: linear-gradient(
+      135deg,
+      hsl(var(--primary) / 0.10) 0%,
+      hsl(var(--secondary) / 0.05) 100%
+    );
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    transition: background-color 300ms ease, color 200ms ease;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Warm Glassmorphism - layered glass with subtle brand wash.
+   Anchored on shadow tokens - never hardcode a box-shadow here.
+   ═══════════════════════════════════════════════════════════ */
+@layer components {
+  /* ═════════════════════════════════════════════════════════
+     Logo plaque - the backing the Apollia symbol is drawn for.
+
+     Not decoration. The mark is a light-background artwork and
+     its swoosh measures 1.36:1 against `--card` in the dark
+     theme, so on a dark surface the body of the logo is gone
+     and only the crescent reads. Seating it on `--logo-paper`
+     restores every ink to at least 4.2:1 in both themes, with
+     one asset and no invented dark palette.
+
+     Deliberately theme-invariant: `.dark` does not override it.
+     A plaque that followed the theme would reintroduce exactly
+     the failure it exists to remove.
+     ═════════════════════════════════════════════════════════ */
+  .logo-plaque {
+    background: hsl(var(--logo-paper));
+    box-shadow: var(--shadow-elev-1);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Typography - `.section-meta` is the canonical small-caps
+     label used as section heading inside tables, KPI tiles,
+     timeline grouping, etc. Replaces the repeated inline
+     `font-mono text-[10px] tracking-[1.4px] uppercase font-
+     semibold text-muted-foreground/70` snippet (20+ sites).
+     ═════════════════════════════════════════════════════════ */
+  .section-meta {
+    font-family: theme("fontFamily.mono");
+    font-size: var(--text-micro);
+    letter-spacing: 1.4px;
+    font-weight: 600;
+    color: hsl(var(--muted-foreground) / 0.7);
+    text-transform: uppercase;
+  }
+
+  /* ── Panel layer - sidebar, sheets, overlays (heaviest blur) ── */
+  .glass-panel {
+    background:
+      linear-gradient(135deg, rgba(91,95,199,0.02) 0%, rgba(132,116,196,0.01) 100%),
+      rgba(235,231,225,0.90);
+    @apply backdrop-blur-2xl;
+  }
+  .dark .glass-panel {
+    background:
+      linear-gradient(135deg, rgba(91,95,199,0.05) 0%, rgba(132,116,196,0.03) 100%),
+      hsl(33 10% 11% / 0.88);
+    @apply backdrop-blur-2xl;
+  }
+
+  /* ── Card layer - warm cream glass with real depth ── */
+  .glass-card {
+    background:
+      linear-gradient(145deg, rgba(91,95,199,0.025) 0%, rgba(132,116,196,0.012) 100%),
+      rgba(251,250,248,0.90);
+    @apply backdrop-blur-xl;
+    box-shadow: var(--shadow-elev-2);
+  }
+  .dark .glass-card {
+    background:
+      linear-gradient(145deg, rgba(91,95,199,0.05) 0%, rgba(132,116,196,0.03) 100%),
+      hsl(33 10% 14% / 0.78);
+    box-shadow: var(--shadow-elev-2);
+  }
+
+  /* ── Card hover - lift with warm glow (spring-like) ── */
+  .glass-card-hover {
+    @apply glass-card;
+    transition:
+      box-shadow var(--motion-slow) var(--ease-apple),
+      transform var(--motion-base) var(--ease-apple);
+    will-change: transform;
+  }
+  .glass-card-hover:hover {
+    box-shadow: var(--shadow-elev-3);
+    transform: translateY(var(--hover-surface-lift)) scale(var(--hover-scale));
+  }
+  .glass-card-hover:active {
+    transform: translateY(0) scale(0.998);
+    transition-duration: var(--motion-fast);
+  }
+
+  /* ── Surface layer - frosted containers, tags, table headers ── */
+  .glass-surface {
+    background: rgba(235,231,225,0.50);
+    @apply backdrop-blur-md;
+  }
+  .dark .glass-surface {
+    background: hsl(33 9% 16% / 0.50);
+    @apply backdrop-blur-md;
+  }
+
+  /* ── Inset layer - hover states, nested elements. Resolves via
+     `--glass-inset` so the rim stays visible in both themes. ── */
+  .glass-inset {
+    background: hsl(var(--glass-inset));
+    @apply backdrop-blur-sm;
+  }
+
+  /* ── Borders - visible brand tint, resolved via canonical token. ── */
+  .glass-border {
+    @apply border;
+    border-color: hsl(var(--glass-border));
+    transition: border-color 150ms ease;
+  }
+  .glass-border:hover {
+    border-color: hsl(var(--glass-border-hover));
+  }
+
+  .glass-border-subtle {
+    @apply border;
+    border-color: hsl(var(--glass-border) / 0.6);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Hover utilities - `.hover-lift` for cards,
+     `.hover-glow` for CTAs. Both respect prefers-reduced-motion
+     via the global rule at the bottom of this file.
+     ═════════════════════════════════════════════════════════ */
+  .hover-lift {
+    transition:
+      transform var(--motion-base) var(--ease-apple),
+      box-shadow var(--motion-base) var(--ease-apple);
+    will-change: transform;
+  }
+  .hover-lift:hover:not(:disabled):not([aria-disabled="true"]) {
+    transform: translateY(var(--hover-surface-lift)) scale(var(--hover-scale));
+    box-shadow: var(--shadow-elev-3);
+  }
+  .hover-lift:active:not(:disabled):not([aria-disabled="true"]) {
+    transform: translateY(0) scale(0.998);
+    transition-duration: var(--motion-fast);
+  }
+
+  .hover-glow {
+    transition: box-shadow var(--motion-base) var(--ease-apple),
+                transform var(--motion-base) var(--ease-apple);
+  }
+  .hover-glow:hover:not(:disabled):not([aria-disabled="true"]) {
+    box-shadow: var(--hover-glow-primary);
+    transform: translateY(-1px);
+  }
+  .hover-glow:active:not(:disabled):not([aria-disabled="true"]) {
+    transform: translateY(0);
+    transition-duration: var(--motion-fast);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Glass relief levels - 3 canonical levels
+     aligned with elevation shadows. Aliases on top of the
+     existing `.glass-card` / `.glass-panel` primitives:
+       level-1 → cards (shadow-elev-2)
+       level-2 → panels/sheets (shadow-elev-3)
+       level-3 → modals/popovers (shadow-elev-4)
+     ═════════════════════════════════════════════════════════ */
+  .glass-level-1 {
+    background:
+      linear-gradient(145deg, rgba(91,95,199,0.025) 0%, rgba(132,116,196,0.012) 100%),
+      rgba(251,250,248,0.90);
+    @apply backdrop-blur-[8px];
+    box-shadow: var(--shadow-elev-2);
+  }
+  .dark .glass-level-1 {
+    background:
+      linear-gradient(145deg, rgba(91,95,199,0.05) 0%, rgba(132,116,196,0.03) 100%),
+      hsl(33 10% 14% / 0.78);
+    box-shadow: var(--shadow-elev-2);
+  }
+
+  .glass-level-2 {
+    background:
+      linear-gradient(135deg, rgba(91,95,199,0.03) 0%, rgba(132,116,196,0.015) 100%),
+      rgba(235,231,225,0.92);
+    @apply backdrop-blur-[12px];
+    box-shadow: var(--shadow-elev-3);
+  }
+  .dark .glass-level-2 {
+    background:
+      linear-gradient(135deg, rgba(91,95,199,0.05) 0%, rgba(132,116,196,0.03) 100%),
+      hsl(33 10% 12% / 0.88);
+    box-shadow: var(--shadow-elev-3);
+  }
+
+  .glass-level-3 {
+    background:
+      linear-gradient(135deg, rgba(91,95,199,0.035) 0%, rgba(132,116,196,0.02) 100%),
+      rgba(244,242,239,0.95);
+    @apply backdrop-blur-[20px];
+    box-shadow: var(--shadow-elev-4);
+  }
+  .dark .glass-level-3 {
+    background:
+      linear-gradient(135deg, rgba(91,95,199,0.06) 0%, rgba(132,116,196,0.035) 100%),
+      hsl(33 10% 13% / 0.92);
+    box-shadow: var(--shadow-elev-4);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Placeholder contrast - force min
+     opacity so placeholders remain legible ≥ AA against
+     surface-1 in both themes.
+     ═════════════════════════════════════════════════════════ */
+  ::placeholder {
+    opacity: 0.70;
+  }
+  .dark ::placeholder {
+    opacity: 0.60;
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Primary utilities - 3 canonical expositions
+     ═════════════════════════════════════════════════════════ */
+  .bg-primary-solid {
+    background-color: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    box-shadow: var(--shadow-primary-sm);
+    transition: background-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+  }
+  .bg-primary-solid:hover:not(:disabled) {
+    background-color: hsl(var(--primary-hover));
+    box-shadow: var(--shadow-primary-md);
+  }
+  .bg-primary-solid:active:not(:disabled) {
+    background-color: hsl(var(--primary-active));
+  }
+
+  .bg-primary-gradient {
+    background-image: linear-gradient(
+      135deg,
+      hsl(var(--primary-gradient-from)),
+      hsl(var(--primary-gradient-to))
+    );
+    color: hsl(var(--primary-foreground));
+    box-shadow: var(--shadow-primary-md);
+    transition: box-shadow 150ms ease, transform 150ms ease;
+  }
+  .bg-primary-gradient:hover:not(:disabled) {
+    box-shadow: var(--shadow-primary-lg);
+    transform: translateY(-1px);
+  }
+  .bg-primary-gradient:active:not(:disabled) {
+    transform: translateY(0);
+  }
+
+  .border-primary-subtle {
+    border: 1px solid hsl(var(--primary) / 0.25);
+    transition: border-color 150ms ease;
+  }
+  .border-primary-subtle:hover {
+    border-color: hsl(var(--primary) / 0.50);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Backdrop (modal, sheet)
+     ═════════════════════════════════════════════════════════ */
+  .app-backdrop {
+    background-color: var(--backdrop);
+    @apply backdrop-blur-md;
+  }
+  .app-backdrop-subtle {
+    background-color: var(--backdrop-subtle);
+    @apply backdrop-blur-sm;
+  }
+
+  /* Warm modal backdrop. Warm cast vs the neutral
+     `app-backdrop` so overlays feel anchored in the parchment palette. */
+  .backdrop-warm {
+    background-color: rgba(60, 40, 20, 0.40);
+    @apply backdrop-blur-md;
+  }
+  .dark .backdrop-warm {
+    background-color: rgba(20, 14, 8, 0.55);
+  }
+
+  /* ── Interactive press feedback ── */
+  button:not([disabled]):active,
+  [role="button"]:not([disabled]):active {
+    transform: scale(0.98);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Global focus rings
+     Every natively focusable element gets a primary ring on
+     :focus-visible. Components that render a custom shadow on
+     focus (buttons / inputs with their own variants) can opt
+     out by adding `focus:!ring-0` - but by default they now
+     inherit the token-driven ring, so shadowy focus states
+     stop drifting across primitives.
+     ═════════════════════════════════════════════════════════ */
+  :where(
+    a,
+    button,
+    [role="button"],
+    [role="tab"],
+    [role="menuitem"],
+    [role="option"],
+    [role="link"],
+    [role="switch"],
+    [role="checkbox"],
+    [role="radio"],
+    [tabindex]:not([tabindex="-1"]),
+    input,
+    select,
+    textarea,
+    summary
+  ):focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring));
+    border-radius: calc(var(--radius) - 0.25rem);
+  }
+  /* Inputs already render their own border - reuse the ring via `ring`. */
+  :where(input, select, textarea):focus-visible {
+    box-shadow:
+      0 0 0 2px hsl(var(--background)),
+      0 0 0 4px hsl(var(--ring) / 0.80);
+  }
+
+  /* Reusable helper for cases where we need to apply the ring explicitly
+     (custom wrappers around native focusables). */
+  .focus-ring:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring));
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Skip-to-content link - visually hidden until it
+     receives focus, then pins to top-left on top of every-
+     thing so keyboard users can reach <main> in one press.
+     ═════════════════════════════════════════════════════════ */
+  .skip-to-content {
+    position: fixed;
+    top: 0.5rem;
+    left: 0.5rem;
+    z-index: 100;
+    transform: translateY(-150%);
+    transition: transform var(--motion-base) var(--ease-apple);
+    padding: 0.5rem 0.875rem;
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    border-radius: calc(var(--radius) - 0.25rem);
+    font-size: 0.875rem;
+    font-weight: 500;
+    box-shadow: var(--shadow-primary-md);
+  }
+  .skip-to-content:focus,
+  .skip-to-content:focus-visible {
+    transform: translateY(0);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Inline prose links - dotted underline resolves to
+     solid on hover, with a comfortable offset.
+     ═════════════════════════════════════════════════════════ */
+  .link-inline {
+    color: hsl(var(--primary));
+    text-decoration-line: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 4px;
+    transition: text-decoration-color var(--motion-fast) var(--ease-standard);
+  }
+  .link-inline:hover {
+    text-decoration-style: solid;
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Text utility classes driven by a11y-verified contrast
+     tokens. Prefer these to raw Tailwind `text-muted-
+     foreground` / `text-green-600` / … in prose contexts.
+     ═════════════════════════════════════════════════════════ */
+  .text-muted-a11y   { color: hsl(var(--text-muted)); }
+  .text-success-a11y { color: hsl(var(--text-success)); }
+  .text-warning-a11y { color: hsl(var(--text-warning)); }
+  .text-danger-a11y  { color: hsl(var(--text-danger)); }
+
+  /* ═════════════════════════════════════════════════════════
+     Gradient utilities
+     ═════════════════════════════════════════════════════════ */
+  .bg-gradient-primary {
+    background-image: var(--gradient-primary);
+  }
+  .bg-gradient-surface {
+    background-image: var(--gradient-surface);
+  }
+  .bg-gradient-accent {
+    background-image: var(--gradient-accent);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     List-item spring - applied on row/row-like controls
+     that live inside nav / tables / long scrollable lists.
+     Uses a cubic-bezier that *feels* springy without pulling a
+     JS spring every frame.
+     ═════════════════════════════════════════════════════════ */
+  .list-item-spring {
+    transition:
+      transform var(--motion-fast) var(--ease-apple),
+      background-color var(--motion-fast) var(--ease-standard),
+      color var(--motion-fast) var(--ease-standard),
+      box-shadow var(--motion-base) var(--ease-apple);
+    will-change: transform;
+  }
+  .list-item-spring:hover:not(:disabled):not([aria-disabled="true"]) {
+    transform: translateX(2px) scale(1.01);
+  }
+  .list-item-spring:active:not(:disabled):not([aria-disabled="true"]) {
+    transform: translateX(1px) scale(0.995);
+  }
+
+  /* ═════════════════════════════════════════════════════════
+     Divider fade edges - gradient-fade horizontal
+     rule. Used where a plain separator feels too hard (chat
+     surfaces, long feeds).
+     ═════════════════════════════════════════════════════════ */
+  .divider-fade {
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      hsl(var(--border)) 18%,
+      hsl(var(--border)) 82%,
+      transparent 100%
+    );
+    border: 0;
+  }
+  .divider-fade-vertical {
+    width: 1px;
+    height: 100%;
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      hsl(var(--border)) 18%,
+      hsl(var(--border)) 82%,
+      transparent 100%
+    );
+    border: 0;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Expressive depth - the premium-redesign layer. Richer glass,
+   interactive elevation, and the indigo -> violet signature made
+   a touch more present. Every value composes an EXISTING token
+   (surfaces / grad stops / elevation / primary shadows / motion),
+   so both themes and reduced-motion are honoured automatically.
+   No new token is introduced here.
+   ═══════════════════════════════════════════════════════════ */
+@layer components {
+  /* Deeper glass panel - a stronger blur, a brand-tinted rim via
+     --glass-inset, and elev-3 depth. Both themes resolve from tokens,
+     so no `.dark` override is needed. */
+  .glass-panel-strong {
+    background:
+      linear-gradient(
+        135deg,
+        hsl(var(--grad-a) / 0.05) 0%,
+        hsl(var(--grad-b) / 0.03) 100%
+      ),
+      hsl(var(--surface-1) / 0.92);
+    @apply backdrop-blur-[28px];
+    box-shadow:
+      var(--shadow-elev-3),
+      inset 0 0 0 1px hsl(var(--glass-inset));
+  }
+
+  /* Interactive elevation - resting elev-2 lifts to elev-3 blended with a
+     soft primary halo on hover. Guarded against disabled controls; the
+     transform is neutralized under reduced motion (rule at file end). */
+  .elev-interactive {
+    box-shadow: var(--shadow-elev-2);
+    transition:
+      box-shadow var(--motion-base) var(--ease-apple),
+      transform var(--motion-base) var(--ease-apple);
+    will-change: transform;
+  }
+  .elev-interactive:hover:not(:disabled):not([aria-disabled="true"]) {
+    box-shadow: var(--shadow-elev-3), var(--shadow-primary-sm);
+    transform: translateY(var(--hover-surface-lift));
+  }
+  .elev-interactive:active:not(:disabled):not([aria-disabled="true"]) {
+    transform: translateY(0);
+    transition-duration: var(--motion-fast);
+  }
+
+  /* Signature gradient ink - indigo -> violet clipped to the glyph. Deploy
+     sparingly (hero numerals, a promoted title), never on body copy. */
+  .signature-gradient-text {
+    background-image: linear-gradient(
+      135deg,
+      hsl(var(--grad-a)),
+      hsl(var(--grad-b))
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+
+  /* Signature gradient hairline border - a padding-box fill over a
+     border-box gradient. The fill tracks --card so it stays theme-correct. */
+  .signature-gradient-border {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(hsl(var(--card)), hsl(var(--card))) padding-box,
+      linear-gradient(135deg, hsl(var(--grad-a)), hsl(var(--grad-b))) border-box;
+  }
+
+  /* Opt-in primary halo - a soft brand glow for a focal element. */
+  .glow-primary {
+    box-shadow: var(--shadow-primary-md);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Animations - polished, Apple-tier micro-interactions
+   ═══════════════════════════════════════════════════════════ */
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.2s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.3s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.25s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .animate-slide-in-right {
+    animation: slideInRight 0.3s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .animate-glow-pulse {
+    animation: glowPulse 2s ease-in-out infinite;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes slideOutRight {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+
+@keyframes glowPulse {
+  0%, 100% { box-shadow: var(--shadow-elev-0); }
+  50%      { box-shadow: var(--shadow-primary-md); }
+}
+
+/* Shimmer - translucent band slides across a muted background. */
+@keyframes shimmerSlide {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+
+/* Skeleton shimmer - gradient translation across the element background.
+   Replaces `animate-pulse` on Skeleton. Tokens adapt to dark mode
+   via --muted / --muted-foreground. */
+@keyframes skeletonShimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.skeleton-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    hsl(var(--muted)) 0%,
+    hsl(var(--muted-foreground) / 0.12) 50%,
+    hsl(var(--muted)) 100%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  background-color: hsl(var(--muted));
+  animation: skeletonShimmer 1.8s linear infinite;
+}
+
+/* Spin - plain rotate, reused by the LoadingSpinner component. */
+@keyframes spinnerRotate {
+  to { transform: rotate(360deg); }
+}
+
+/* Progress bar indeterminate - 30 % fill travels across track in 1.5 s. */
+@keyframes progress-indeterminate {
+  0%   { left: -30%; }
+  100% { left: 100%; }
+}
+
+/* Toast progress - 2px bar collapses from full width to zero over autoDismiss ms. */
+@keyframes toast-progress {
+  from { transform: scaleX(1); }
+  to   { transform: scaleX(0); }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Custom scrollbars - 6px rail, translucent thumb with
+   hover state. Firefox fallback via `scrollbar-*` properties.
+   ═══════════════════════════════════════════════════════════ */
+/* Firefox - `thin` keeps the native implementation but narrows it. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.16) transparent;
+}
+.dark * {
+  scrollbar-color: hsl(32 30% 70% / 0.18) transparent;
+}
+
+/* WebKit / Blink - fully custom. */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.14);
+  border-radius: 3px;
+  transition: background 150ms ease;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.26); }
+::-webkit-scrollbar-corner { background: transparent; }
+.dark ::-webkit-scrollbar-thumb { background: hsl(32 30% 70% / 0.16); }
+.dark ::-webkit-scrollbar-thumb:hover { background: hsl(32 30% 70% / 0.28); }
+
+/* Apollia resolved color aliases - for inline style and var() usage */
+:root {
+  --apollia-bg: hsl(var(--background));
+  --apollia-surface: hsl(var(--card));
+  --apollia-border: hsl(var(--border));
+  --apollia-text: hsl(var(--foreground));
+  --apollia-accent: hsl(var(--primary));
+  --apollia-danger: hsl(var(--destructive));
+  --apollia-success: hsl(var(--success));
+  --apollia-warning: hsl(var(--warning));
+  --apollia-info: hsl(var(--info));
+  --apollia-info-foreground: hsl(var(--info-foreground));
+  --apollia-warning-foreground: hsl(var(--warning-foreground));
+  --apollia-success-foreground: hsl(var(--success-foreground));
+}
+
+/* ─── Avatar shadow helper ──────────────────────────────────
+ * Pair with `style="--agent-hue: {hue}"` to express a coloured
+ * shadow driven by agent identity without an inline box-shadow. */
+.agent-avatar-shadow {
+  box-shadow: 0 2px 8px -1px hsl(var(--agent-hue, 240) 60% 38% / 0.30);
+}
+.agent-avatar-shadow-lg {
+  box-shadow: 0 3px 10px -2px hsl(var(--agent-hue, 240) 60% 38% / 0.35);
+}
+
+/* ─── Tour ring-pulse ───────────────────────────────────────────────────────
+ * Applied by the guided tour orchestrator on interactive elements (e.g. the
+ * Start button) to draw the user's attention. */
+.tour-ring-pulse {
+  position: relative;
+  z-index: 61;
+}
+
+.tour-ring-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: inherit;
+  border: 2px solid hsl(var(--primary));
+  animation: tour-pulse 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  pointer-events: none;
+}
+
+@keyframes tour-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(1.08); }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   V4 grain texture overlay - subtle SVG noise on surfaces.
+   ═══════════════════════════════════════════════════════════ */
+.v4-grain-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: var(--grain-url);
+  opacity: 0.4;
+  mix-blend-mode: multiply;
+  border-radius: inherit;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   V4 hairline border - 0.5px borders for premium density.
+   ═══════════════════════════════════════════════════════════ */
+.v4-hair {
+  border-width: 0.5px;
+}
+
+/* V4 animations */
+@keyframes v4-pulse-soft {
+  0%, 100% { opacity: 0.55; }
+  50%       { opacity: 1; }
+}
+@keyframes v4-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes v4-pop-in {
+  0%   { opacity: 0; transform: translateY(4px) scale(0.98); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes v4-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(91,95,199,0.35); }
+  50%       { box-shadow: 0 0 0 6px rgba(91,95,199,0); }
+}
+
+.v4-skel {
+  background: linear-gradient(90deg, rgba(26,24,20,0.04), rgba(26,24,20,0.10), rgba(26,24,20,0.04));
+  background-size: 200% 100%;
+  animation: v4-shimmer 1.6s linear infinite;
+  border-radius: 6px;
+}
+.v4-pop-in { animation: v4-pop-in 220ms cubic-bezier(0.16,1,0.3,1) both; }
+.v4-pulse  { animation: v4-pulse-soft 2.4s ease-in-out infinite; }
+.v4-glow   { animation: v4-glow 2s ease-in-out infinite; }
+
+/* ═══════════════════════════════════════════════════════════
+   Chat tool bodies - shared primitives for the per-tool
+   operator/builder layers (components/chat/tool-bodies/*).
+   Every value routes through a design token so both themes and
+   the reduced-motion preference are honoured centrally.
+   ═══════════════════════════════════════════════════════════ */
+.tb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-body-xs);
+  color: hsl(var(--foreground));
+  background: hsl(var(--surface-2));
+  border: 1px solid hsl(var(--border-soft));
+  padding: 3px 9px;
+  border-radius: 999px;
+  max-width: 100%;
+  overflow: hidden;
+}
+.tb-chip .tb-chip-key { color: hsl(var(--faint-foreground)); flex: none; }
+.tb-chip .tb-chip-val {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tb-iolabel {
+  font-size: var(--text-micro-lg);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: hsl(var(--faint-foreground));
+}
+
+.tb-code {
+  background: hsl(var(--code-bg));
+  border: 1px solid hsl(var(--border-soft));
+  border-radius: 9px;
+  padding: 11px 13px;
+  font-size: var(--text-body-xs);
+  line-height: 1.5;
+  overflow-x: auto;
+  color: hsl(var(--foreground) / 0.85);
+  white-space: pre;
+  margin: 0;
+  /* Mono ramp: ligatures off, tight tracking, tabular figures so JSON columns
+     and numbers align. */
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.tb-term {
+  background: hsl(var(--term-bg));
+  color: hsl(var(--term-fg));
+  border: 1px solid hsl(var(--border-soft));
+  border-radius: 9px;
+  padding: 11px 13px;
+  font-size: var(--text-body-xs);
+  line-height: 1.55;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-variant-ligatures: none;
+  letter-spacing: -0.01em;
+}
+.tb-term .tb-prompt { color: hsl(var(--primary)); font-weight: 600; }
+.tb-term .tb-out { color: hsl(var(--term-fg) / 0.82); }
+.tb-term .tb-err { color: hsl(var(--destructive)); }
+.tb-term .tb-exit { color: hsl(var(--success)); font-variant-numeric: tabular-nums; }
+.tb-term .tb-exit-nonzero { color: hsl(var(--warning)); font-variant-numeric: tabular-nums; }
+/* Timings dimmed + tabular so successive runs line up. */
+.tb-term .tb-meta { color: hsl(var(--term-fg) / 0.5); font-variant-numeric: tabular-nums; }
+
+.tb-preview {
+  font-size: var(--text-body-xs);
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--code-bg));
+  border: 1px solid hsl(var(--border-soft));
+  border-radius: 9px;
+  padding: 10px 12px;
+  line-height: 1.55;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0;
+  font-variant-ligatures: none;
+  letter-spacing: -0.01em;
+}
+.tb-preview .tb-ln {
+  color: hsl(var(--faint-foreground) / 0.7);
+  margin-right: 12px;
+  user-select: none;
+  display: inline-block;
+  min-width: 1.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* file_edit before/after coloured by diff convention, using the real
+   semantic tokens (both themes covered). */
+.tb-preview .tb-diff-del { color: hsl(var(--destructive)); }
+.tb-preview .tb-diff-add { color: hsl(var(--success)); }
+.tb-preview .tb-more { color: hsl(var(--faint-foreground)); }
+
+.tb-flist { display: flex; flex-direction: column; gap: 1px; }
+.tb-frow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: var(--text-code-sm);
+  transition: background 0.12s var(--ease-apple, cubic-bezier(0.22, 1, 0.36, 1));
+}
+.tb-frow:hover { background: hsl(var(--surface-2) / 0.6); }
+.tb-frow .tb-fi {
+  flex: none;
+  color: hsl(var(--muted-foreground));
+  display: grid;
+  place-items: center;
+}
+.tb-frow .tb-fi.tb-folder { color: hsl(var(--primary)); }
+.tb-frow .tb-fname {
+  color: hsl(var(--foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tb-frow .tb-fmeta {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--text-caption);
+  color: hsl(var(--faint-foreground));
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status badge (http_fetch) and status pill (plan / todo steps). Both derive
+   every colour from a semantic token, so light and dark are covered centrally. */
+.tb-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-caption);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border-soft));
+  background: hsl(var(--surface-2));
+  color: hsl(var(--foreground));
+}
+.tb-badge.tb-ok    { color: hsl(var(--success)); border-color: hsl(var(--success) / 0.35); background: hsl(var(--success) / 0.08); }
+.tb-badge.tb-warn  { color: hsl(var(--warning)); border-color: hsl(var(--warning) / 0.35); background: hsl(var(--warning) / 0.08); }
+.tb-badge.tb-error { color: hsl(var(--destructive)); border-color: hsl(var(--destructive) / 0.35); background: hsl(var(--destructive) / 0.08); }
+.tb-badge.tb-info  { color: hsl(var(--primary)); border-color: hsl(var(--primary) / 0.35); background: hsl(var(--primary) / 0.08); }
+
+.tb-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  font-size: var(--text-micro-lg);
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border-soft));
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--surface-2));
+}
+.tb-pill.tb-ok     { color: hsl(var(--success)); border-color: hsl(var(--success) / 0.35); }
+.tb-pill.tb-warn   { color: hsl(var(--warning)); border-color: hsl(var(--warning) / 0.35); }
+.tb-pill.tb-error  { color: hsl(var(--destructive)); border-color: hsl(var(--destructive) / 0.35); }
+.tb-pill.tb-active { color: hsl(var(--primary)); border-color: hsl(var(--primary) / 0.35); }
+
+/* Step / todo listing: glyph + text + trailing status pill. */
+.tb-steps { display: flex; flex-direction: column; gap: 4px; }
+.tb-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  font-size: var(--text-code-sm);
+  background: hsl(var(--surface-2) / 0.5);
+}
+.tb-step .tb-step-glyph {
+  flex: none;
+  color: hsl(var(--muted-foreground));
+  display: grid;
+  place-items: center;
+}
+.tb-step .tb-step-glyph.tb-ok     { color: hsl(var(--success)); }
+.tb-step .tb-step-glyph.tb-active { color: hsl(var(--primary)); }
+.tb-step .tb-step-glyph.tb-error  { color: hsl(var(--destructive)); }
+.tb-step .tb-step-title {
+  color: hsl(var(--foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tb-step .tb-step-title.tb-done {
+  color: hsl(var(--muted-foreground));
+  text-decoration: line-through;
+}
+.tb-step .tb-step-pill { margin-left: auto; }
+
+/* Memory recall cards. */
+.tb-cards { display: flex; flex-direction: column; gap: 6px; }
+.tb-card {
+  border: 1px solid hsl(var(--border-soft));
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: hsl(var(--surface-2) / 0.4);
+}
+.tb-card .tb-card-body {
+  color: hsl(var(--foreground));
+  font-size: var(--text-code-sm);
+  line-height: 1.5;
+}
+
+/* Grep matches grouped by file. */
+.tb-grep { display: flex; flex-direction: column; gap: 8px; }
+.tb-grep-group { display: flex; flex-direction: column; gap: 2px; }
+.tb-grep-file {
+  font-size: var(--text-caption-lg);
+  font-weight: 600;
+  color: hsl(var(--foreground));
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.tb-grep-file .tb-grep-dir {
+  color: hsl(var(--faint-foreground));
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tb-grep-row {
+  display: flex;
+  gap: 8px;
+  font-size: var(--text-body-xs);
+  line-height: 1.5;
+}
+.tb-grep-row .tb-grep-ln {
+  color: hsl(var(--primary) / 0.75);
+  flex: none;
+  min-width: 2.5em;
+  text-align: right;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.tb-grep-row .tb-grep-text {
+  color: hsl(var(--foreground) / 0.85);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Readable article extract (web_read). */
+.tb-extract {
+  font-size: var(--text-code-sm);
+  line-height: 1.6;
+  color: hsl(var(--foreground) / 0.85);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tb-extract-title { font-weight: 600; color: hsl(var(--foreground)); font-size: var(--text-body-sm); letter-spacing: -0.005em; }
+.tb-extract-byline { font-size: var(--text-caption); color: hsl(var(--faint-foreground)); }
+
+/* ── Honest, neutral metric ──
+   Counts, durations, sizes: tabular, muted, never coloured. Green stays
+   reserved for genuine success (exit 0, http-2xx, the shared success check). */
+.tb-metric {
+  font-size: var(--text-caption);
+  color: hsl(var(--muted-foreground));
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.005em;
+}
+
+/* ── Reasoning spark ── the one gradient hero glyph: gradient stroke +
+   soft radial halo. The gradient <linearGradient id="apollia-grad"> lives in
+   ActivityStrip; SVG url() refs resolve document-globally. */
+.tb-spark {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+}
+.tb-spark::before {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border-radius: 50%;
+  background: radial-gradient(circle, hsl(var(--grad-b) / 0.3), transparent 68%);
+  z-index: 0;
+}
+.tb-spark :global(svg) {
+  position: relative;
+  z-index: 1;
+  stroke: url(#apollia-grad);
+}
+
+/* ── Faint gradient hairline under strip / section headers ──
+   A quiet signature rule that fades indigo -> violet -> transparent. */
+.tb-header-rule {
+  padding-bottom: 7px;
+  background-image: linear-gradient(
+    90deg,
+    hsl(var(--grad-a) / 0.5),
+    hsl(var(--grad-b) / 0.25) 32%,
+    hsl(var(--border-soft) / 0) 74%
+  );
+  background-repeat: no-repeat;
+  background-position: left bottom;
+  background-size: 100% 1.5px;
+}
+
+/* Same signature at the top edge, for the activity strip's trace panel: a
+   faint gradient hairline sits under the strip header when it expands. */
+.tb-strip-rule {
+  background-image: linear-gradient(
+    90deg,
+    hsl(var(--grad-a) / 0.45),
+    hsl(var(--grad-b) / 0.22) 34%,
+    hsl(var(--border-soft) / 0) 76%
+  );
+  background-repeat: no-repeat;
+  background-position: left top;
+  background-size: 100% 1.5px;
+}
+
+/* ── file_grep matched-token highlight ── quieter primary tier. */
+.tb-grep-row .tb-hit {
+  background: hsl(var(--primary) / 0.16);
+  color: hsl(var(--foreground));
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+/* ── memory_search slim relevance meter ── */
+.tb-mbar {
+  height: 3px;
+  border-radius: 999px;
+  background: hsl(var(--border-soft));
+  margin-top: 8px;
+  overflow: hidden;
+}
+.tb-mbar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: hsl(var(--primary));
+}
+.tb-mrel {
+  margin-left: auto;
+  color: hsl(var(--primary));
+  font-weight: 700;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Clickable file reference ── reveals the file in the OS file manager.
+   Inline, underline-on-hover affordance; the global focus rule supplies the
+   ring on :focus-visible. The static variant (relative paths) stays inert. */
+.tb-fileref {
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: hsl(var(--border));
+  text-underline-offset: 3px;
+  transition: color 0.12s var(--ease-standard),
+    text-decoration-color 0.12s var(--ease-standard);
+}
+.tb-fileref:hover {
+  color: hsl(var(--primary));
+  text-decoration-color: hsl(var(--primary) / 0.6);
+}
+.tb-fileref.tb-fileref-static {
+  cursor: default;
+  text-decoration: none;
+}
+
+/* ── memory_search card top-meta row ── source label + relevance sit on top of
+   the recalled excerpt, mirroring the mockup .mtop. */
+.tb-card .tb-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: var(--text-micro);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: hsl(var(--faint-foreground));
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Chat turn layout - user bubble, in-flow tool cards, the answer
+   hero, and the action row. Mirrors the validated chat mockup
+   (Section 1). Every value routes through a design token so both
+   themes are covered centrally.
+   ═══════════════════════════════════════════════════════════ */
+
+/* User turn: a right-aligned bubble, no avatar/name header. */
+.chat-user-bubble {
+  max-width: 78%;
+  width: fit-content;
+  padding: 10px 15px;
+  border-radius: 15px 15px 4px 15px;
+  background: hsl(var(--user-bubble));
+  color: hsl(var(--foreground));
+  font-size: 14.5px;
+}
+
+/* Assistant answer, the hero: larger type, generous leading. */
+.chat-answer {
+  margin-top: 6px;
+  font-size: 16.5px;
+  line-height: 1.68;
+  letter-spacing: -0.003em;
+  color: hsl(var(--foreground));
+}
+
+/* In-flow tool calls (zone 2): each finalized call is a bordered card with a
+   clickable header and an expandable body dispatching to the per-tool body. */
+.chat-flow-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 12px 0 4px;
+}
+.chat-flow-tool {
+  border: 1px solid hsl(var(--border-soft));
+  border-radius: 7px;
+  background: hsl(var(--surface-1) / 0.5);
+  overflow: hidden;
+}
+.chat-ft-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 11px;
+  font-size: var(--text-code-sm);
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  transition: background 0.15s var(--ease-standard);
+}
+.chat-ft-head:hover { background: hsl(var(--surface-2) / 0.5); }
+.chat-ft-chev {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  line-height: 0;
+  color: hsl(var(--faint-foreground));
+  transition: transform 0.18s var(--ease-apple);
+}
+.chat-flow-tool.chat-ft-open .chat-ft-chev { transform: rotate(90deg); }
+.chat-ft-ico {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: hsl(var(--muted-foreground));
+}
+.chat-ft-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: hsl(var(--foreground));
+  font-weight: 550;
+}
+.chat-ft-name.chat-ft-error { color: hsl(var(--destructive)); }
+/* A thought row sits in the same timeline as the actions but stays quieter:
+   the actions are the events, the thoughts are the connective voice. */
+.chat-ft-name.chat-ft-thought {
+  color: hsl(var(--muted-foreground));
+  font-weight: 450;
+  font-style: italic;
+}
+.chat-ft-meta {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-caption);
+  color: hsl(var(--faint-foreground));
+  font-variant-numeric: tabular-nums;
+}
+.chat-ft-body {
+  padding: 6px 12px 12px;
+  border-top: 1px solid hsl(var(--border-soft));
+}
+
+/* Turn actions (copy / regenerate / edit): a left-aligned row below the turn. */
+.chat-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 16px;
+}
+.chat-actions button {
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: hsl(var(--faint-foreground));
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease-standard),
+    color 0.15s var(--ease-standard);
+}
+.chat-actions button:hover {
+  background: hsl(var(--surface-2));
+  color: hsl(var(--foreground));
+}
+.chat-actions button:focus-visible {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 1px;
+}
+.chat-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Reduced motion - honour OS preference by
+   collapsing every animation and transition to a near-instant
+   step. Spring transforms become static.
+   ═══════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+  .list-item-spring:hover,
+  .list-item-spring:active,
+  .hover-lift:hover,
+  .hover-lift:active,
+  .hover-glow:hover,
+  .hover-glow:active,
+  .elev-interactive:hover,
+  .elev-interactive:active {
+    transform: none !important;
+  }
+  /* A loader is a status, not a decoration: it has to keep conveying that
+     something runs. The rule above limits every animation to one iteration,
+     and the spinner's own override restored only the duration, so under
+     reduced motion a spinner turned once in three seconds and then stood
+     still for the rest of a long inference. Measured on 2026-09-10 on a
+     Windows machine whose animations are turned off system-wide
+     (`prefers-reduced-motion: reduce`): duration 3s, iteration count 1.
+     Slow and endless is what the preference asks for. */
+  .animate-spin,
+  .spinner-icon {
+    animation-duration: 3s !important;
+    animation-iteration-count: infinite !important;
+  }
+}

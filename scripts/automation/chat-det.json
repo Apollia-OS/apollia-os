@@ -1,0 +1,2197 @@
+{
+  "name": "chat-det (chat page, operator + builder, deterministic UI against the seeded ecosystem, no inference)",
+  "stopOnError": false,
+  "dynamicTestids": [
+    "quickpicker-agent-seed-classifier",
+    "sidebar-mode-option-builder",
+    "sidebar-mode-option-operator"
+  ],
+  "steps": [
+    {
+      "kind": "click",
+      "testid": "onboarding-skip",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "onboarding-skip",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-operator"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 30000
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-active-list"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-menu-button",
+      "nth": 0,
+      "timeoutMs": 12000
+    },
+    {
+      "kind": "screenshot",
+      "label": "01-chat-operator-seeded-sessions"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "session-search-input",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "fill",
+      "testid": "session-search-input",
+      "text": "zzz-no-match-xyz"
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "02-session-search-no-results"
+    },
+    {
+      "kind": "fill",
+      "testid": "session-search-input",
+      "text": ""
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-menu-button",
+      "nth": 0,
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "03-session-search-cleared"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-new-chat-btn"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "new-chat-picker",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "quickpicker"
+    },
+    {
+      "kind": "screenshot",
+      "label": "04-quickpicker"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker-project",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "quickpicker-project",
+      "index": 1,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "05-quickpicker-project-selected"
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-toggle-agents"
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-toggle-agents"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker-agents",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "quickpicker-agent-",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker-textarea",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "fill",
+      "testid": "quickpicker-textarea",
+      "text": "Deterministic UI probe, not submitted."
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "meta_rewrite_input",
+      "once": true,
+      "resolve": {
+        "rewrittenText": "Deterministic UI probe, not submitted.",
+        "fallback": "callFailed"
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-rewrite-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker-error",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "07b-quickpicker-rewrite-fallback (callFailed answered by the harness: reason shown, prompt unchanged)"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "meta_rewrite_input",
+      "once": true,
+      "resolve": {
+        "rewrittenText": "Probe the deterministic user interface without submitting anything.",
+        "fallback": null
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-rewrite-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker-rewrite-restore-button",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "07c-quickpicker-rewritten (restore offered)"
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-rewrite-restore-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "expect",
+      "testid": "quickpicker-submit"
+    },
+    {
+      "kind": "screenshot",
+      "label": "07-quickpicker-filled"
+    },
+    {
+      "kind": "expect",
+      "testid": "quickpicker-plan-mode-label"
+    },
+    {
+      "kind": "setChecked",
+      "testid": "quickpicker-plan-mode",
+      "checked": true
+    },
+    {
+      "kind": "screenshot",
+      "label": "08-quickpicker-plan-on"
+    },
+    {
+      "kind": "setChecked",
+      "testid": "quickpicker-plan-mode",
+      "checked": false
+    },
+    {
+      "kind": "press",
+      "key": "Escape",
+      "testid": "quickpicker-textarea"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "quickpicker",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "09-quickpicker-closed-via-escape"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-new-chat-btn"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "timeoutMs": 2500,
+      "testid": "quickpicker-agent-seed-classifier"
+    },
+    {
+      "kind": "click",
+      "timeoutMs": 2500,
+      "testid": "quickpicker-agent-seed-classifier"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "10-conversation-open"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-conversation"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-title"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-title",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "press",
+      "key": "Escape"
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-meta"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-meta-mode"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-meta-messages"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-meta-duration"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-close-button"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-input"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-send-button"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-attach-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-attach-input"
+    },
+    {
+      "kind": "fill",
+      "testid": "chat-attach-input",
+      "text": "Attachment fed by the automation harness, never sent.",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-attachment-chip",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-attachment-chip",
+      "contains": "automation-attachment.txt"
+    },
+    {
+      "kind": "screenshot",
+      "label": "11a-composer-attachment-chip (one text file built by the harness, ingested through the hidden input)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-attachment-remove",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-attachment-chip",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-attach-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-attachment-chip",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "11b-composer-attachment-from-paperclip (the file chooser answered by the harness)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-attachment-remove",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-attachment-chip",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-mic-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "11-composer-affordances (attach = native dialog, asserted only; the mic is played next through the harness)"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "start_tour_recording",
+      "reject": "STT engine not available",
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "chat-mic-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-input-hint-status",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-input-hint-status",
+      "contains": "STT engine not available"
+    },
+    {
+      "kind": "screenshot",
+      "label": "11d-composer-mic-refused (start_tour_recording rejected by the harness, the reason in the hints line)"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "start_tour_recording",
+      "resolve": null
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "stop_tour_recording",
+      "reject": "dictation stopped by the automation harness"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-mic-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "11e-composer-mic-recording (start_tour_recording answered by the harness, button lit, no capture opened)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-mic-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-input-hint-status",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-input-hint-status",
+      "contains": "dictation stopped by the automation harness"
+    },
+    {
+      "kind": "screenshot",
+      "label": "11f-composer-mic-stopped (stop_tour_recording rejected by the harness, dictation ended, composer clean)"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "start_tour_recording"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "stop_tour_recording"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "fill",
+      "testid": "chat-input",
+      "text": "Rewrite probe, offline: the engine answers through the stub."
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-input-rewrite-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "meta_rewrite_input",
+      "once": true,
+      "resolve": {
+        "rewrittenText": "Rewrite probe, offline: the engine answers through the stub.",
+        "fallback": "noBackend"
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "chat-input-rewrite-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "screenshot",
+      "label": "11b-composer-rewrite-fallback (noBackend answered by the harness: text unchanged, the toast is hidden from captures)"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "meta_rewrite_input",
+      "once": true,
+      "resolve": {
+        "rewrittenText": "Summarise the seeded conversation in three bullet points, citing the tools it used.",
+        "fallback": null
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "chat-input-rewrite-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-input-rewrite-restore-button",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "11c-composer-rewritten (restore offered)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-input-rewrite-restore-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "fill",
+      "testid": "chat-input",
+      "text": ""
+    },
+    {
+      "kind": "click",
+      "testid": "chat-slash-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-slash-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-slash-menu-item"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-slash-menu-item",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "fill",
+      "testid": "chat-input",
+      "text": ""
+    },
+    {
+      "kind": "screenshot",
+      "label": "12-slash-menu"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-slash-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "chat-input",
+      "text": ""
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_mcp_resources",
+      "resolve": [
+        {
+          "server": "filesystem",
+          "uri": "seed://readme",
+          "name": "Seed README",
+          "mime_type": "text/plain",
+          "description": "Resource answered by the automation harness"
+        }
+      ]
+    },
+    {
+      "kind": "click",
+      "testid": "chat-mention-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-mention-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-mention-menu-item",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13-mention-menu (one resource, answered by the harness)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-mention-menu-item",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "press",
+      "key": "Enter"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-pinned-resource-chip",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13b-mention-pinned"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-pinned-resource-remove",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-pinned-resource-chip",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_mcp_resources"
+    },
+    {
+      "kind": "fill",
+      "testid": "chat-input",
+      "text": ""
+    },
+    {
+      "kind": "expect",
+      "testid": "composer-plan-toggle"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-plan-mode-chip"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-plan-mode-chip",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "click",
+      "testid": "composer-plan-toggle",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "screenshot",
+      "label": "14-plan-mode-on"
+    },
+    {
+      "kind": "click",
+      "testid": "composer-plan-toggle",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 200
+    },
+    {
+      "kind": "screenshot",
+      "label": "15-plan-mode-off"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-open-context-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-inspector-config-tab",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-inspector-plan-tab"
+    },
+    {
+      "kind": "screenshot",
+      "label": "16-inspector-journal"
+    },
+    {
+      "kind": "screenshot",
+      "label": "inspector-plan-tab-skipped-xyflow-freeze"
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "17-inspector-plan"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-inspector-config-tab"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-config-panel",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-inspector-config"
+    },
+    {
+      "kind": "screenshot",
+      "label": "18-inspector-config"
+    },
+    {
+      "kind": "expect",
+      "testid": "config-system-prompt"
+    },
+    {
+      "kind": "fill",
+      "testid": "config-system-prompt",
+      "text": "You are a deterministic test assistant."
+    },
+    {
+      "kind": "expect",
+      "testid": "config-step-budget"
+    },
+    {
+      "kind": "fill",
+      "testid": "config-step-budget",
+      "text": "5"
+    },
+    {
+      "kind": "waitFor",
+      "testidPrefix": "config-backend-",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "expect",
+      "testid": "toggle-user-memory"
+    },
+    {
+      "kind": "click",
+      "testid": "toggle-user-memory"
+    },
+    {
+      "kind": "screenshot",
+      "label": "19-config-memory-toggle"
+    },
+    {
+      "kind": "click",
+      "testid": "toggle-user-memory"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "context-window-bar",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "expect",
+      "testid": "config-save"
+    },
+    {
+      "kind": "click",
+      "testid": "config-save"
+    },
+    {
+      "kind": "screenshot",
+      "label": "20-config-saved"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-overflow-button"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-overflow-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-menu-drawer"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-menu-rename"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-menu-delete"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-menu-link-project"
+    },
+    {
+      "kind": "screenshot",
+      "label": "21-header-overflow-menu (drawer = md:hidden, unlink = only when linked, link submenu = closes-on-click: screenshot only)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-menu-link-project",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-link-project-menu",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-link-project-item",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-link-project-item",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-meta-project",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "22-header-project-linked"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-overflow-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-overflow-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-menu-unlink-project",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 400
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-header-meta-project",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "22b-header-project-unlinked"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-overflow-button"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-overflow-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-menu-delete"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-delete-confirm",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "23-header-delete-confirm"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-delete-confirm-cancel"
+    },
+    {
+      "kind": "sleep",
+      "ms": 250
+    },
+    {
+      "kind": "screenshot",
+      "label": "24-header-delete-cancelled"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-overflow-button"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-overflow-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-menu-rename"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-title-input",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "fill",
+      "testid": "chat-header-title-input",
+      "text": "Deterministic coverage title (not persisted)"
+    },
+    {
+      "kind": "screenshot",
+      "label": "25-header-title-input"
+    },
+    {
+      "kind": "press",
+      "key": "Escape"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-header-title-input",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "26-header-rename-cancelled"
+    },
+    {
+      "kind": "resizeWindow",
+      "width": 900,
+      "height": 800
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "26b-narrow-context-drawer (900 px: the open inspector becomes an overlay)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-open-sessions-button",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-open-sessions-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-sessions-backdrop",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "26c-narrow-sessions-drawer"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-sessions-backdrop",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-sessions-backdrop",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-open-context-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "resizeWindow",
+      "width": 700,
+      "height": 800
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-overflow-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-overflow-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-menu-drawer",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-menu-drawer",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "26d-narrow-drawer-menu-item (700 px: the overflow item opens the inspector overlay)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-context-backdrop",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "resizeWindow",
+      "width": 1280,
+      "height": 800
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-open-sessions-button",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-open-context-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-inspector-config-tab",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-menu-button",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "conversation-row-menu-rename"
+    },
+    {
+      "kind": "expect",
+      "testid": "conversation-row-menu-configure"
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-menu-configure",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 400
+    },
+    {
+      "kind": "screenshot",
+      "label": "27b-row-configure"
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-menu-button",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "conversation-row-menu-delete"
+    },
+    {
+      "kind": "screenshot",
+      "label": "27-conversation-row-menu"
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-menu-rename"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-rename-input",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "fill",
+      "testid": "conversation-row-rename-input",
+      "text": "Coverage rename (not persisted)"
+    },
+    {
+      "kind": "screenshot",
+      "label": "28-conversation-row-rename-input"
+    },
+    {
+      "kind": "press",
+      "key": "Escape"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "conversation-row-rename-input",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-menu-button",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-menu-delete"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-delete-confirm",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "conversation-row-delete-confirm-btn"
+    },
+    {
+      "kind": "screenshot",
+      "label": "29-conversation-row-delete-confirm"
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-delete-cancel-btn"
+    },
+    {
+      "kind": "sleep",
+      "ms": 250
+    },
+    {
+      "kind": "screenshot",
+      "label": "30-conversation-row-delete-cancelled"
+    },
+    {
+      "kind": "goto",
+      "route": "chat",
+      "sessionId": "seed-session-2"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-inspector-plan-tab",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "respond_hitl_filesystem",
+      "resolve": null
+    },
+    {
+      "kind": "emitEvent",
+      "event": "hitl-fs-required",
+      "payload": {
+        "request_id": "automation-critical-1",
+        "session_id": "seed-session-2",
+        "level": "critical",
+        "op": "delete",
+        "path": "${HOME}/.apollia/automation-critical.txt",
+        "preview": {
+          "kind": "content",
+          "content": "",
+          "size_bytes": 0,
+          "truncated": false
+        }
+      }
+    },
+    {
+      "kind": "waitFor",
+      "testid": "hitl-fs-modal",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "hitl-fs-critical-input",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "20a-hitl-fs-critical (payload shaped like HitlFsRequiredPayload, delivered by the recipe)"
+    },
+    {
+      "kind": "fill",
+      "testid": "hitl-fs-critical-input",
+      "text": "CONFIRM"
+    },
+    {
+      "kind": "click",
+      "testid": "hitl-fs-deny",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "hitl-fs-reject-reason",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "fill",
+      "testid": "hitl-fs-reject-reason",
+      "text": "automation reject reason"
+    },
+    {
+      "kind": "screenshot",
+      "label": "20b-hitl-fs-critical-reject-reason"
+    },
+    {
+      "kind": "click",
+      "testid": "hitl-fs-deny",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "hitl-fs-modal",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "respond_hitl_filesystem"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-inspector-plan-tab"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "plan-dag-canvas",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "plan-step-node",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "30b-inspector-plan-seeded (seed-session-2 persists a 3-step plan)"
+    },
+    {
+      "kind": "click",
+      "testid": "plan-dag-expand"
+    },
+    {
+      "kind": "sleep",
+      "ms": 400
+    },
+    {
+      "kind": "waitFor",
+      "testid": "plan-dag-canvas",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "30c-plan-dag-expanded"
+    },
+    {
+      "kind": "click",
+      "testid": "plan-dag-expand"
+    },
+    {
+      "kind": "sleep",
+      "ms": 400
+    },
+    {
+      "kind": "waitFor",
+      "testid": "plan-dag-canvas",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "plan-step-node",
+      "nth": 0
+    },
+    {
+      "kind": "waitFor",
+      "testid": "plan-step-drawer",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "30d-plan-step-drawer"
+    },
+    {
+      "kind": "click",
+      "testid": "sheet-close"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "plan-step-drawer",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-inspector-config-tab"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-config-panel",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-builder"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-menu-button",
+      "nth": 0,
+      "timeoutMs": 12000
+    },
+    {
+      "kind": "screenshot",
+      "label": "31-chat-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-new-chat-btn"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "timeoutMs": 2500,
+      "testid": "quickpicker-agent-seed-classifier"
+    },
+    {
+      "kind": "click",
+      "timeoutMs": 2500,
+      "testid": "quickpicker-agent-seed-classifier"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "32-conversation-builder"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-conversation"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-messages-list"
+    },
+    {
+      "kind": "expect",
+      "testid": "chat-header-meta-mode"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-inspector-config-tab",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "33-inspector-journal-builder"
+    },
+    {
+      "kind": "screenshot",
+      "label": "inspector-plan-tab-skipped-xyflow-freeze"
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "34-inspector-plan-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-inspector-config-tab"
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "35-inspector-config-builder (plan-review / error / cross-session / next-steps families render only on their live state: screenshot best-effort, never hard-asserted)"
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-chip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "sidebar-mode-menu",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mode-option-operator"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "screenshot",
+      "label": "36-back-operator"
+    },
+    {
+      "kind": "press",
+      "testid": "chat-input",
+      "key": "/",
+      "timeoutMs": 3000,
+      "mod": true
+    },
+    {
+      "kind": "waitFor",
+      "testid": "shortcuts-help-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "37-shortcuts-help"
+    },
+    {
+      "kind": "click",
+      "testid": "shortcuts-help-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "shortcuts-help-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "press",
+      "testid": "app-main",
+      "key": "?",
+      "shift": true,
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "keyboard-hint-overlay",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "38-keyboard-hint"
+    },
+    {
+      "kind": "click",
+      "testid": "keyboard-hint-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "keyboard-hint-overlay",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-overflow-button",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-overflow-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-menu-link-project",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-link-project-menu",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-link-project-item",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-header-meta-project",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-header-meta-project",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "projects-page",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "screenshot",
+      "label": "39-project-chip-opens-project"
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-new-chat-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker-agent-seed-classifier",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-agent-seed-classifier",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-close-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "sleep",
+      "ms": 600
+    },
+    {
+      "kind": "screenshot",
+      "label": "41-conversation-closed"
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-menu-button",
+      "nth": 0,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-menu",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-menu-delete",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "conversation-row-delete-confirm",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "conversation-row-delete-confirm-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "conversation-row-delete-confirm",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "40-conversation-row-deleted"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-new-chat-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-close",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "sleep",
+      "ms": 400
+    },
+    {
+      "kind": "screenshot",
+      "label": "42-quickpicker-closed"
+    },
+    {
+      "kind": "goto",
+      "route": "chat",
+      "sessionId": "does-not-exist"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "session-not-found",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "screenshot",
+      "label": "43-session-not-found (deep link to an id no table holds)"
+    },
+    {
+      "kind": "click",
+      "testid": "session-not-found-back",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "session-not-found",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "goto",
+      "route": "chat",
+      "sessionId": "does-not-exist"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "session-not-found",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "click",
+      "testid": "session-not-found-new",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "session-not-found",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "44-session-not-found-new-opens-picker"
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-close",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "quickpicker",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_chat_session",
+      "reject": "sqlite: database disk image is malformed (rejected by the automation harness)"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-new-chat-btn",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "quickpicker-agent-seed-classifier",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "quickpicker-agent-seed-classifier",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "session-corrupted",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "45-session-corrupted (get_chat_session rejected by the harness)"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_chat_session"
+    },
+    {
+      "kind": "click",
+      "testid": "session-corrupted-export",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 500
+    },
+    {
+      "kind": "click",
+      "testid": "session-corrupted-delete",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "session-corrupted",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "46-session-corrupted-deleted (the session this block created)"
+    },
+    {
+      "kind": "goto",
+      "route": "chat",
+      "sessionId": "seed-session-4"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "activity-strip",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "expect",
+      "testid": "activity-reasoning-count",
+      "contains": "12"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-inspector-config-tab",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-config-panel",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "journal-event",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "chat-inspector-journal-tab",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "journal-event",
+      "nth": 0,
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "journal-event",
+      "nth": 1,
+      "contains": "executed successfully"
+    },
+    {
+      "kind": "expect",
+      "testid": "journal-event",
+      "nth": 4,
+      "contains": "ran and failed"
+    },
+    {
+      "kind": "screenshot",
+      "label": "49a-journal-tool-statuses (the seeded failed call reads as failed, not as awaiting approval)"
+    },
+    {
+      "kind": "screenshot",
+      "label": "49b-activity-strip-collapsed (seeded turn: twelve thinking fragments, four tool calls)"
+    },
+    {
+      "kind": "click",
+      "testid": "activity-tool-count",
+      "nth": -1,
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "activity-trace",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "reasoning-show-more",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "49c-activity-trace-open (sixteen items, the list collapses past ten)"
+    },
+    {
+      "kind": "click",
+      "testid": "reasoning-show-more",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "reasoning-collapse",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "reasoning-show-more",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "49d-reasoning-expanded"
+    },
+    {
+      "kind": "click",
+      "testid": "reasoning-collapse",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "reasoning-show-more",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "reasoning-collapse",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "activity-tool-count",
+      "nth": -1,
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "activity-trace",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs"
+    },
+    {
+      "kind": "goto",
+      "route": "dashboard"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_chat_session",
+      "patch": {
+        "status": "closed"
+      },
+      "argsMatch": {
+        "sessionId": "seed-session-1"
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:opener|open_url",
+      "resolve": null
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "link_preview",
+      "resolve": {
+        "url": "https://example.com/apollia-docs",
+        "title": "Apollia preview docs",
+        "description": "Stubbed Open Graph metadata for the rich link card.",
+        "favicon": null,
+        "image": null,
+        "site_name": "example.com"
+      },
+      "argsMatch": {
+        "url": "https://example.com/apollia-docs"
+      }
+    },
+    {
+      "kind": "goto",
+      "route": "chat",
+      "sessionId": "seed-session-1"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "link-preview-fallback",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "47-seeded-conversation-closed (standalone URL renders its fallback link; status read as closed through the patch)"
+    },
+    {
+      "kind": "click",
+      "testid": "link-preview-fallback",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "waitFor",
+      "testid": "link-preview-card",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "expect",
+      "testid": "link-preview-card",
+      "contains": "Apollia preview docs"
+    },
+    {
+      "kind": "screenshot",
+      "label": "47b-link-preview-card (second standalone URL of seed-msg-2, answered by the link_preview stub; the first keeps its fallback)"
+    },
+    {
+      "kind": "click",
+      "testid": "link-preview-card",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "expect",
+      "testid": "link-preview-fallback"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "link_preview"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-next-steps",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "next-steps-cards",
+      "timeoutMs": 25000
+    },
+    {
+      "kind": "screenshot",
+      "label": "48-next-steps-session-end (heuristic fallback, no engine)"
+    },
+    {
+      "kind": "click",
+      "testid": "next-steps-refresh",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "sleep",
+      "ms": 1000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "next-steps-cards",
+      "timeoutMs": 25000
+    },
+    {
+      "kind": "screenshot",
+      "label": "49-next-steps-refreshed"
+    },
+    {
+      "kind": "clearStubs"
+    },
+    {
+      "kind": "click",
+      "testid": "chat-close-button",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "goto",
+      "route": "dashboard"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "screenshot",
+      "label": "50-chat-healthy-after-faults"
+    }
+  ],
+  "notes": [
+    "Stubs that imitate a backend type, and the type they copy: meta_rewrite_input resolves a RewriteInputIpcResponse (crates/apollia-desktop/src/commands/meta_rewrite.rs, camelCase rewrittenText + fallback in noRouter/noBackend/callFailed/emptyAnswer), armed once per click so the composer and the picker each see one fallback and one success; list_mcp_resources resolves one McpResourceView (lib/chat/mcpResources.ts: server, uri, name, mime_type, description), armed before the first mention open of the composer because ChatInput loads the list once per instance (resourcesLoaded); get_chat_session is rejected with a sqlite-worded string (classifySessionError, lib/stores/runtimeHealth.ts) for the corrupted panel and patched with status closed under argsMatch seed-session-1 for the end-of-session panel; plugin:opener|open_url resolves null so the link-preview-fallback click never reaches the host browser. Every stub is cleared before the block that armed it ends, and the page is reloaded (dashboard then chat) after the fault blocks.",
+    "chat-mention-menu-item is clicked for the record but the pin itself is done by Enter: the item's handler is onmousedown (MentionResourceMenu.svelte), which el.click() never fires, so the press step targets the active element, the textarea insertTrigger focused (ChatInput.svelte).",
+    "session-corrupted-delete deletes the session the block itself creates through the picker (the reject stub carries no argsMatch, so the freshly created session's first load is the one it answers); no seeded row is touched, which is why the block lives here and not in destructive.json. session-corrupted-export is a blob download anchor: wry 0.55.1 (src/wkwebview/navigation.rs) cancels a shouldPerformDownload navigation when no download handler is registered, and crates/apollia-desktop/src registers none, so the click is inert on macOS.",
+    "Seeded sessions are opened through the command palette (command-item-session.<id>, paletteIndex.ts). The group is fed by recentSessionsStore, which persists apollia.commandPalette.recentSessions in the webview's real localStorage (not in the runner's reset list) and, once any touched id resolves, lists only touched ids; this book touches seed-session-2 then seed-session-1 on every run, so both stay listed across runs. goto.sessionId is reserved for the ghost id, as types.ts asks.",
+    "The plan tab is played on seed-session-2, whose plan is persisted by the seed (chat.sql session_plans + 3 steps, phase done so no approval card). The earlier 'inspector-plan-tab-skipped-xyflow-freeze' captures date from the July corpus and were taken on an empty plan; chat-llm has clicked the tab on a live plan green since. If the freeze reproduces with the seeded plan it is a defect to capture, not a recipe hole.",
+    "The narrow block keeps to store toggles (backdrops, drawers, the overflow item) and contains no picker or window.confirm; it ends with resizeWindow 1280x800 and reopens the inspector so the row-menu configure item and the builder section find the rail inline as before.",
+    "Seeded sessions are opened with goto + sessionId rather than through the palette: the palette's session items come from the recent-sessions store, whose localStorage key is not reset at boot, so their presence depended on the previous run (absent on d1-chat).",
+    "chat-mic-button is played through the harness: dictation.toggle() (useComposerDictation.svelte.ts:59-77) calls start_tour_recording and stop_tour_recording (commands/stt.rs:976-1005, both Result<(), String>) with no getUserMedia in front, so no cpal capture and no microphone prompt are ever reached. First click: start rejected once, the string lands in dictation.error and InputHints renders it as chat-input-hint-status. Second click: start resolves null, recording flips true (the lit button has no text, so it is asserted by the third click). Third click: the stop branch, reachable only when recording is true, is rejected, which the catch turns into recording=false, busy=false and a new message in the hints line. The success branch (stt-transcribed, stt-dictation-failed) is a Tauri event no stub can emit, so a stop that resolves would leave busy armed for the rest of the boot; the rejection is the only scripted end of course. The last message stays in the hints line until the next toggle, which is cosmetic.",
+    "link-preview-card is played on seed-session-1 through a stub: the real link_preview command refuses without [ui].link_preview_enabled and then needs a public HTTP fetch (crates/apollia-desktop/src/commands/link_preview.rs), and lib/chat/linkPreview.ts caches a null answer per URL for fifteen minutes, so the URL the fallback block relies on can never turn into a card in the same boot. seed-msg-2 therefore carries two standalone URLs (tests/cli/seed/fragments/chat.sql): the first still reaches the backend and renders link-preview-fallback, the second is answered by a link_preview stub under argsMatch (the type it imitates: LinkPreview, url/title/description/favicon/image/site_name, same file) armed before the session is first mounted in the boot. The card click goes to the plugin:opener|open_url stub already armed for the fallback, so the host browser stays closed; nothing in the DOM changes on that click, so the card's rendering (waitFor plus the expect on the stubbed title) is what can fail, and the click itself is covered only by the fact that it fires. The link_preview stub is cleared before the block moves on; the opener stub is dropped by the block's closing clearStubs.",
+    "Attachments are played twice: a fill on chat-attach-input (the runner builds one text/plain file in the webview and fires change, nothing is read from disk) and a click on chat-attach-button (under automation the runner replaces a file input's click() with the same immediate pick, because the real chooser is a modal NSOpenPanel that would freeze the boot). The chip then its removal are asserted each time.",
+    "The critical filesystem request is delivered by an emitEvent step imitating HitlFsRequiredPayload (crates/apollia-desktop/src/events.rs): the classifier never returns critical, so no model can produce it. respond_hitl_filesystem is stubbed to resolve because the request id is unknown to the backend; the modal must still disclose the confirm word input and the reject reason, and close on the second deny.",
+    "The reasoning list's show-more and collapse are played on a seeded turn (seed-session-4, twelve thinking fragments and four tool calls in tests/cli/seed/fragments/chat.sql), not on a model answer: the list collapses past COLLAPSE_ITEM_THRESHOLD = 10 items (lib/chat/reasoning.ts), a count a model reaches only when it happens to take enough steps.",
+    "The operator journal is read on the seeded turn: its fourth tool call is seeded failed, and the journal had no branch for that status, so it announced an executed-and-errored call as awaiting approval. The two expects hold the branch that now exists: the first tool row reads executed, the fourth reads failed."
+  ]
+}

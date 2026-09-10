@@ -1,0 +1,1201 @@
+//! REST routes for notifications.
+//!
+//! Exposes the notification management endpoints:
+//! - `GET    /api/v1/notifications/channels`        , list channels (from SQLite)
+//! - `POST   /api/v1/notifications/channels`        , create a channel
+//! - `PUT    /api/v1/notifications/channels/:id`    , update a channel
+//! - `DELETE /api/v1/notifications/channels/:id`    , delete a channel
+//! - `GET    /api/v1/notifications/events`          , global events
+//! - `PUT    /api/v1/notifications/events`          , replace global events
+//! - `POST   /api/v1/notifications/test`            , test all channels
+//! - `GET    /api/v1/notifications/logs`            , history from notifications.db
+
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde::{Deserialize, Serialize};
+
+use apollia_notifications::{
+    build_channels,
+    config::{ChannelKind, NotificationConfig},
+    NotificationChannelRow, NotificationConfigError,
+};
+
+use crate::api::server::AppState;
+use crate::coordinator::ExecutionBackend;
+
+pub mod logs;
+pub mod probe;
+
+// ─── Request types ──────────────────────────────────────────────────────────
+
+/// Request body for `POST /api/v1/notifications/channels`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateChannelRequest {
+    /// Unique channel identifier.
+    pub id: String,
+    /// Free-form display name. `None` falls back to `id` in the UI.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Channel type: `"desktop"` or `"webhook"`.
+    pub channel_type: String,
+    /// Whether the channel is active (default: `true`).
+    pub enabled: Option<bool>,
+    /// Type-specific configuration (e.g. `{"url": "..."}` for webhook).
+    #[schema(value_type = Object)]
+    pub config: serde_json::Value,
+    /// Channel-specific event list. `null` uses the global events.
+    pub events: Option<Vec<String>>,
+    /// Minimum throttling interval, in seconds. Default: `0` (none).
+    #[serde(default)]
+    pub min_interval_seconds: u32,
+}
+
+/// Request body for `PUT /api/v1/notifications/channels/:id`.
+///
+/// The `label` field uses a double `Option`:
+/// - absent from JSON: `None`, keep the existing label;
+/// - `null`: `Some(None)`, clear the label;
+/// - `"text"`: `Some(Some("text"))`, replace it.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateChannelRequest {
+    /// New label. See the struct docs for the double-Option semantics.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schema(value_type = Option<String>)]
+    pub label: Option<Option<String>>,
+    /// Channel type (optional, keeps the existing one if absent).
+    pub channel_type: Option<String>,
+    /// Whether the channel is active.
+    pub enabled: Option<bool>,
+    /// Type-specific configuration.
+    #[schema(value_type = Option<Object>)]
+    pub config: Option<serde_json::Value>,
+    /// Channel-specific event list.
+    pub events: Option<Vec<String>>,
+    /// New minimum throttling interval (s). Absent keeps the existing one.
+    pub min_interval_seconds: Option<u32>,
+}
+
+/// Distinguishes `field: null` (`Some(None)`) from an absent field (`None`).
+fn deserialize_optional_field<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
+}
+
+/// Request body for `PUT /api/v1/notifications/events`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetEventsRequest {
+    /// New list of global events.
+    pub events: Vec<String>,
+}
+
+// ─── Response types ─────────────────────────────────────────────────────────
+
+/// Full notification channel returned by the CRUD operations.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ChannelResponse {
+    /// Unique channel identifier.
+    pub id: String,
+    /// Free-form display name. `null` falls back to `id` in the UI.
+    pub label: Option<String>,
+    /// Channel type.
+    pub channel_type: String,
+    /// `true` if the channel is enabled.
+    pub enabled: bool,
+    /// Type-specific configuration.
+    #[schema(value_type = Object)]
+    pub config: serde_json::Value,
+    /// Channel-specific events.
+    pub events: Option<Vec<String>>,
+    /// Minimum throttling interval, in seconds.
+    pub min_interval_seconds: u32,
+    /// Creation timestamp (ISO 8601).
+    pub created_at: String,
+    /// Last modification timestamp (ISO 8601).
+    pub updated_at: String,
+}
+
+/// Response for `GET /api/v1/notifications/events`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EventsResponse {
+    /// List of global events.
+    pub events: Vec<String>,
+}
+
+/// Public description of a channel returned by `GET /channels`.
+#[derive(Debug, Serialize)]
+pub struct ChannelInfo {
+    /// Unique channel identifier (e.g. `"desktop"`, `"slack"`).
+    pub channel_id: String,
+    /// Display name (`None` falls back to `channel_id` in the UI).
+    pub label: Option<String>,
+    /// Channel type: `"desktop"`, `"webhook"`, or `"terminal"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// `true` if the channel is enabled in the configuration.
+    pub enabled: bool,
+    /// List of events this channel accepts.
+    pub events: Vec<String>,
+    /// Minimum throttling interval, in seconds (`0` = none).
+    pub min_interval_seconds: u32,
+}
+
+/// Result of testing an individual channel, returned by `POST /test`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChannelTestResult {
+    /// Unique channel identifier.
+    pub channel_id: String,
+    /// Channel type.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Test status: `"ok"`, `"error"`, or `"disabled"`.
+    pub status: String,
+    /// Error message if `status == "error"`.
+    pub error: Option<String>,
+    /// Measured latency in milliseconds (`None` if the channel is disabled).
+    pub latency_ms: Option<u64>,
+}
+
+/// Error response body.
+#[derive(Debug, Serialize)]
+pub struct ErrorResponse {
+    /// Error message.
+    pub error: String,
+}
+
+/// Response for `DELETE /api/v1/notifications/channels/:id`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = ChannelDeleteResponse)]
+pub struct DeleteResponse {
+    /// Identifier of the deleted channel.
+    pub deleted: String,
+}
+
+// ─── Query params ───────────────────────────────────────────────────────────
+
+/// Query parameters for `GET /api/v1/notifications/logs`.
+#[derive(Debug, Deserialize)]
+pub struct LogsQuery {
+    /// Maximum number of entries to return (default: 20, max: 1000).
+    #[serde(default = "default_last")]
+    pub last: usize,
+}
+
+fn default_last() -> usize {
+    20
+}
+
+// ─── CRUD Handlers ──────────────────────────────────────────────────────────
+
+/// `POST /api/v1/notifications/channels`, create a notification channel.
+///
+/// Validates the channel, inserts it into `notifications.db`, then reloads the
+/// [`NotificationEngine`] via its handle.
+#[utoipa::path(
+    post,
+    path = "/api/v1/notifications/channels",
+    tag = "notifications",
+    request_body = CreateChannelRequest,
+    responses(
+        (status = 201, description = "Channel created", body = ChannelResponse),
+        (status = 409, description = "Channel id already exists", body = crate::api::openapi::ApiErrorBody),
+        (status = 422, description = "Validation error", body = crate::api::openapi::ApiErrorBody),
+        (status = 500, description = "Repository error", body = crate::api::openapi::ApiErrorBody),
+        (status = 503, description = "Notification repository unavailable", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn create_channel<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+    Json(body): Json<CreateChannelRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = match &state.notification_repo {
+        Some(r) => Arc::clone(r),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "notification repository not available"})),
+            );
+        }
+    };
+
+    let row = NotificationChannelRow {
+        id: body.id,
+        label: body.label,
+        channel_type: body.channel_type,
+        enabled: body.enabled.unwrap_or(true),
+        config_json: body.config,
+        events_json: body.events,
+        min_interval_seconds: body.min_interval_seconds,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    let created = {
+        let guard = repo.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = guard.insert_channel(&row) {
+            return map_notif_error(e);
+        }
+        match guard.get_channel(&row.id) {
+            Ok(Some(ch)) => ch,
+            Ok(None) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "channel inserted but not found"})),
+                );
+            }
+            Err(e) => return map_notif_error(e),
+        }
+    };
+
+    reload_notification_engine(&state, &repo).await;
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::to_value(row_to_response(&created)).unwrap_or_default()),
+    )
+}
+
+/// `PUT /api/v1/notifications/channels/:id`, update an existing channel.
+///
+/// Updates the channel in `notifications.db`, then reloads the
+/// [`NotificationEngine`].
+#[utoipa::path(
+    put,
+    path = "/api/v1/notifications/channels/{id}",
+    tag = "notifications",
+    params(("id" = String, Path, description = "Channel id")),
+    request_body = UpdateChannelRequest,
+    responses(
+        (status = 200, description = "Channel updated", body = ChannelResponse),
+        (status = 404, description = "Channel not found", body = crate::api::openapi::ApiErrorBody),
+        (status = 422, description = "Validation error", body = crate::api::openapi::ApiErrorBody),
+        (status = 500, description = "Repository error", body = crate::api::openapi::ApiErrorBody),
+        (status = 503, description = "Notification repository unavailable", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn update_channel<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateChannelRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = match &state.notification_repo {
+        Some(r) => Arc::clone(r),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "notification repository not available"})),
+            );
+        }
+    };
+
+    let updated = {
+        let guard = repo.lock().unwrap_or_else(|e| e.into_inner());
+        let existing = match guard.get_channel(&id) {
+            Ok(Some(ch)) => ch,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": format!("channel not found: {id}")})),
+                );
+            }
+            Err(e) => return map_notif_error(e),
+        };
+
+        let merged = NotificationChannelRow {
+            id: id.clone(),
+            // Double-Option: absent keeps it; Some(None) clears it; Some(Some(s)) replaces it.
+            label: match body.label {
+                Some(value) => value,
+                None => existing.label,
+            },
+            channel_type: body.channel_type.unwrap_or(existing.channel_type),
+            enabled: body.enabled.unwrap_or(existing.enabled),
+            config_json: body.config.unwrap_or(existing.config_json),
+            events_json: body.events.or(existing.events_json),
+            min_interval_seconds: body
+                .min_interval_seconds
+                .unwrap_or(existing.min_interval_seconds),
+            created_at: existing.created_at,
+            updated_at: existing.updated_at,
+        };
+
+        if let Err(e) = guard.update_channel(&id, &merged) {
+            return map_notif_error(e);
+        }
+        match guard.get_channel(&id) {
+            Ok(Some(ch)) => ch,
+            Ok(None) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "channel updated but not found"})),
+                );
+            }
+            Err(e) => return map_notif_error(e),
+        }
+    };
+
+    reload_notification_engine(&state, &repo).await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(row_to_response(&updated)).unwrap_or_default()),
+    )
+}
+
+/// `DELETE /api/v1/notifications/channels/:id`, delete a channel.
+///
+/// Deletes the channel from `notifications.db`, then reloads the
+/// [`NotificationEngine`].
+#[utoipa::path(
+    delete,
+    path = "/api/v1/notifications/channels/{id}",
+    tag = "notifications",
+    params(("id" = String, Path, description = "Channel id")),
+    responses(
+        (status = 200, description = "Channel deleted", body = DeleteResponse),
+        (status = 404, description = "Channel not found", body = crate::api::openapi::ApiErrorBody),
+        (status = 500, description = "Repository error", body = crate::api::openapi::ApiErrorBody),
+        (status = 503, description = "Notification repository unavailable", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn delete_channel<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = match &state.notification_repo {
+        Some(r) => Arc::clone(r),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "notification repository not available"})),
+            );
+        }
+    };
+
+    {
+        let guard = repo.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = guard.delete_channel(&id) {
+            return map_notif_error(e);
+        }
+    }
+
+    reload_notification_engine(&state, &repo).await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(DeleteResponse { deleted: id }).unwrap_or_default()),
+    )
+}
+
+/// `GET /api/v1/notifications/events`, list global events.
+#[utoipa::path(
+    get,
+    path = "/api/v1/notifications/events",
+    tag = "notifications",
+    responses(
+        (status = 200, description = "Global notification events", body = EventsResponse),
+        (status = 500, description = "Repository error", body = crate::api::openapi::ApiErrorBody),
+        (status = 503, description = "Notification repository unavailable", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn get_events<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = match &state.notification_repo {
+        Some(r) => Arc::clone(r),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "notification repository not available"})),
+            );
+        }
+    };
+
+    let events = {
+        let guard = repo.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.get_global_events() {
+            Ok(ev) => ev,
+            Err(e) => return map_notif_error(e),
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(EventsResponse { events }).unwrap_or_default()),
+    )
+}
+
+/// `PUT /api/v1/notifications/events`, replace the global events.
+///
+/// Validates each event against the known event set (`KNOWN_EVENTS`),
+/// then replaces the list in `notifications.db` and reloads the
+/// notification engine.
+#[utoipa::path(
+    put,
+    path = "/api/v1/notifications/events",
+    tag = "notifications",
+    request_body = SetEventsRequest,
+    responses(
+        (status = 200, description = "Global notification events updated", body = EventsResponse),
+        (status = 422, description = "Validation error", body = crate::api::openapi::ApiErrorBody),
+        (status = 500, description = "Repository error", body = crate::api::openapi::ApiErrorBody),
+        (status = 503, description = "Notification repository unavailable", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn set_events<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+    Json(body): Json<SetEventsRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let repo = match &state.notification_repo {
+        Some(r) => Arc::clone(r),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "notification repository not available"})),
+            );
+        }
+    };
+
+    {
+        let guard = repo.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = guard.set_global_events(&body.events) {
+            return map_notif_error(e);
+        }
+    }
+
+    reload_notification_engine(&state, &repo).await;
+
+    let events = body.events;
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(EventsResponse { events }).unwrap_or_default()),
+    )
+}
+
+// ─── Existing Handlers ──────────────────────────────────────────────────────
+
+/// `GET /api/v1/notifications/channels`, list configured channels.
+///
+/// Reads from the SQLite repository. Falls back to `notification_config`
+/// if the repo is not available.
+#[utoipa::path(
+    get,
+    path = "/api/v1/notifications/channels",
+    tag = "notifications",
+    responses(
+        (status = 200, description = "Configured notification channels"),
+    )
+)]
+pub async fn list_channels<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+) -> Json<serde_json::Value> {
+    // Prefer SQLite repo
+    if let Some(ref repo) = state.notification_repo {
+        let guard = repo.lock().unwrap_or_else(|e| e.into_inner());
+        let channels: Vec<ChannelResponse> = match guard.list_channels() {
+            Ok(rows) => rows.iter().map(row_to_response).collect(),
+            Err(_) => vec![],
+        };
+        return Json(serde_json::json!({ "channels": channels }));
+    }
+
+    // Fallback: in-memory config (backward compat)
+    let Some(config) = &state.notification_config else {
+        return Json(serde_json::json!({ "channels": [] }));
+    };
+
+    let channels: Vec<ChannelInfo> = config
+        .channels
+        .iter()
+        .map(|ch| ChannelInfo {
+            channel_id: ch.id.clone(),
+            label: None,
+            kind: channel_kind_str(&ch.kind),
+            enabled: ch.enabled,
+            events: ch.events.clone().unwrap_or_else(|| config.events.clone()),
+            min_interval_seconds: ch.min_interval_seconds,
+        })
+        .collect();
+
+    Json(serde_json::json!({ "channels": channels }))
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Converts a [`NotificationChannelRow`] into a [`ChannelResponse`].
+fn row_to_response(row: &NotificationChannelRow) -> ChannelResponse {
+    ChannelResponse {
+        id: row.id.clone(),
+        label: row.label.clone(),
+        channel_type: row.channel_type.clone(),
+        enabled: row.enabled,
+        config: row.config_json.clone(),
+        events: row.events_json.clone(),
+        min_interval_seconds: row.min_interval_seconds,
+        created_at: row.created_at.clone(),
+        updated_at: row.updated_at.clone(),
+    }
+}
+
+/// Maps a [`NotificationConfigError`] to a `(StatusCode, JSON)` pair.
+fn map_notif_error(err: NotificationConfigError) -> (StatusCode, Json<serde_json::Value>) {
+    let (status, msg) = match &err {
+        NotificationConfigError::NotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
+        NotificationConfigError::DuplicateId(_) => (StatusCode::CONFLICT, err.to_string()),
+        NotificationConfigError::ValidationError(_) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, err.to_string())
+        }
+        NotificationConfigError::Database(_) | NotificationConfigError::Schema(_) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+        }
+        // The enum is #[non_exhaustive]: a variant added upstream reaches the
+        // client as a 500 carrying its own message, never as a compile break.
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    (status, Json(serde_json::json!({ "error": msg })))
+}
+
+/// Reloads the [`NotificationEngine`] from the repository data.
+///
+/// Reads the channels and global events from the repo, builds the new
+/// [`NotificationConfig`], instantiates the concrete channels via
+/// [`build_channels`], then sends everything to the engine for hot-reload.
+async fn reload_notification_engine<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+    repo: &Arc<std::sync::Mutex<apollia_notifications::NotificationConfigRepository>>,
+) {
+    let engine_handle = match &state.notification_engine_handle {
+        Some(h) => h.clone(),
+        None => return,
+    };
+
+    let (channel_rows, global_events) = {
+        let guard = repo.lock().unwrap_or_else(|e| e.into_inner());
+        let rows = guard.list_channels().unwrap_or_default();
+        let events = guard.get_global_events().unwrap_or_default();
+        (rows, events)
+    };
+
+    let channel_configs: Vec<apollia_notifications::ChannelConfig> = channel_rows
+        .iter()
+        .map(|row| row.to_channel_config())
+        .collect();
+
+    let config = NotificationConfig {
+        events: global_events,
+        channels: channel_configs,
+        inactivity_timeout_secs: 30,
+    };
+
+    let channels = match build_channels(&config.channels) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "notification.channels.build.failed");
+            return;
+        }
+    };
+
+    engine_handle.reload(config, channels).await;
+}
+
+/// Return the string representation of a [`ChannelKind`].
+pub(crate) fn channel_kind_str(kind: &ChannelKind) -> String {
+    match kind {
+        ChannelKind::Desktop => "desktop".to_string(),
+        ChannelKind::Webhook => "webhook".to_string(),
+        ChannelKind::Terminal => "terminal".to_string(),
+    }
+}
+
+/// Return the `kind` string for the channel identified by `id` in `config`.
+///
+/// Falls back to `"unknown"` if the ID is not found.
+pub(crate) fn channel_kind_by_id(id: &str, config: &NotificationConfig) -> String {
+    config
+        .channels
+        .iter()
+        .find(|ch| ch.id == id)
+        .map(|ch| channel_kind_str(&ch.kind))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::routes_notifications::logs::{
+        notification_logs, query_notification_logs, HITL_SCHEMA_VERSION,
+    };
+    use crate::api::routes_notifications::probe::resolve_live_config;
+    use apollia_notifications::config::{ChannelConfig, ChannelKind, NotificationConfig};
+    use apollia_notifications::NotificationConfigRepository;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    use crate::coordinator::{DynBackend, ExecutionBackend};
+    use crate::eventbus::EventBus;
+    use crate::registry::AgentRegistry;
+    use crate::router::TaskRouterHandle;
+    use apollia_core::{AIPResult, AIPTask, TaskStatus};
+    use std::future::Future;
+    use std::pin::Pin;
+
+    #[derive(Clone)]
+    struct MockBackend;
+
+    impl From<DynBackend> for MockBackend {
+        fn from(_: DynBackend) -> Self {
+            MockBackend
+        }
+    }
+
+    impl ExecutionBackend for MockBackend {
+        fn execute(
+            &self,
+            _task: AIPTask,
+        ) -> Pin<Box<dyn Future<Output = Result<AIPResult, String>> + Send>> {
+            Box::pin(async {
+                Ok(AIPResult {
+                    task_id: String::new(),
+                    status: TaskStatus::Completed,
+                    output: Vec::new(),
+                    error: None,
+                    artifacts: Vec::new(),
+                    input_required_data: None,
+                })
+            })
+        }
+    }
+
+    fn make_state_with_repo(db_path: &std::path::Path) -> AppState<MockBackend> {
+        let (event_tx, _) = EventBus::new();
+        let registry = AgentRegistry::spawn(event_tx.clone());
+        let router_handle: TaskRouterHandle<MockBackend> =
+            TaskRouterHandle::spawn(registry.clone(), event_tx.clone(), 64);
+        let repo = NotificationConfigRepository::open(db_path).expect("open notifications.db");
+        AppState {
+            router_handle,
+            registry_handle: registry,
+            event_sender: event_tx,
+            agent_loader: Arc::new(crate::api::routes_agents::StubAgentLoader),
+            backend: MockBackend,
+            llm_router: crate::api::server::empty_shared_llm_router(),
+            trigger_engine: None,
+            config_path: None,
+            task_repository: None,
+            pending_approvals: None,
+            plan_gates: None,
+            notification_config: None,
+            backend_factory: None,
+            tool_registry_handle: None,
+            audit_trail: None,
+            audit_journal: None,
+            obs_config: apollia_core::ObservabilityConfig::default(),
+            llm_call_repository: None,
+            trigger_def_repo: None,
+            notification_repo: Some(Arc::new(std::sync::Mutex::new(repo))),
+            notification_engine_handle: None,
+            chat_manager: None,
+            plan_cache: None,
+            mailbox_handle: None,
+            user_memory: None,
+            data_dir: std::path::PathBuf::new(),
+            stt_engine: crate::api::server::empty_shared_stt_engine(),
+            stt_repository: crate::api::server::empty_shared_stt_repository(),
+            mcp_handle: None,
+            mcp_server_repo: None,
+            llm_backend_repo: None,
+            stt_config_repo: None,
+            a2a_invoker: None,
+            resilience_layer: None,
+            runner_proxy: None,
+            llama_server_supervisor: None,
+        }
+    }
+
+    fn make_crud_router(state: AppState<MockBackend>) -> Router {
+        Router::new()
+            .route(
+                "/api/v1/notifications/channels",
+                axum::routing::get(list_channels::<MockBackend>)
+                    .post(create_channel::<MockBackend>),
+            )
+            .route(
+                "/api/v1/notifications/channels/:id",
+                axum::routing::put(update_channel::<MockBackend>)
+                    .delete(delete_channel::<MockBackend>),
+            )
+            .route(
+                "/api/v1/notifications/events",
+                axum::routing::get(get_events::<MockBackend>).put(set_events::<MockBackend>),
+            )
+            .route(
+                "/api/v1/notifications/logs",
+                axum::routing::get(notification_logs::<MockBackend>),
+            )
+            .with_state(state)
+    }
+
+    async fn read_body(resp: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(resp.into_body(), 65536)
+            .await
+            .expect("read body");
+        serde_json::from_slice(&body).expect("parse JSON")
+    }
+
+    // ── POST /api/v1/notifications/channels -> 201 ──────────────────────────
+
+    #[tokio::test]
+    async fn test_create_channel_201() {
+        // GIVEN an empty repository
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let state = make_state_with_repo(&dir.path().join("notifications.db"));
+        let router = make_crud_router(state);
+
+        // WHEN POST with a valid webhook channel
+        let body = serde_json::json!({
+            "id": "slack-ops",
+            "channel_type": "webhook",
+            "config": {"url": "https://hooks.slack.com/test"}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/notifications/channels")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("json")))
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("oneshot");
+
+        // THEN 201 with the full channel
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = read_body(resp).await;
+        assert_eq!(json["id"], "slack-ops");
+        assert_eq!(json["channel_type"], "webhook");
+        assert_eq!(json["enabled"], true);
+        assert!(!json["created_at"].as_str().unwrap_or("").is_empty());
+    }
+
+    // ── PUT /api/v1/notifications/channels/:id -> 200 ───────────────────────
+
+    #[tokio::test]
+    async fn test_update_channel_200() {
+        // GIVEN an existing channel
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let state = make_state_with_repo(&dir.path().join("notifications.db"));
+        let router = make_crud_router(state);
+
+        let create_body = serde_json::json!({
+            "id": "slack-ops",
+            "channel_type": "webhook",
+            "config": {"url": "https://hooks.slack.com/old"}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/notifications/channels")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&create_body).expect("json")))
+            .expect("build request");
+        let resp = router.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // WHEN PUT with a new URL
+        let update_body = serde_json::json!({
+            "config": {"url": "https://hooks.slack.com/new"}
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/v1/notifications/channels/slack-ops")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&update_body).expect("json")))
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("oneshot");
+
+        // THEN 200 with the new URL
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = read_body(resp).await;
+        assert_eq!(json["id"], "slack-ops");
+        assert_eq!(json["config"]["url"], "https://hooks.slack.com/new");
+    }
+
+    // ── DELETE /api/v1/notifications/channels/:id -> 200 ────────────────────
+
+    #[tokio::test]
+    async fn test_delete_channel_200() {
+        // GIVEN an existing channel
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let state = make_state_with_repo(&dir.path().join("notifications.db"));
+        let router = make_crud_router(state);
+
+        let body = serde_json::json!({
+            "id": "slack-ops",
+            "channel_type": "webhook",
+            "config": {"url": "https://hooks.slack.com/test"}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/notifications/channels")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("json")))
+            .expect("build request");
+        let resp = router.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // WHEN DELETE
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/notifications/channels/slack-ops")
+            .body(Body::empty())
+            .expect("build request");
+        let resp = router.clone().oneshot(req).await.expect("oneshot");
+
+        // THEN 200
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = read_body(resp).await;
+        assert_eq!(json["deleted"], "slack-ops");
+
+        // AND the channel no longer exists
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/notifications/channels")
+            .body(Body::empty())
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("oneshot");
+        let json = read_body(resp).await;
+        assert_eq!(json["channels"].as_array().map(|a| a.len()), Some(0));
+    }
+
+    // ── GET /api/v1/notifications/events ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_events() {
+        // GIVEN configured global events
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let state = make_state_with_repo(&dir.path().join("notifications.db"));
+
+        // Insert events via repo
+        {
+            let guard = state
+                .notification_repo
+                .as_ref()
+                .expect("repo")
+                .lock()
+                .expect("lock");
+            guard
+                .set_global_events(&["task.completed".into(), "task.failed".into()])
+                .expect("set events");
+        }
+
+        let router = make_crud_router(state);
+
+        // WHEN GET /events
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/notifications/events")
+            .body(Body::empty())
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("oneshot");
+
+        // THEN 200 with the events
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = read_body(resp).await;
+        let events = json["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 2);
+        assert!(events.contains(&serde_json::json!("task.completed")));
+        assert!(events.contains(&serde_json::json!("task.failed")));
+    }
+
+    // ── PUT /api/v1/notifications/events -> 200 ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_events() {
+        // GIVEN an empty repository
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let state = make_state_with_repo(&dir.path().join("notifications.db"));
+        let router = make_crud_router(state);
+
+        // WHEN PUT with new events
+        let body = serde_json::json!({
+            "events": ["task.completed", "pipeline.failed"]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/v1/notifications/events")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("json")))
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("oneshot");
+
+        // THEN 200 with the updated events
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = read_body(resp).await;
+        let events = json["events"].as_array().expect("events array");
+        assert_eq!(events.len(), 2);
+    }
+
+    // ── Webhook validation without URL -> 422 ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_validation_webhook_no_url_422() {
+        // GIVEN
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let state = make_state_with_repo(&dir.path().join("notifications.db"));
+        let router = make_crud_router(state);
+
+        // WHEN POST webhook without url
+        let body = serde_json::json!({
+            "id": "bad-webhook",
+            "channel_type": "webhook",
+            "config": {}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/notifications/channels")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("json")))
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("oneshot");
+
+        // THEN 422 with a validation message
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let json = read_body(resp).await;
+        let error = json["error"].as_str().expect("error string");
+        assert!(
+            error.contains("url"),
+            "expected error about url, got: {error}"
+        );
+    }
+
+    // ── Unknown event validation -> 422 ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_validation_unknown_event_422() {
+        // GIVEN
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let state = make_state_with_repo(&dir.path().join("notifications.db"));
+        let router = make_crud_router(state);
+
+        // WHEN PUT events with an unknown event
+        let body = serde_json::json!({
+            "events": ["bad.event"]
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/v1/notifications/events")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("json")))
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("oneshot");
+
+        // THEN 422 with a validation message
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let json = read_body(resp).await;
+        let error = json["error"].as_str().expect("error string");
+        assert!(
+            error.contains("bad.event"),
+            "expected error about bad.event, got: {error}"
+        );
+    }
+
+    // ── resolve_live_config (regression: test endpoint stale snapshot) ──────
+
+    #[tokio::test]
+    async fn test_resolve_live_config_reads_repo_first() {
+        // GIVEN a repo holding a channel created later, and an empty snapshot
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let repo =
+            NotificationConfigRepository::open(&dir.path().join("notifications.db")).expect("open");
+        repo.insert_channel(&apollia_notifications::NotificationChannelRow {
+            id: "test-discord".into(),
+            label: Some("Discord test".into()),
+            channel_type: "webhook".into(),
+            enabled: true,
+            config_json: serde_json::json!({"url": "https://discord.com/api/webhooks/x/y"}),
+            events_json: None,
+            min_interval_seconds: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .expect("insert");
+
+        let mut state = make_state_with_repo(&dir.path().join("notifications.db"));
+        // Override the repo with the one we just seeded
+        state.notification_repo = Some(Arc::new(std::sync::Mutex::new(
+            NotificationConfigRepository::open(&dir.path().join("notifications.db")).expect("open"),
+        )));
+        // notification_config (snapshot) deliberately absent: this reproduces
+        // the case where the channel is known only to the repo.
+        state.notification_config = None;
+
+        // WHEN
+        let resolved = resolve_live_config(&state).expect("config resolved");
+
+        // THEN the repo channel is present
+        assert_eq!(resolved.channels.len(), 1);
+        assert_eq!(resolved.channels[0].id, "test-discord");
+        assert!(matches!(resolved.channels[0].kind, ChannelKind::Webhook));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_live_config_falls_back_to_snapshot_when_repo_empty() {
+        // GIVEN an empty repo but a non-empty legacy snapshot
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let mut state = make_state_with_repo(&dir.path().join("notifications.db"));
+        state.notification_config = Some(NotificationConfig {
+            events: vec![],
+            channels: vec![ChannelConfig {
+                id: "legacy".into(),
+                kind: ChannelKind::Desktop,
+                enabled: true,
+                events: None,
+                url: None,
+                signing_secret: None,
+                min_severity: None,
+                min_interval_seconds: 0,
+            }],
+            inactivity_timeout_secs: 30,
+        });
+
+        // WHEN
+        let resolved = resolve_live_config(&state).expect("config resolved");
+
+        // THEN we fall back to the snapshot
+        assert_eq!(resolved.channels.len(), 1);
+        assert_eq!(resolved.channels[0].id, "legacy");
+    }
+
+    // ── Type tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_channel_test_result_json_structure_ok() {
+        // GIVEN
+        let result = ChannelTestResult {
+            channel_id: "desktop".to_string(),
+            kind: "desktop".to_string(),
+            status: "ok".to_string(),
+            error: None,
+            latency_ms: Some(12),
+        };
+
+        // WHEN
+        let json = serde_json::to_value(&result).expect("serialisation");
+
+        // THEN
+        assert_eq!(json["channel_id"], "desktop");
+        assert_eq!(json["type"], "desktop");
+        assert_eq!(json["status"], "ok");
+        assert!(json["error"].is_null());
+        assert_eq!(json["latency_ms"], 12);
+    }
+
+    #[test]
+    fn test_channel_kind_str_all_variants() {
+        // GIVEN each variant of the channel kind
+        // WHEN it is rendered for the API
+        // THEN it is the lowercase wire name the clients read
+        assert_eq!(channel_kind_str(&ChannelKind::Desktop), "desktop");
+        assert_eq!(channel_kind_str(&ChannelKind::Webhook), "webhook");
+        assert_eq!(channel_kind_str(&ChannelKind::Terminal), "terminal");
+    }
+
+    #[test]
+    fn test_channel_kind_by_id_found() {
+        // GIVEN a configuration holding one desktop channel
+        let config = NotificationConfig {
+            events: vec![],
+            channels: vec![ChannelConfig {
+                id: "mon-desktop".to_string(),
+                kind: ChannelKind::Desktop,
+                enabled: true,
+                events: None,
+                url: None,
+                signing_secret: None,
+                min_severity: None,
+                min_interval_seconds: 0,
+            }],
+            inactivity_timeout_secs: 30,
+        };
+        // WHEN its kind is looked up by identifier
+        // THEN the configured kind comes back
+        assert_eq!(channel_kind_by_id("mon-desktop", &config), "desktop");
+    }
+
+    #[test]
+    fn test_channel_kind_by_id_not_found_returns_unknown() {
+        // GIVEN a configuration with no channel at all
+        let config = NotificationConfig {
+            events: vec![],
+            channels: vec![],
+            inactivity_timeout_secs: 30,
+        };
+        // WHEN an unknown identifier is looked up
+        // THEN the answer is unknown rather than a panic
+        assert_eq!(channel_kind_by_id("no-such-channel", &config), "unknown");
+    }
+
+    #[test]
+    fn test_logs_lazy_table_creation_returns_empty() {
+        // GIVEN a database file that has never held a notification log
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("test.db");
+        // WHEN the logs are queried
+        let result = query_notification_logs(&db_path, 20);
+        let entries = result.expect("query_notification_logs");
+        // THEN the table is created on the fly and the list is empty
+        assert!(entries.is_empty());
+    }
+
+    /// hitl.db notification_logs as the first shipped binary wrote it.
+    const HITL_V1_FIXTURE: &str = include_str!("../../tests/fixtures/schemas/hitl_v1.sql");
+
+    #[test]
+    fn test_query_notification_logs_legacy_v1_database_keeps_rows() {
+        // GIVEN a hitl.db written before the versioned layer (schema v1,
+        // user_version 0, one logged notification)
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hitl.db");
+        let seed = rusqlite::Connection::open(&path).expect("open raw");
+        seed.execute_batch(HITL_V1_FIXTURE).expect("seed v1");
+        drop(seed);
+
+        // WHEN reading it through the versioned opener
+        let entries = query_notification_logs(&path, 10).expect("query migrated");
+
+        // THEN the legacy row survives and the file is stamped
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["id"], "legacy-notif-1");
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("user_version");
+        assert_eq!(version, i64::from(HITL_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn test_query_notification_logs_refuses_newer_database() {
+        // GIVEN a hitl.db stamped one version above this binary
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hitl.db");
+        let seed = rusqlite::Connection::open(&path).expect("open raw");
+        seed.pragma_update(None, "user_version", HITL_SCHEMA_VERSION + 1)
+            .expect("stamp");
+        drop(seed);
+
+        // WHEN reading it through the versioned opener
+        let result = query_notification_logs(&path, 10);
+
+        // THEN the read is refused instead of misreading the newer schema
+        assert!(
+            matches!(result, Err(ref m) if m.contains("newer")),
+            "expected a schema refusal"
+        );
+    }
+}
