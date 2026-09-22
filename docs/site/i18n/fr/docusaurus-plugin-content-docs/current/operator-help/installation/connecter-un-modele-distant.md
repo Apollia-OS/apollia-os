@@ -85,10 +85,11 @@ Apollia applique automatiquement le prompt caching côté Anthropic.
 
 ## Ollama distant
 
-- **Endpoint** : `http://<host>:11434/v1` pour un serveur distant, ou `http://localhost:11434/v1` si Ollama tourne sur votre machine.
+- **Endpoint** : `http://<host>:11434/v1` pour un serveur distant, ou `http://127.0.0.1:11434/v1` si Ollama tourne sur votre machine.
 - **API Key** : optionnelle (utile si vous avez un reverse-proxy avec authentification).
 - **Prérequis service** : `ollama serve` doit tourner sur l'hôte cible.
 - **Modèles** : voir `ollama list` sur l'hôte. Exemples : `llama3.1:8b`, `qwen2.5:14b`.
+- **Fenêtre de contexte** : Apollia dialogue avec Ollama par son API native et demande 32768 tokens à chaque appel, ou la longueur d'entraînement du modèle si elle est plus courte. La valeur par défaut d'Ollama, calculée d'après la mémoire vidéo (4096 tokens sous 24 Go), ne s'applique donc plus, et un long prompt système ou une longue liste d'outils n'est plus tronqué. Renseignez **Fenêtre de contexte** sur le backend pour demander une autre taille. Un endpoint terminé par `/v1` fonctionne toujours.
 
 Pour un modèle GGUF géré directement par Apollia via son moteur embarqué (sans daemon Ollama), voir [Télécharger des modèles locaux](telecharger-des-modeles-locaux.md).
 

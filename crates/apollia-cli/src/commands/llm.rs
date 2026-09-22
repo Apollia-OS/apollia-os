@@ -169,11 +169,11 @@ pub enum LlmBackendsCommand {
         /// Usable context window of this backend, in tokens.
         ///
         /// Sizes conversation compaction. A self-hosted OpenAI-compatible
-        /// server does not report its window, and Ollama sizes its own from the
-        /// machine's memory, so without this the runtime falls back to a generic
-        /// limit that can exceed what the server actually loaded. Ollama
-        /// backends are probed automatically when the model is loaded; set this
-        /// to pin the value.
+        /// server does not report its window, so without this the runtime falls
+        /// back to a generic limit that can exceed what the server loaded. On an
+        /// Ollama backend this is the window requested from Ollama on every
+        /// call; left unset, 32768 tokens or the model's trained length if
+        /// shorter, rather than Ollama's own memory-based default.
         #[arg(long, value_name = "TOKENS")]
         context_window: Option<usize>,
         /// Create the backend disabled.
@@ -806,7 +806,7 @@ mod tests {
         // /chat/completions to it, and Ollama serves that route under /v1.
         // Without the suffix every completion returns 404.
         let cfg = ollama_config(None);
-        assert_eq!(cfg["base_url"], "http://localhost:11434/v1");
+        assert_eq!(cfg["base_url"], "http://127.0.0.1:11434/v1");
     }
 
     #[test]

@@ -103,6 +103,7 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os model search`↴](#apollia-os-model-search)
 * [`apollia-os model show`↴](#apollia-os-model-show)
 * [`apollia-os model hardware`↴](#apollia-os-model-hardware)
+* [`apollia-os model recommend`↴](#apollia-os-model-recommend)
 * [`apollia-os model delete`↴](#apollia-os-model-delete)
 * [`apollia-os trigger`↴](#apollia-os-trigger)
 * [`apollia-os trigger list`↴](#apollia-os-trigger-list)
@@ -1141,6 +1142,7 @@ Unlike `audit list` (the tool-invocation trail) and `audit show RUN` (one run), 
 * `--offset <OFFSET>` - Number of entries to skip, newest first. Page through with it
 
   Default value: `0`
+* `--agent <AGENT>` - Keep the runs of this agent's tasks only. Repeat it for several agents
 
 
 
@@ -1588,7 +1590,7 @@ Create a new LLM backend.
   Default value: `600`
 * `--context-window <TOKENS>` - Usable context window of this backend, in tokens.
 
-   Sizes conversation compaction. A self-hosted OpenAI-compatible server does not report its window, and Ollama sizes its own from the machine's memory, so without this the runtime falls back to a generic limit that can exceed what the server actually loaded. Ollama backends are probed automatically when the model is loaded; set this to pin the value.
+   Sizes conversation compaction. A self-hosted OpenAI-compatible server does not report its window, so without this the runtime falls back to a generic limit that can exceed what the server loaded. On an Ollama backend this is the window requested from Ollama on every call; left unset, 32768 tokens or the model's trained length if shorter, rather than Ollama's own memory-based default.
 * `--disabled` - Create the backend disabled
 * `--default` - Mark this backend as the default (only one at a time)
 
@@ -1694,6 +1696,7 @@ Local model file management
 * `search` - Search the HuggingFace registry through the runtime
 * `show` - Fetch metadata + file list for a HuggingFace model
 * `hardware` - Report the runtime's detected hardware profile (RAM, CPU, GPU)
+* `recommend` - Rank the models this machine should run
 * `delete` - Remove a local model file from `~/.apollia/models/`
 
 
@@ -1741,6 +1744,23 @@ Fetch metadata + file list for a HuggingFace model
 Report the runtime's detected hardware profile (RAM, CPU, GPU)
 
 **Usage:** `apollia-os model hardware`
+
+
+
+## `apollia-os model recommend`
+
+Rank the models this machine should run
+
+**Usage:** `apollia-os model recommend [OPTIONS]`
+
+###### **Options:**
+
+* `--limit <LIMIT>` - Maximum number of recommendations to show
+
+  Default value: `5`
+* `--n-ctx <N_CTX>` - Context window the memory estimate is sized against, in tokens.
+
+   Defaults to what the runtime launches with. Lower it to see the larger models that then fit.
 
 
 
@@ -2653,9 +2673,14 @@ Register a new MCP server with the runtime (persisted in the config)
 
 ###### **Options:**
 
-* `--command <COMMAND>` - Command to launch (stdio transport) or URL (HTTP/SSE transport)
+* `--command <COMMAND>` - Executable to launch (stdio transport), without its arguments
+* `--arg <ARG>` - One argument passed to `--command`. Repeat it, in order, for each argument: `--command npx --arg -y --arg @scope/server`
 * `--url <URL>` - HTTP/SSE connection URL
-* `--require-approval` - Require HITL approval for every tool call
+* `--transport <TRANSPORT>` - Transport. Defaults to `streamable-http` with `--url`, `stdio` otherwise
+
+  Possible values: `stdio`, `streamable-http`, `sse`
+
+* `--require-approval` - Require HITL approval for every tool call an agent task makes
 
 
 
@@ -2715,7 +2740,7 @@ Restart an MCP server
 
 Update the raw configuration of an existing MCP server.
 
-At least one of `--command`, `--url`, or `--require-approval` must be supplied. Fields that are omitted keep their previous value.
+At least one of `--command`, `--arg`, `--url`, or `--require-approval` must be supplied. Fields that are omitted keep their previous value.
 
 **Usage:** `apollia-os mcp update [OPTIONS] <NAME>`
 
@@ -2726,6 +2751,7 @@ At least one of `--command`, `--url`, or `--require-approval` must be supplied. 
 ###### **Options:**
 
 * `--command <COMMAND>` - New stdio command (stdio transport)
+* `--arg <ARG>` - New argument list for the command, one `--arg` per argument. Given once or more, it replaces the stored list whole
 * `--url <URL>` - New HTTP/SSE URL
 * `--require-approval <BOOL>` - Enable / disable the HITL approval lock
 
