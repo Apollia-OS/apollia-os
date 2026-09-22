@@ -11,7 +11,7 @@ use super::default_config_path;
 /// System information shown in the Advanced section of Settings.
 #[derive(Debug, Serialize)]
 pub struct SystemInfo {
-    /// Apollia OS version (e.g. `"0.1.0-preview"`). The About screen reads the
+    /// Apollia OS version (e.g. `"0.2.0-preview"`). The About screen reads the
     /// pre-release suffix from it to label the release channel.
     pub version: String,
     /// Operating system and architecture (e.g. `"macos aarch64"`).
@@ -108,11 +108,21 @@ pub struct SetupLlmResult {
 /// Copies the model into `~/.apollia/models/`, registers it as a backend
 /// in `system.db`, and returns the path for confirmation.
 ///
-/// This is a first-launch helper. The backend is inserted as `"local"` and
-/// marked as default if no backend with that name already exists.
+/// This is a first-launch helper. The backend is saved as `"local"`: inserted
+/// as the default when no backend has that name, otherwise pointed at the new
+/// file with its other settings and default flag kept, so choosing another
+/// model during onboarding really switches engines.
+///
+/// `context_window` is the window chosen at onboarding, stored as
+/// `config_json.context_window`, the key the engine is launched with and the
+/// router sizes compaction against. `None` leaves the stored value, or the
+/// runtime default, in place.
 /// Call `reload_llm_from_db` afterwards to make the router available immediately.
 #[tauri::command]
-pub async fn setup_local_llm(gguf_path: String) -> Result<SetupLlmResult, String> {
+pub async fn setup_local_llm(
+    gguf_path: String,
+    context_window: Option<u32>,
+) -> Result<SetupLlmResult, String> {
     let source = PathBuf::from(&gguf_path);
 
     // Validate the file exists and is a .gguf
@@ -155,7 +165,7 @@ pub async fn setup_local_llm(gguf_path: String) -> Result<SetupLlmResult, String
 
     let model_path_str = format!("~/.apollia/models/{file_name}");
 
-    // Insert backend into system.db; idempotent (skips if "local" already exists).
+    // Upsert the "local" backend in system.db.
     // LlmBackendRepository is !Send, so DB work runs in spawn_blocking.
     let db_path = default_config_path()
         .parent()
@@ -173,26 +183,18 @@ pub async fn setup_local_llm(gguf_path: String) -> Result<SetupLlmResult, String
     tokio::task::spawn_blocking(move || {
         let repo = LlmBackendRepository::open(&db_path)
             .map_err(|e| format!("failed to open system.db: {e}"))?;
-        if repo
+        let existing = repo
             .find_by_name("local")
-            .map_err(|e| format!("failed to query system.db: {e}"))?
-            .is_none()
-        {
-            let config = LlmBackendConfig {
-                name: "local".to_string(),
-                provider: LlmProvider::LlamaCpp,
-                model: model_for_db.clone(),
-                config_json: serde_json::json!({
-                    "model_path": model_for_db,
-                    "device": device,
-                    "quantization": quant_for_db,
-                }),
-                enabled: true,
-                is_default: true,
-            };
-            repo.save(&config)
-                .map_err(|e| format!("failed to save LLM backend to system.db: {e}"))?;
-        }
+            .map_err(|e| format!("failed to query system.db: {e}"))?;
+        let config = local_backend(
+            existing,
+            &model_for_db,
+            &device,
+            &quant_for_db,
+            context_window,
+        );
+        repo.save(&config)
+            .map_err(|e| format!("failed to save LLM backend to system.db: {e}"))?;
         Ok::<_, String>(())
     })
     .await
@@ -208,6 +210,44 @@ pub async fn setup_local_llm(gguf_path: String) -> Result<SetupLlmResult, String
         model_path: dest.display().to_string(),
         quantization,
     })
+}
+
+/// The `"local"` backend row for a model chosen at onboarding.
+///
+/// A fresh row is the default. An existing one keeps its flags and every
+/// setting the operator added (sampling, device), and takes the new model, its
+/// quantisation and, when one was chosen, the new window. A row stored with the
+/// legacy `context_size` key converges on `context_window`.
+fn local_backend(
+    existing: Option<LlmBackendConfig>,
+    model_path: &str,
+    device: &str,
+    quantization: &str,
+    context_window: Option<u32>,
+) -> LlmBackendConfig {
+    let mut config = existing.unwrap_or_else(|| LlmBackendConfig {
+        name: "local".to_string(),
+        provider: LlmProvider::LlamaCpp,
+        model: String::new(),
+        config_json: serde_json::json!({ "device": device }),
+        enabled: true,
+        is_default: true,
+    });
+    config.provider = LlmProvider::LlamaCpp;
+    config.model = model_path.to_owned();
+    if !config.config_json.is_object() {
+        config.config_json = serde_json::json!({ "device": device });
+    }
+    if let Some(obj) = config.config_json.as_object_mut() {
+        obj.insert("model_path".into(), model_path.into());
+        obj.insert("quantization".into(), quantization.into());
+        obj.remove("model_paths");
+        if let Some(n) = context_window.filter(|n| *n > 0) {
+            obj.insert("context_window".into(), n.into());
+            obj.remove("context_size");
+        }
+    }
+    config
 }
 
 /// Infers the quantization type from a GGUF filename.
@@ -232,6 +272,62 @@ fn infer_quantization(stem: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_first_local_model_becomes_the_default_with_its_window() {
+        // GIVEN no "local" backend yet
+        // WHEN a model is chosen at onboarding with a 16k window
+        let cfg = local_backend(
+            None,
+            "~/.apollia/models/a.gguf",
+            "cpu",
+            "q4_k_m",
+            Some(16_384),
+        );
+
+        // THEN the row is the default and carries the window under the key the
+        // runtime reads
+        assert!(cfg.is_default);
+        assert_eq!(cfg.model, "~/.apollia/models/a.gguf");
+        assert_eq!(cfg.config_json["context_window"], 16_384);
+        assert_eq!(cfg.config_json["model_path"], "~/.apollia/models/a.gguf");
+    }
+
+    #[test]
+    fn choosing_another_model_updates_the_existing_row() {
+        // GIVEN a "local" backend the operator already tuned, not the default,
+        // stored with the legacy window key
+        let existing = LlmBackendConfig {
+            name: "local".into(),
+            provider: LlmProvider::LlamaCpp,
+            model: "~/.apollia/models/old.gguf".into(),
+            config_json: serde_json::json!({
+                "model_path": "~/.apollia/models/old.gguf",
+                "temperature": 0.4,
+                "context_size": 8192,
+            }),
+            enabled: true,
+            is_default: false,
+        };
+
+        // WHEN another model is chosen with a new window
+        let cfg = local_backend(
+            Some(existing),
+            "~/.apollia/models/new.gguf",
+            "cpu",
+            "q8_0",
+            Some(65_536),
+        );
+
+        // THEN the row points at the new file, keeps its settings and flags, and
+        // the window converges on the canonical key
+        assert_eq!(cfg.model, "~/.apollia/models/new.gguf");
+        assert_eq!(cfg.config_json["model_path"], "~/.apollia/models/new.gguf");
+        assert_eq!(cfg.config_json["temperature"], 0.4);
+        assert_eq!(cfg.config_json["context_window"], 65_536);
+        assert!(cfg.config_json.get("context_size").is_none());
+        assert!(!cfg.is_default);
+    }
 
     // Deliberately not a `#[tokio::test]`. The home guard is a `std` mutex, and
     // holding one across an await point is denied workspace-wide, for the usual
@@ -330,4 +426,114 @@ mod tests {
         // THEN the default is returned
         assert_eq!(infer_quantization("some-random-model"), "q4_k_m");
     }
+}
+
+/// The Python interpreter setting, as the Advanced section shows it.
+#[derive(Debug, Serialize)]
+pub struct PythonInterpreterSetting {
+    /// The absolute path in `[tools] python_interpreter`, or `None` when the
+    /// bundled interpreter is in use.
+    pub chosen: Option<String>,
+    /// Absolute path of the bundled interpreter, when this process knows it.
+    ///
+    /// `None` in a development tree, where no bundle is staged. The panel says
+    /// so rather than naming a path that does not exist.
+    pub bundled: Option<String>,
+    /// Minor version the bundled standard library requires of any chosen
+    /// interpreter, so the panel can state the condition before it is failed.
+    pub required_minor: u32,
+}
+
+/// Returns the Python interpreter setting for the Advanced section of Settings.
+#[tauri::command]
+pub async fn get_python_interpreter() -> Result<PythonInterpreterSetting, String> {
+    let chosen = read_config_tools_python_interpreter().await;
+    Ok(PythonInterpreterSetting {
+        chosen,
+        bundled: apollia_tools::tools::python_discovery::bundled_interpreter()
+            .map(|p| p.display().to_string()),
+        required_minor: apollia_tools::tools::python_discovery::BUNDLED_PYTHON_MINOR,
+    })
+}
+
+/// Chooses a Python interpreter, or returns to the bundled one.
+///
+/// `path` names an interpreter by absolute path; `None`, or a blank string,
+/// removes the setting and returns to the interpreter Apollia ships with, which
+/// is the configuration that depends on nothing installed on the machine.
+///
+/// The path is checked before it is written: it has to exist, start, and report
+/// a minor version the bundled standard library can be read by. A refusal comes
+/// back as the message to show, naming which of the three conditions failed.
+/// The change applies to the agents started after it.
+#[tauri::command]
+pub async fn set_python_interpreter(path: Option<String>) -> Result<(), String> {
+    let chosen = path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+
+    if let Some(candidate) = chosen.as_deref() {
+        apollia_tools::tools::python_discovery::validate_chosen_interpreter(std::path::Path::new(
+            candidate,
+        ))
+        .map_err(|e| e.to_string())?;
+    }
+
+    let config_path = default_config_path();
+    if let Some(parent) = config_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("failed to create config directory: {e}"))?;
+    }
+    let mut doc = if config_path.exists() {
+        tokio::fs::read_to_string(&config_path)
+            .await
+            .map_err(|e| format!("failed to read {}: {e}", config_path.display()))?
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("failed to parse {}: {e}", config_path.display()))?
+    } else {
+        toml_edit::DocumentMut::new()
+    };
+
+    let tools = doc
+        .entry("tools")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    if tools.as_table_mut().is_none() {
+        *tools = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if let Some(table) = tools.as_table_mut() {
+        match chosen.as_deref() {
+            Some(candidate) => table["python_interpreter"] = toml_edit::value(candidate),
+            // Removed rather than blanked: an absent key and the default are the
+            // same thing, and a blank string in the file reads as a setting
+            // somebody meant.
+            None => {
+                table.remove("python_interpreter");
+            }
+        }
+    }
+
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .map_err(|e| format!("failed to write {}: {e}", config_path.display()))?;
+
+    tracing::info!(
+        chosen = chosen.as_deref().unwrap_or("<bundled>"),
+        "python.interpreter.setting_saved"
+    );
+    Ok(())
+}
+
+/// Read `[tools] python_interpreter` out of `apollia.toml`.
+///
+/// `None` when the file is absent, unreadable, or does not carry the key, which
+/// are all the same answer: the bundled interpreter is in use.
+async fn read_config_tools_python_interpreter() -> Option<String> {
+    let path = default_config_path();
+    let content = tokio::fs::read_to_string(&path).await.ok()?;
+    let parsed: toml::Value = content.parse().ok()?;
+    parsed
+        .get("tools")?
+        .get("python_interpreter")?
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
 }

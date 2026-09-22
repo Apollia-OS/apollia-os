@@ -1,6 +1,6 @@
 [package]
 name = "apollia-e2e-tests"
-version = "0.1.0-preview"
+version = "0.2.0-preview"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
@@ -71,6 +71,11 @@ path = "integration/test_llm_degraded.rs"
 [[test]]
 name = "test_run_tools"
 path = "integration/test_run_tools.rs"
+
+[[test]]
+name = "test_llm_structured_output"
+path = "integration/test_llm_structured_output.rs"
+required-features = ["python-tests"]
 
 [[test]]
 name = "test_llm_agent"

@@ -44,15 +44,23 @@ pub const MIN_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Builds the HTTP client used to reach a remote LLM backend.
 ///
-/// `idle_timeout` is clamped to at least [`MIN_IDLE_TIMEOUT`]. Falls back to a
-/// default client if the builder rejects the configuration, so a transport
-/// setting can never prevent the runtime from starting.
-pub fn build_llm_http_client(idle_timeout: Duration) -> reqwest::Client {
+/// `idle_timeout` is clamped to at least [`MIN_IDLE_TIMEOUT`]. `api_url` is the
+/// backend's configured base URL: when it names this machine itself (the
+/// embedded `llama-server`'s `127.0.0.1`, a local Ollama's `localhost`), the
+/// client bypasses any system-configured proxy for it. A corporate proxy can
+/// never route to a loopback destination, so on a network that requires one
+/// for everything else, trusting it here turned a healthy local backend into
+/// a silent "error sending request" with no HTTP status ever received. A
+/// remote backend (a cloud API, or an operator-pointed Ollama on another
+/// machine) keeps the proxy. Falls back to a default client if the builder
+/// rejects the configuration, so a transport setting can never prevent the
+/// runtime from starting.
+pub fn build_llm_http_client(idle_timeout: Duration, api_url: &str) -> reqwest::Client {
     let idle = idle_timeout.max(MIN_IDLE_TIMEOUT);
     // The LLM endpoint is the one the operator configured, and a self-hosted
     // llama-server or Ollama on loopback is the default case, so the
     // public-destination policy is deliberately not applied here.
-    apollia_core::net::configured_endpoint_client_builder()
+    apollia_core::net::configured_endpoint_client_builder_for(api_url)
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(idle)
         .build()
@@ -97,7 +105,23 @@ mod tests {
             "the floor must cover a slow non-streaming generation"
         );
         // The clamp happens at build time; the builder must not panic on it.
-        let _ = build_llm_http_client(Duration::from_secs(1));
+        let _ = build_llm_http_client(Duration::from_secs(1), "http://127.0.0.1:8420/v1");
+    }
+
+    // GIVEN a loopback base URL, matching the embedded llama-server and a
+    //       local Ollama
+    // WHEN the client is built
+    // THEN it still succeeds; routing that client through `.no_proxy()` must
+    //      not panic the build
+    #[test]
+    fn test_client_builds_for_a_loopback_backend() {
+        let built = std::panic::catch_unwind(|| {
+            build_llm_http_client(DEFAULT_IDLE_TIMEOUT, "http://localhost:11434/v1")
+        });
+        assert!(
+            built.is_ok(),
+            "building a client for a loopback backend panicked"
+        );
     }
 
     // GIVEN the shipped defaults

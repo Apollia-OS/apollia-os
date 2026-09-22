@@ -50,11 +50,11 @@ tels que le bundler les écrit :
 <!-- release-artifacts:begin - genere depuis packaging/artifacts.json par docs/site/regen.sh ; ne pas editer a la main -->
 | Plateforme | Fichiers sur la page de release |
 |---|---|
-| macOS (Apple Silicon) | `Apollia-OS_0.1.0-1_aarch64.dmg` |
-| Linux (x86-64) | `Apollia-OS_0.1.0-1_amd64.AppImage`, `Apollia-OS_0.1.0-1_amd64.deb` |
-| Windows (x86-64) | `Apollia-OS_0.1.0-1_x64_en-US.msi`, `Apollia-OS_0.1.0-1_x64-setup.exe` |
-| Linux (x86-64), moteur CUDA | `Apollia-OS_0.1.0-1_amd64-cuda.deb` |
-| Windows (x86-64), moteur CUDA | `Apollia-OS_0.1.0-1_x64_en-US-cuda.msi`, `Apollia-OS_0.1.0-1_x64-setup-cuda.exe` |
+| macOS (Apple Silicon) | `Apollia-OS_0.2.0-1_aarch64.dmg` |
+| Linux (x86-64) | `Apollia-OS_0.2.0-1_amd64.AppImage`, `Apollia-OS_0.2.0-1_amd64.deb` |
+| Windows (x86-64) | `Apollia-OS_0.2.0-1_x64_en-US.msi`, `Apollia-OS_0.2.0-1_x64-setup.exe` |
+| Linux (x86-64), moteur CUDA | `Apollia-OS_0.2.0-1_amd64-cuda.deb` |
+| Windows (x86-64), moteur CUDA | `Apollia-OS_0.2.0-1_x64_en-US-cuda.msi`, `Apollia-OS_0.2.0-1_x64-setup-cuda.exe` |
 <!-- release-artifacts:end -->
 
 Chaque release fournit également un fichier `SHA256SUMS`. Pour vérifier que
@@ -167,6 +167,34 @@ exécuter une inférence entièrement locale, téléchargez un GGUF depuis
 l'application elle-même : le parcours d'accueil le propose, et Réglages,
 Model Hub fait de même par la suite. Déposer un fichier `.gguf` à la main dans
 `~/.apollia/models/` fonctionne aussi, avant ou après le parcours d'accueil.
+
+## L'interpréteur Python sur lequel tournent les agents
+
+Apollia est livré avec son propre Python 3.13, et c'est lui qui fait tourner les
+agents : rien n'a besoin d'être installé sur la machine, et aucun droit
+d'administrateur n'est requis. Les interpréteurs déjà présents sur la machine ne
+sont pas consultés, quelle que soit leur version.
+
+Si votre environnement en exige un autre, nommez-le dans Réglages, Avancé, ou
+dans `apollia.toml` :
+
+```toml
+[tools]
+python_interpreter = "/opt/corp/python3.13/bin/python3"
+```
+
+Il est vérifié avant d'être accepté : il doit exister, démarrer, et être un
+Python 3.13, car la bibliothèque standard livrée avec Apollia ne peut pas être
+lue par une autre version mineure. S'il cesse ensuite de satisfaire à cela,
+après une mise à jour ou une désinstallation, l'interpréteur livré reprend la
+main et le journal dit pourquoi, plutôt que de laisser les outils de l'agent en
+échec.
+
+La même clé s'écrit depuis un terminal, avec la même vérification :
+
+```sh
+apollia-os config set tools.python_interpreter /opt/corp/python3.13/bin/python3
+```
 
 ## Où l'application stocke vos données
 

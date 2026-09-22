@@ -37,6 +37,56 @@ sidebar_position: 5
 
 8. L'espace disque utilisé par tous vos modèles est affiché en bas de la page. Pour libérer de la place, cliquez sur **Supprimer** sur n'importe quel modèle déjà téléchargé.
 
+## Modèles proposés pendant l'onboarding
+
+<!-- claim:onboarding-recommends-for-hardware -->
+
+Pendant l'onboarding, la liste **Modèles recommandés** n'est pas une liste
+figée. Apollia mesure votre machine (sa mémoire, et si sa carte graphique a sa
+propre mémoire ou la partage, comme sur un Mac), demande à HuggingFace quels
+fichiers existent pour les générations de modèles qu'il connaît, et lit les
+premiers mégaoctets de chaque candidat pour vérifier que le moteur embarqué peut
+le charger et lui faire appeler des outils. La liste est ensuite classée pour
+votre machine : le même modèle peut arriver en tête sur un Mac et plus bas sur
+un PC doté d'une petite carte graphique.
+
+Au-dessus de la liste, **Fenêtre de contexte** règle la part d'une
+conversation que le modèle garde en mémoire (32k tokens par défaut). Une fenêtre
+plus grande demande plus de mémoire, donc la liste est recalculée quand vous la
+changez, et le modèle choisi est configuré avec cette fenêtre. Vous pouvez la
+modifier plus tard dans les **Réglages**, sur le backend du modèle, à la ligne
+**Fenêtre de contexte** ; le moteur, la compaction automatique et la jauge
+**Ctx** la suivent tous. Un modèle entraîné sur une fenêtre plus courte tourne
+à la sienne : au-delà, il lit des positions sur lesquelles il n'a jamais été
+entraîné, et ses réponses se dégradent. La ligne le signale alors.
+
+Chaque ligne dit pourquoi elle est là : la mémoire qu'il faut, répartie entre le
+modèle lui-même, sa mémoire de conversation et le moteur, la façon dont il est
+compressé (par exemple `Q4_K_M`), et la mémoire depuis laquelle il tourne. Sur
+un PC doté d'une carte graphique, c'est soit la mémoire vidéo de la carte, soit,
+pour un modèle trop grand pour elle, un partage entre mémoire vidéo et RAM
+système. La ligne sous la liste nomme les deux mémoires séparément.
+
+- **Tourne entièrement sur ton GPU :** le cas le plus rapide, mesuré par
+  rapport à la seule mémoire vidéo de la carte.
+- **Tient de justesse** ou **avec peu de marge :** le modèle tient, avec peu de
+  place pour les autres applications.
+- **Trop grand pour ton GPU seul :** une partie du modèle est en RAM système,
+  bien plus lente. Un modèle plus petit peut répondre plus vite.
+- **N couches sur M sur votre GPU, le reste sur le processeur :** le même
+  partage, compté en couches.
+- Un modèle qui générerait moins d'environ quatre tokens par seconde sur votre
+  machine n'est pas proposé, sauf si rien de plus rapide ne tient.
+- **Sans outils :** le modèle peut discuter mais ne peut pas exécuter d'agents.
+- **HuggingFace injoignable :** la liste est récupérée en direct, donc sans
+  connexion il n'y a rien à proposer. Importez un fichier de modèle que vous
+  avez déjà, ou utilisez un fournisseur cloud, et réessayez plus tard.
+- **Aucun modèle sélectionné ne tient sur cette machine :** utilisez un
+  fournisseur cloud, ou importez un modèle plus petit depuis le disque.
+
+Le même classement est disponible en ligne de commande, daemon lancé :
+`apollia-os model recommend`.
+
 ## Vérification
 
 Pour un modèle GGUF, ouvrez un nouveau chat, sélectionnez votre modèle local dans le sélecteur de backend, et envoyez un message : la réponse arrive sans connexion internet. Pour un modèle Whisper, suivez la page [Activer la dictée vocale](../chat/enable-voice-dictation.md).

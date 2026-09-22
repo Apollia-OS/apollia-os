@@ -49,11 +49,11 @@ writes them:
 <!-- release-artifacts:begin - generated from packaging/artifacts.json by docs/site/regen.sh; do not edit by hand -->
 | Platform | Files on the release page |
 |---|---|
-| macOS (Apple Silicon) | `Apollia-OS_0.1.0-1_aarch64.dmg` |
-| Linux (x86-64) | `Apollia-OS_0.1.0-1_amd64.AppImage`, `Apollia-OS_0.1.0-1_amd64.deb` |
-| Windows (x86-64) | `Apollia-OS_0.1.0-1_x64_en-US.msi`, `Apollia-OS_0.1.0-1_x64-setup.exe` |
-| Linux (x86-64), CUDA engine | `Apollia-OS_0.1.0-1_amd64-cuda.deb` |
-| Windows (x86-64), CUDA engine | `Apollia-OS_0.1.0-1_x64_en-US-cuda.msi`, `Apollia-OS_0.1.0-1_x64-setup-cuda.exe` |
+| macOS (Apple Silicon) | `Apollia-OS_0.2.0-1_aarch64.dmg` |
+| Linux (x86-64) | `Apollia-OS_0.2.0-1_amd64.AppImage`, `Apollia-OS_0.2.0-1_amd64.deb` |
+| Windows (x86-64) | `Apollia-OS_0.2.0-1_x64_en-US.msi`, `Apollia-OS_0.2.0-1_x64-setup.exe` |
+| Linux (x86-64), CUDA engine | `Apollia-OS_0.2.0-1_amd64-cuda.deb` |
+| Windows (x86-64), CUDA engine | `Apollia-OS_0.2.0-1_x64_en-US-cuda.msi`, `Apollia-OS_0.2.0-1_x64-setup-cuda.exe` |
 <!-- release-artifacts:end -->
 
 Each release also attaches a `SHA256SUMS` file. To confirm your download is
@@ -157,6 +157,32 @@ with a cloud backend or point the app at a local model file you already have. To
 run fully local inference, download a GGUF from within the app: onboarding offers
 it, and Settings, Model Hub does the same afterwards. Dropping a `.gguf` file
 into `~/.apollia/models/` by hand also works, before or after onboarding.
+
+## The Python interpreter agents run on
+
+Apollia ships with its own Python 3.13, and that is what agents run on: nothing
+has to be installed on the machine, and no administrator rights are needed. The
+interpreters already on the machine are not consulted, whatever their version.
+
+If your environment requires a different one, name it in Settings, Advanced, or
+in `apollia.toml`:
+
+```toml
+[tools]
+python_interpreter = "/opt/corp/python3.13/bin/python3"
+```
+
+It is checked before it is accepted: it has to exist, start, and be a Python
+3.13, because the standard library that ships with Apollia cannot be read by
+another minor version. If it later stops satisfying that, after an upgrade or an
+uninstall, the bundled interpreter takes over and the log says why, rather than
+the agent's tools failing.
+
+The same key is writable from a shell, with the same check:
+
+```sh
+apollia-os config set tools.python_interpreter /opt/corp/python3.13/bin/python3
+```
 
 ## Where the app stores your data
 

@@ -55,6 +55,9 @@ htmlcov/
 crates/apollia-desktop/resources/
 crates/apollia-desktop/python/*
 !crates/apollia-desktop/python/.gitkeep
+# The second copy of the interpreter DLL, staged beside the executable on a
+# Windows build so the loader finds it (see bundle-cli.sh for why).
+crates/apollia-desktop/python313.dll
 crates/apollia-desktop/apollia-os
 
 # Dev-only automation harness output (screenshots + report.json)
@@ -200,3 +203,8 @@ tests/cli/report/
 # back, and a run must leave the tree clean.
 /tmp/
 /notes/
+
+# Upstream sources fetched by scripts/gen_llama_support.py to derive the
+# llama.cpp support tables. Regenerable, and not ours to carry: the prose
+# rules apply to what we write, not to a vendored copy of llama.cpp.
+.cache/
