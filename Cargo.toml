@@ -233,7 +233,7 @@ hex = "0.4"
 
 # --- CLI extras (apollia-cli) ---
 clap-markdown = "0.1.5"
-rustyline = "14"
+rustyline = "18"
 
 # --- Desktop shell (apollia-desktop, Tauri v2) ---
 tauri = { version = "2", features = ["devtools", "tray-icon", "macos-private-api"] }
