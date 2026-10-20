@@ -282,7 +282,7 @@ pyo3-async-runtimes = { version = "0.24", features = ["tokio-runtime"] }
 
 # --- Agent runtime (apollia-aip) - YAML datasources + Jinja2 templates ---
 serde_yaml = "0.9"
-minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
+minijinja = { version = "3", default-features = false, features = ["builtins", "serde"] }
 
 # --- Filesystem paths and temp files ---
 dirs = "6"
