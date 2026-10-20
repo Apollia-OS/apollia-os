@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 use apollia_core::events::{EventBusSender, RuntimeEvent};
 use apollia_core::manifest::AgentManifest;
 use apollia_core::observability::ObservabilityConfig;
-use apollia_core::{AIPResult, ORIAConfig, PendingApprovals};
+use apollia_core::{AIPResult, ORIAConfig};
 use apollia_llm::LlmRouter;
 use apollia_memory::manager::MemoryManager;
 
@@ -103,22 +103,6 @@ pub enum StepError {
     /// The requested tool is not registered in the registry.
     #[error("tool not found: {0}")]
     ToolNotFound(String),
-    /// The step was rejected by the user before execution (HITL Orchestrated mode).
-    ///
-    /// Returned by [`ActorLoop::suspend_for_approval`] when the `ResumeHandler`
-    /// sends `approved=false`. Plan execution stops immediately, the following
-    /// steps are not attempted.
-    #[error("step rejected by the user: {reason}")]
-    RejectedByUser {
-        /// Reason provided by the operator on rejection.
-        reason: String,
-    },
-    /// The approval oneshot channel was closed before a response (runtime shutdown).
-    ///
-    /// Indicates the runtime is shutting down. Plan execution is stopped cleanly
-    /// without panicking.
-    #[error("approval channel closed - runtime shutting down")]
-    ApprovalChannelClosed,
 }
 
 impl StepError {
@@ -244,28 +228,19 @@ pub struct StepDeps<'a> {
 /// On a retryable step failure, triggers a replan via the [`Reasoner`]
 /// up to `max_replans` times.
 ///
-/// To enable HITL support, inject a [`PendingApprovals`] via
-/// [`with_pending_approvals`]. Without it, steps with `tools_requiring_approval`
-/// execute directly without suspension.
-///
-/// [`with_pending_approvals`]: ActorLoop::with_pending_approvals
+/// A step holds no approval of its own: whether a tool call runs, asks or is
+/// refused is decided where the call is made, behind [`ToolProxyTrait`].
 pub struct ActorLoop {
     pub(crate) plan: ExecutionPlan,
     pub(crate) replan_count: u32,
     pub(crate) max_replans: u32,
     pub(crate) db: PlanRepository,
     pub(crate) event_bus: EventBusSender,
-    /// Manifest of the agent that owns this plan.
-    ///
-    /// Stored read-only so `execute_step` can access `tools_requiring_approval`
-    /// on each step.
+    /// Manifest of the agent that owns this plan, read-only.
     pub manifest: AgentManifest,
-    /// HITL registry of pending approvals, shared with the `ResumeHandler`.
-    ///
-    /// `Some`: steps whose tool is in `tools_requiring_approval` suspend execution
-    /// and wait for the human decision via a oneshot channel.
-    /// `None`: no HITL suspension (degraded mode, steps execute normally).
-    pub(crate) pending_approvals: Option<Arc<PendingApprovals>>,
+    /// The backend every model call of a step goes to, when the agent was
+    /// given a model of its own.
+    pub(crate) model_backend: Option<String>,
     /// Observability config for truncating persisted inputs/outputs.
     pub(crate) obs_config: ObservabilityConfig,
     /// Memory manager for episodic recording after each step.
@@ -287,6 +262,10 @@ pub struct ActorLoop {
     ///
     /// [`with_context_manager`]: ActorLoop::with_context_manager
     pub(crate) context_manager: ContextManager,
+    /// The tools the agent is granted, handed to the replanner: a replan
+    /// that sees none invents them (`read_file`, `pdf_text`) and is not held
+    /// to the tools there are.
+    pub(crate) available_tools: Vec<String>,
 }
 
 impl ActorLoop {
@@ -295,11 +274,7 @@ impl ActorLoop {
     /// The plan must already be inserted in SQLite before creating the `ActorLoop`
     /// (via `PlanRepository::insert_plan` + `insert_steps`).
     ///
-    /// `manifest` is kept read-only so steps can access `tools_requiring_approval`.
-    ///
-    /// To enable HITL support, chain with [`with_pending_approvals`].
-    ///
-    /// [`with_pending_approvals`]: ActorLoop::with_pending_approvals
+    /// `manifest` is kept read-only.
     pub fn new(
         plan: ExecutionPlan,
         max_replans: u32,
@@ -314,21 +289,25 @@ impl ActorLoop {
             db,
             event_bus,
             manifest,
-            pending_approvals: None,
+            model_backend: None,
             obs_config: ObservabilityConfig::default(),
             memory_manager: None,
             step_memory_max_chars: DEFAULT_STEP_MEMORY_OUTPUT_MAX_CHARS,
             context_manager: ContextManager::from_config(&ORIAConfig::default()),
+            available_tools: Vec::new(),
         }
     }
 
-    /// Inject the HITL registry of pending approvals.
-    ///
-    /// Required for steps whose tool is in `tools_requiring_approval` to suspend
-    /// execution and wait for the human decision.
-    /// Shared between the `ActorLoop` and the `ResumeHandler` via `AppState`.
-    pub fn with_pending_approvals(mut self, pending: Option<Arc<PendingApprovals>>) -> Self {
-        self.pending_approvals = pending;
+    /// The tools the agent is granted, which a replan is held to.
+    pub fn with_available_tools(mut self, tools: Vec<String>) -> Self {
+        self.available_tools = tools;
+        self
+    }
+
+    /// Names the backend every model call of a step goes to: the model the
+    /// agent was given. `None` leaves the default of the router.
+    pub fn with_model_backend(mut self, backend: Option<String>) -> Self {
+        self.model_backend = backend;
         self
     }
 
@@ -470,10 +449,10 @@ pub fn interpolate_outputs(description: &str, outputs: &HashMap<String, String>)
 
 /// Builds a minimal [`ContextBundle`] for replanning.
 ///
-/// The bundle carries only the plan's `task_id`; the other fields
-/// (`memory_snapshot`, `available_tools`, `manifest_system_prompt`) are empty.
-/// The Reasoner uses this context to build the replanner prompt.
-pub(crate) fn build_replan_context(plan: &ExecutionPlan) -> ContextBundle {
+/// The bundle carries the plan's `task_id` and the tools the agent is
+/// granted, which the replanner is shown and its plan checked against; the
+/// memory snapshot and the system prompt are empty.
+pub(crate) fn build_replan_context(plan: &ExecutionPlan, tools: &[String]) -> ContextBundle {
     use apollia_core::task::AIPTask;
 
     ContextBundle {
@@ -483,9 +462,8 @@ pub(crate) fn build_replan_context(plan: &ExecutionPlan) -> ContextBundle {
         },
         memory_snapshot: None,
         execution_mode: ExecutionMode::Orchestrated,
-        available_tools: vec![],
+        available_tools: tools.to_vec(),
         manifest_system_prompt: None,
-        llm_backend_names: vec![],
     }
 }
 
@@ -513,7 +491,7 @@ mod tests {
     use apollia_llm::ChatMessage;
 
     use crate::resilience::{ErrorClass, RetryPolicy};
-    use apollia_core::{AgentManifest, PendingApprovals, TaskStatus};
+    use apollia_core::{AgentManifest, TaskStatus};
     use apollia_llm::{CompletionRequest, CompletionResponse, FinishReason, LlmError, TokenUsage};
     use std::collections::VecDeque;
     use std::pin::Pin;
@@ -521,10 +499,8 @@ mod tests {
 
     /// Builds a minimal `AgentManifest` for tests.
     fn make_manifest() -> AgentManifest {
-        serde_json::from_str(
-            r#"{"name":"test","version":"0.1.0","description":"test","tools_required":[]}"#,
-        )
-        .expect("minimal manifest must deserialize")
+        serde_json::from_str(r#"{"name":"test","version":"0.1.0","description":"test"}"#)
+            .expect("minimal manifest must deserialize")
     }
 
     // ── Mock ToolProxy ────────────────────────────────────────────────────────
@@ -615,6 +591,20 @@ mod tests {
         fn model_id(&self) -> &str {
             "mock-model"
         }
+    }
+
+    #[test]
+    fn test_a_replan_is_shown_the_tools_the_agent_is_granted() {
+        // GIVEN a plan whose agent is granted the reading of a folder
+        let plan = make_plan(vec![("s1", &[])]);
+        let granted = vec!["conn:folder:abc/file_read".to_string()];
+
+        // WHEN the context of its replan is built
+        let ctx = build_replan_context(&plan, &granted);
+
+        // THEN the replanner sees those tools, so its plan is held to them
+        assert_eq!(ctx.available_tools, granted);
+        assert_eq!(ctx.task.task_id, "task-001");
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -868,6 +858,100 @@ mod tests {
             std::collections::HashMap::new();
         backends.insert("mock".to_string(), model);
         LlmRouter::with_backends(backends, "mock")
+    }
+
+    /// Streams a fixed answer in two chunks and keeps the request it was sent.
+    struct StreamingModel {
+        seen: Mutex<Option<CompletionRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl apollia_llm::CompletionModel for StreamingModel {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::InferenceError("streams only".into()))
+        }
+
+        async fn stream(
+            &self,
+            req: CompletionRequest,
+        ) -> Result<
+            Pin<Box<dyn futures::Stream<Item = Result<apollia_llm::StreamChunk, LlmError>> + Send>>,
+            LlmError,
+        > {
+            *self.seen.lock().expect("mock lock") = Some(req);
+            let chunks = vec![
+                Ok(apollia_llm::StreamChunk::Text("Compli".into())),
+                Ok(apollia_llm::StreamChunk::Text("ant.".into())),
+            ];
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn backend_name(&self) -> &str {
+            "mock"
+        }
+
+        fn model_id(&self) -> &str {
+            "mock"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_model_step_is_bounded_quiet_and_streamed_under_its_task() {
+        // GIVEN a one-step plan whose step runs on the model
+        let mut plan = make_plan(vec![("s1", &[])]);
+        plan.steps[0].tool_hint = Some("llm".into());
+        let (mut actor, mut rx) = make_actor_capped(plan, 0);
+        let model = Arc::new(StreamingModel {
+            seen: Mutex::new(None),
+        });
+        let mut backends: std::collections::HashMap<String, Arc<dyn apollia_llm::CompletionModel>> =
+            std::collections::HashMap::new();
+        backends.insert("mock".to_string(), model.clone());
+        let router = LlmRouter::with_backends(backends, "mock");
+        let budget = StepBudget::unlimited();
+        let reasoner = Reasoner::new(MockCompletionModel::new(vec![]), 10);
+
+        // WHEN the plan executes
+        let result = actor
+            .execute(
+                StepDeps {
+                    tool_proxy: &MockToolProxy {
+                        response: String::new(),
+                    },
+                    llm_router: &router,
+                    budget: &budget,
+                    reasoner: &reasoner,
+                },
+                &ResilienceLayer::default(),
+            )
+            .await;
+
+        // THEN the step asked for a bounded answer without reasoning, its
+        // tokens went out under the task, and its output is what was written
+        assert_eq!(result.status, TaskStatus::Completed);
+        let seen = model
+            .seen
+            .lock()
+            .expect("mock lock")
+            .clone()
+            .expect("a request");
+        assert_eq!(seen.max_tokens, Some(4_096));
+        assert_eq!(seen.thinking, Some(false));
+        let mut tokens = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let RuntimeEvent::ChatToken {
+                session_id, token, ..
+            } = event
+            {
+                assert_eq!(session_id, "task-001");
+                tokens.push_str(&token);
+            }
+        }
+        assert_eq!(tokens, "Compliant.");
     }
 
     /// A tool step without plan-time args triggers just-in-time extraction
@@ -1575,403 +1659,75 @@ mod tests {
         assert!(!StepError::ToolNotFound("bash".into()).is_retryable());
     }
 
-    // Manifest propagation into ActorLoop.
+    // A step holds no approval of its own: the tool proxy decides each call.
 
-    /// GIVEN an AgentManifest with tools_requiring_approval=["smtp"]
-    /// WHEN an ActorLoop is created with this manifest
-    /// THEN self.manifest.tools_requiring_approval contains "smtp"
-    #[test]
-    fn test_manifest_propagated_to_actor_loop() {
-        // GIVEN
-        let manifest: AgentManifest = serde_json::from_str(
-            r#"{
-                "name":"test","version":"0.1.0","description":"test","tools_required":[],
-                "tools_requiring_approval":["smtp"]
-            }"#,
-        )
-        .expect("manifest must deserialize");
-        let plan = make_plan(vec![("s1", &[])]);
-        let (bus_tx, _bus_rx) = tokio::sync::broadcast::channel(64);
-        let db = PlanRepository::new(":memory:").expect("in-memory DB");
-        db.insert_plan(&plan, "test-agent").expect("insert_plan");
-        db.insert_steps(&plan.plan_id, &plan.steps)
-            .expect("insert_steps");
-
-        // WHEN
-        let actor = ActorLoop::new(plan, 2, db, bus_tx, manifest);
-
-        // THEN
-        assert!(
-            actor
-                .manifest
-                .tools_requiring_approval
-                .contains(&"smtp".to_string()),
-            "expected 'smtp' in tools_requiring_approval"
-        );
+    /// Refuses `refused` as the caller of ORIA refuses a call, and records
+    /// every tool that actually ran.
+    struct RefusingProxy {
+        refused: &'static str,
+        ran: Mutex<Vec<String>>,
     }
 
-    // HITL Orchestrated mode
-
-    /// Build an `AgentManifest` with `tools_requiring_approval` for HITL tests.
-    fn make_manifest_with_approval(tools: &[&str]) -> AgentManifest {
-        let tools_json = tools
-            .iter()
-            .map(|t| format!("\"{t}\""))
-            .collect::<Vec<_>>()
-            .join(",");
-        serde_json::from_str(&format!(
-            r#"{{"name":"hitl-agent","version":"0.1.0","description":"test","tools_required":[],
-               "tools_requiring_approval":[{tools_json}]}}"#
-        ))
-        .expect("manifest must deserialize")
+    #[async_trait::async_trait]
+    impl ToolProxyTrait for RefusingProxy {
+        async fn invoke(
+            &self,
+            tool_name: &str,
+            _input: &serde_json::Value,
+        ) -> Result<String, String> {
+            if tool_name == self.refused {
+                return Err(format!("unauthorized: the operator refused '{tool_name}'"));
+            }
+            self.ran.lock().expect("ran lock").push(tool_name.into());
+            Ok("tool output".into())
+        }
     }
 
-    /// Build a single-step plan with the given tool.
-    fn make_plan_with_tool(step_id: &str, tool_name: &str, task_id: &str) -> ExecutionPlan {
+    /// A plan whose steps run in order, each on the tool named beside it.
+    fn make_plan_with_tools(steps: &[(&str, &str)]) -> ExecutionPlan {
+        let mut previous: Option<String> = None;
         ExecutionPlan {
-            plan_id: format!("plan-{step_id}"),
-            task_id: task_id.into(),
-            steps: vec![{
-                let mut s = PlanStep::new(step_id, format!("Step {step_id} using {tool_name}"));
-                s.tool_hint = Some(tool_name.into());
-                s
-            }],
-        }
-    }
-
-    // Step with a sensitive tool: suspends before execution.
-    //
-    // GIVEN a manifest with tools_requiring_approval=["smtp"] and a step "s3" with tool_hint="smtp"
-    // WHEN execute() is called WITHOUT resolving the oneshot
-    // THEN the "smtp" tool is NOT called before approval,
-    //      RuntimeEvent::TaskInputRequired{step_id: Some("s3")} is emitted
-    #[tokio::test]
-    async fn test_step_sensitive_tool_suspends_before_execution() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        // GIVEN
-        let manifest = make_manifest_with_approval(&["smtp"]);
-        let plan = make_plan_with_tool("s3", "smtp", "task-ac1");
-        let (bus_tx, mut bus_rx) = tokio::sync::broadcast::channel(64);
-        let db = PlanRepository::new(":memory:").expect("in-memory DB");
-        db.insert_plan(&plan, "hitl-agent").expect("insert_plan");
-        db.insert_steps(&plan.plan_id, &plan.steps)
-            .expect("insert_steps");
-
-        let pending = Arc::new(PendingApprovals::new());
-        let call_count = Arc::new(AtomicU32::new(0));
-        let call_count_clone = call_count.clone();
-
-        struct CountingProxy(Arc<AtomicU32>);
-        #[async_trait::async_trait]
-        impl ToolProxyTrait for CountingProxy {
-            async fn invoke(
-                &self,
-                _tool_name: &str,
-                _input: &serde_json::Value,
-            ) -> Result<String, String> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok("tool output".into())
-            }
-        }
-
-        let pending_clone = pending.clone();
-        let call_count_for_bus = call_count.clone();
-        let mut actor = ActorLoop::new(plan, 2, db, bus_tx, manifest)
-            .with_pending_approvals(Some(pending.clone()));
-
-        let proxy = CountingProxy(call_count_clone);
-        let llm = LlmRouter::empty();
-        let budget = StepBudget::unlimited();
-        let resilience = ResilienceLayer::default();
-        let reasoner = Reasoner::new(MockCompletionModel::new(vec![]), 10);
-
-        // ActorLoop is !Send (PlanRepository wraps RefCell<Connection>), so use tokio::join!
-        // so both futures run on the same task without spawning.
-        //
-        // The observer future: waits for TaskInputRequired, asserts tool not called yet,
-        // then resolves the oneshot to unblock actor.execute().
-        let observer_fut = async move {
-            let mut found_input_required = false;
-            let mut found_step_id = false;
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
-            while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, bus_rx.recv()).await {
-                if let RuntimeEvent::TaskInputRequired { ref step_id, .. } = event {
-                    found_input_required = true;
-                    found_step_id = step_id.as_deref() == Some("s3");
-                    break;
-                }
-            }
-
-            // THEN: the smtp tool has not been called yet
-            assert_eq!(
-                call_count_for_bus.load(Ordering::SeqCst),
-                0,
-                "smtp tool must NOT be called before approval"
-            );
-            assert!(found_input_required, "TaskInputRequired event not emitted");
-            assert!(found_step_id, "step_id should be Some(\"s3\")");
-
-            // Resolve to unblock actor.execute()
-            let _ = pending_clone.resolve(
-                "task-ac1::s3",
-                apollia_core::result::InputResponseData {
-                    approved: false,
-                    reason: Some("test cleanup".into()),
-                    context: serde_json::Value::Null,
-                    responded_at: "2026-01-01T00:00:00Z".into(),
-                    answer: None,
-                    payload: None,
-                },
-            );
-        };
-
-        tokio::join!(
-            actor.execute(
-                StepDeps {
-                    tool_proxy: &proxy,
-                    llm_router: &llm,
-                    budget: &budget,
-                    reasoner: &reasoner,
-                },
-                &resilience,
-            ),
-            observer_fut
-        );
-    }
-
-    // Approval: step executed normally.
-    //
-    // GIVEN a step "s3" with tool_hint="smtp" suspended
-    // WHEN PendingApprovals.resolve(approved=true)
-    // THEN the "smtp" tool is called and the plan completes
-    #[tokio::test]
-    async fn test_approve_executes_step() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        // GIVEN
-        let manifest = make_manifest_with_approval(&["smtp"]);
-        let plan = make_plan_with_tool("s3", "smtp", "task-ac2");
-        let (bus_tx, _bus_rx) = tokio::sync::broadcast::channel(64);
-        let db = PlanRepository::new(":memory:").expect("in-memory DB");
-        db.insert_plan(&plan, "hitl-agent").expect("insert_plan");
-        db.insert_steps(&plan.plan_id, &plan.steps)
-            .expect("insert_steps");
-
-        let pending = Arc::new(PendingApprovals::new());
-        let call_count = Arc::new(AtomicU32::new(0));
-        let call_count_clone = call_count.clone();
-
-        struct CountingProxy(Arc<AtomicU32>);
-        #[async_trait::async_trait]
-        impl ToolProxyTrait for CountingProxy {
-            async fn invoke(
-                &self,
-                _tool_name: &str,
-                _input: &serde_json::Value,
-            ) -> Result<String, String> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok("smtp sent".into())
-            }
-        }
-
-        let pending_clone = pending.clone();
-        let mut actor = ActorLoop::new(plan, 2, db, bus_tx, manifest)
-            .with_pending_approvals(Some(pending.clone()));
-
-        let proxy = CountingProxy(call_count_clone);
-        let llm = LlmRouter::empty();
-        let budget = StepBudget::unlimited();
-        let resilience = ResilienceLayer::default();
-        let reasoner = Reasoner::new(MockCompletionModel::new(vec![]), 10);
-
-        // ActorLoop is !Send, so use tokio::join! instead of tokio::spawn.
-        // The resolver future sleeps briefly then approves, unblocking actor.execute().
-        let resolve_fut = async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            pending_clone
-                .resolve(
-                    "task-ac2::s3",
-                    apollia_core::result::InputResponseData {
-                        approved: true,
-                        reason: None,
-                        context: serde_json::Value::Null,
-                        responded_at: "2026-01-01T00:00:00Z".into(),
-                        answer: None,
-                        payload: None,
-                    },
-                )
-                .expect("resolve must succeed");
-        };
-
-        // WHEN
-        let (result, _) = tokio::join!(
-            actor.execute(
-                StepDeps {
-                    tool_proxy: &proxy,
-                    llm_router: &llm,
-                    budget: &budget,
-                    reasoner: &reasoner,
-                },
-                &resilience,
-            ),
-            resolve_fut
-        );
-
-        // THEN: the plan completes successfully
-        assert_eq!(
-            result.status,
-            TaskStatus::Completed,
-            "plan should complete after approval: {result:?}"
-        );
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            1,
-            "smtp tool must be called exactly once after approval"
-        );
-    }
-
-    // Rejection: plan stopped, AIPResult::failed("REJECTED") returned,
-    //           following steps not executed.
-    //
-    // GIVEN a plan [s1:file_io (non-sensitive), s2:smtp (sensitive)]
-    // WHEN the operator rejects s2
-    // THEN s2 is not executed, plan returns failed("REJECTED", reason)
-    #[tokio::test]
-    async fn test_reject_stops_plan() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        // GIVEN
-        let manifest = make_manifest_with_approval(&["smtp"]);
-        let plan = ExecutionPlan {
-            plan_id: "plan-ac3".into(),
-            task_id: "task-ac3".into(),
-            steps: vec![
-                {
-                    let mut s = PlanStep::new("s1", "Read a file");
-                    s.tool_hint = Some("file_io".into());
+            plan_id: "plan-tools".into(),
+            task_id: "task-tools".into(),
+            steps: steps
+                .iter()
+                .map(|(id, tool)| {
+                    let mut s = PlanStep::new(*id, format!("Step {id} using {tool}"));
+                    s.tool_hint = Some((*tool).into());
+                    s.depends_on = previous.iter().cloned().collect();
+                    previous = Some((*id).to_string());
                     s
-                },
-                {
-                    let mut s = PlanStep::new("s2", "Envoyer email");
-                    s.tool_hint = Some("smtp".into());
-                    s.depends_on = vec!["s1".into()];
-                    s
-                },
-            ],
-        };
-        let (bus_tx, _bus_rx) = tokio::sync::broadcast::channel(64);
-        let db = PlanRepository::new(":memory:").expect("in-memory DB");
-        db.insert_plan(&plan, "hitl-agent").expect("insert_plan");
-        db.insert_steps(&plan.plan_id, &plan.steps)
-            .expect("insert_steps");
-
-        let pending = Arc::new(PendingApprovals::new());
-        let call_count = Arc::new(AtomicU32::new(0));
-        let call_count_clone = call_count.clone();
-
-        struct CountingProxy(Arc<AtomicU32>);
-        #[async_trait::async_trait]
-        impl ToolProxyTrait for CountingProxy {
-            async fn invoke(
-                &self,
-                _tool_name: &str,
-                _input: &serde_json::Value,
-            ) -> Result<String, String> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok("ok".into())
-            }
+                })
+                .collect(),
         }
-
-        let pending_clone = pending.clone();
-        let mut actor = ActorLoop::new(plan, 2, db, bus_tx, manifest)
-            .with_pending_approvals(Some(pending.clone()));
-
-        let proxy = CountingProxy(call_count_clone);
-        let llm = LlmRouter::empty();
-        let budget = StepBudget::unlimited();
-        let resilience = ResilienceLayer::default();
-        let reasoner = Reasoner::new(MockCompletionModel::new(vec![]), 10);
-
-        // ActorLoop is !Send, so use tokio::join! instead of tokio::spawn.
-        // The resolver future sleeps briefly then rejects s2, causing the plan to fail.
-        let resolve_fut = async move {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            pending_clone
-                .resolve(
-                    "task-ac3::s2",
-                    apollia_core::result::InputResponseData {
-                        approved: false,
-                        reason: Some("Email not approved".into()),
-                        context: serde_json::Value::Null,
-                        responded_at: "2026-01-01T00:00:00Z".into(),
-                        answer: None,
-                        payload: None,
-                    },
-                )
-                .expect("resolve must succeed");
-        };
-
-        // WHEN
-        let (result, _) = tokio::join!(
-            actor.execute(
-                StepDeps {
-                    tool_proxy: &proxy,
-                    llm_router: &llm,
-                    budget: &budget,
-                    reasoner: &reasoner,
-                },
-                &resilience,
-            ),
-            resolve_fut
-        );
-
-        // THEN: plan returns Failed with code REJECTED
-        assert_eq!(result.status, TaskStatus::Failed);
-        let err = result.error.expect("error must be set");
-        assert_eq!(err.code, "REJECTED");
-        assert!(
-            err.message.contains("Email not approved"),
-            "reason must be propagated: {}",
-            err.message
-        );
-        // s1 (file_io, non-sensitive) ran but s2 (smtp) was rejected before the call
-        assert_eq!(
-            call_count.load(Ordering::SeqCst),
-            1,
-            "only s1 should be called - s2 rejected before tool call"
-        );
     }
 
-    // Step with a NON-sensitive tool: no suspension.
-    //
-    // GIVEN a step using "file_io" absent from tools_requiring_approval
-    // WHEN execute() is called with PendingApprovals configured
-    // THEN no TaskInputRequired is emitted, the step executes directly
+    fn raised_an_approval(bus_rx: &mut tokio::sync::broadcast::Receiver<RuntimeEvent>) -> bool {
+        let mut raised = false;
+        while let Ok(event) = bus_rx.try_recv() {
+            if matches!(event, RuntimeEvent::TaskInputRequired { .. }) {
+                raised = true;
+            }
+        }
+        raised
+    }
+
     #[tokio::test]
-    async fn test_non_sensitive_tool_no_suspension() {
-        // GIVEN
-        let manifest = make_manifest_with_approval(&["smtp"]);
-        let plan = make_plan_with_tool("s1", "file_io", "task-ac5");
-        let (bus_tx, mut bus_rx) = tokio::sync::broadcast::channel(64);
-        let db = PlanRepository::new(":memory:").expect("in-memory DB");
-        db.insert_plan(&plan, "hitl-agent").expect("insert_plan");
-        db.insert_steps(&plan.plan_id, &plan.steps)
-            .expect("insert_steps");
-
-        let pending = Arc::new(PendingApprovals::new());
-        let mut actor =
-            ActorLoop::new(plan, 2, db, bus_tx, manifest).with_pending_approvals(Some(pending));
-
-        let proxy = MockToolProxy {
-            response: "file content".into(),
+    async fn test_a_call_the_proxy_refuses_never_runs_and_stops_the_plan() {
+        // GIVEN a plan [s1:file_io, s2:smtp, s3:file_io] on a proxy that
+        // refuses smtp, and an actor given no replan
+        let plan = make_plan_with_tools(&[("s1", "file_io"), ("s2", "smtp"), ("s3", "file_io")]);
+        let (mut actor, mut bus_rx) = make_actor_capped(plan, 0);
+        let proxy = RefusingProxy {
+            refused: "smtp",
+            ran: Mutex::new(Vec::new()),
         };
         let llm = LlmRouter::empty();
         let budget = StepBudget::unlimited();
         let resilience = ResilienceLayer::default();
         let reasoner = Reasoner::new(MockCompletionModel::new(vec![]), 10);
 
-        // WHEN: execute without any resolve (no suspension expected)
+        // WHEN the plan runs
         let result = actor
             .execute(
                 StepDeps {
@@ -1984,40 +1740,51 @@ mod tests {
             )
             .await;
 
-        // THEN: the plan completes directly without suspension
+        // THEN the plan fails, smtp never ran, the step after it never ran,
+        // and the actor raised no approval of its own
+        assert_eq!(result.status, TaskStatus::Failed, "{result:?}");
         assert_eq!(
-            result.status,
-            TaskStatus::Completed,
-            "non-sensitive tool must execute without suspension: {result:?}"
+            *proxy.ran.lock().expect("ran lock"),
+            vec!["file_io".to_string()],
+            "only s1 runs: s2 is refused and s3 depends on it"
         );
-
-        // THEN: no TaskInputRequired was emitted
-        let mut found = false;
-        while let Ok(event) = bus_rx.try_recv() {
-            if matches!(event, RuntimeEvent::TaskInputRequired { .. }) {
-                found = true;
-            }
-        }
-        assert!(
-            !found,
-            "TaskInputRequired must NOT be emitted for non-sensitive tool"
-        );
+        assert!(!raised_an_approval(&mut bus_rx));
     }
 
-    // StepError: the new variants are not retryable.
-    #[test]
-    fn test_step_error_rejected_and_closed_not_retryable() {
-        // GIVEN a step refused by the operator, and an approval channel that closed
-        // WHEN each is asked whether a retry makes sense
-        // THEN neither is: retrying would ask again for an answer already given
-        assert!(!StepError::RejectedByUser {
-            reason: "Non".into()
-        }
-        .is_retryable());
-        assert!(!StepError::ApprovalChannelClosed.is_retryable());
+    #[tokio::test]
+    async fn test_a_step_raises_no_approval_of_its_own() {
+        // GIVEN a plan of one step on a tool that writes outside, on a proxy
+        // that lets every call run
+        let plan = make_plan_with_tools(&[("s1", "smtp")]);
+        let (mut actor, mut bus_rx) = make_actor(plan);
+        let proxy = MockToolProxy {
+            response: "sent".into(),
+        };
+        let llm = LlmRouter::empty();
+        let budget = StepBudget::unlimited();
+        let resilience = ResilienceLayer::default();
+        let reasoner = Reasoner::new(MockCompletionModel::new(vec![]), 10);
+
+        // WHEN the plan runs
+        let result = actor
+            .execute(
+                StepDeps {
+                    tool_proxy: &proxy,
+                    llm_router: &llm,
+                    budget: &budget,
+                    reasoner: &reasoner,
+                },
+                &resilience,
+            )
+            .await;
+
+        // THEN the plan completes and the actor asked nobody: whether the
+        // call runs is the proxy's decision alone
+        assert_eq!(result.status, TaskStatus::Completed, "{result:?}");
+        assert!(!raised_an_approval(&mut bus_rx));
     }
 
-    // Multi-model dispatch via model_hint
+    // A step runs on the model of its agent, never on a model of its own
 
     /// Build a plan with an LLM step and an optional `model_hint`.
     fn make_llm_plan(step_id: &str, model_hint: Option<&str>) -> ExecutionPlan {
@@ -2080,14 +1847,13 @@ mod tests {
         }
     }
 
-    /// Step with model_hint dispatches to the named backend.
-    ///
     /// GIVEN an LlmRouter with backends "default" and "fast"
-    ///   AND an LLM PlanStep with model_hint = Some("fast")
+    ///   AND an LLM PlanStep naming "fast" in its model_hint, its agent naming
+    ///   no model
     /// WHEN actor.execute() is called
-    /// THEN the response comes from the "fast" backend
+    /// THEN the response comes from the "default" backend: the hint is not read
     #[tokio::test]
-    async fn test_story227_ac1_model_hint_dispatches_to_named_backend() {
+    async fn test_a_step_model_hint_is_not_read() {
         // GIVEN
         let plan = make_llm_plan("s1", Some("fast"));
         let (bus_tx, _rx) = tokio::sync::broadcast::channel(64);
@@ -2135,8 +1901,66 @@ mod tests {
         assert_eq!(result.status, TaskStatus::Completed);
         let output_debug = format!("{:?}", result.output);
         assert!(
+            output_debug.contains("response-from-default"),
+            "the hint must not pick the backend, got: {output_debug}"
+        );
+    }
+
+    /// GIVEN an LlmRouter with backends "default" and "fast"
+    ///   AND an LLM PlanStep without a model_hint, its agent's model being "fast"
+    /// WHEN actor.execute() is called
+    /// THEN the response comes from "fast", the model of the agent
+    #[tokio::test]
+    async fn test_a_step_runs_on_the_model_of_its_agent() {
+        // GIVEN
+        let plan = make_llm_plan("s1", None);
+        let (bus_tx, _rx) = tokio::sync::broadcast::channel(64);
+        let db = PlanRepository::new(":memory:").expect("in-memory DB");
+        db.insert_plan(&plan, "test-agent").expect("insert_plan");
+        db.insert_steps(&plan.plan_id, &plan.steps)
+            .expect("insert_steps");
+        let mut backends = HashMap::new();
+        backends.insert(
+            "default".to_string(),
+            Arc::new(TaggedMockModel {
+                tag: "default".into(),
+            }) as Arc<dyn apollia_llm::CompletionModel>,
+        );
+        backends.insert(
+            "fast".to_string(),
+            Arc::new(TaggedMockModel { tag: "fast".into() })
+                as Arc<dyn apollia_llm::CompletionModel>,
+        );
+        let llm = LlmRouter::with_backends(backends, "default");
+        let proxy = MockToolProxy {
+            response: "unused".into(),
+        };
+        let budget = StepBudget::unlimited();
+        let resilience = ResilienceLayer::default();
+        let reasoner = Reasoner::new(MockCompletionModel::new(vec![]), 10);
+        let manifest = make_manifest();
+        let mut actor =
+            ActorLoop::new(plan, 0, db, bus_tx, manifest).with_model_backend(Some("fast".into()));
+
+        // WHEN
+        let result = actor
+            .execute(
+                StepDeps {
+                    tool_proxy: &proxy,
+                    llm_router: &llm,
+                    budget: &budget,
+                    reasoner: &reasoner,
+                },
+                &resilience,
+            )
+            .await;
+
+        // THEN
+        assert_eq!(result.status, TaskStatus::Completed);
+        let output_debug = format!("{:?}", result.output);
+        assert!(
             output_debug.contains("response-from-fast"),
-            "expected output from 'fast' backend, got: {output_debug}"
+            "expected output from the agent's model, got: {output_debug}"
         );
     }
 
@@ -2551,7 +2375,7 @@ mod tests {
     /// Helper: creates a manifest with `memory_namespace` set.
     fn make_manifest_with_memory(namespace: &str) -> AgentManifest {
         let json = format!(
-            r#"{{"name":"test-agent","version":"0.1.0","description":"test","tools_required":[],"memory_namespace":"{namespace}"}}"#,
+            r#"{{"name":"test-agent","version":"0.1.0","description":"test","memory_namespace":"{namespace}"}}"#,
         );
         serde_json::from_str(&json).expect("manifest with memory_namespace must deserialize")
     }

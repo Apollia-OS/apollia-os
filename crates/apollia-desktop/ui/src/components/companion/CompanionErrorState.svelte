@@ -43,9 +43,9 @@
       case "network":
         return "/settings/integrations";
       case "permissions":
-        return "/settings/permissions";
+        return "/authorizations";
       default:
-        return "/settings/llm";
+        return "/llm";
     }
   });
 

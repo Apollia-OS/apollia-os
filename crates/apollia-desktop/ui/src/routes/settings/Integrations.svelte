@@ -1,199 +1,301 @@
 <script lang="ts">
+  /**
+   * Settings > Integrations: the defaults Apollia grants (the accesses of a
+   * new agent created without code, the profile in a new conversation, and,
+   * with the developer mode on, the MCP servers a request may bring), a
+   * read-only summary of what is always authorized, and the links to the
+   * Authorizations and Connections screens, where the detail lives.
+   *
+   * Each default is written as soon as it is changed. A value the
+   * organization policy imposes is shown locked.
+   */
   import { onMount } from "svelte";
   import { t } from "svelte-i18n";
-  import { Key, Lock, Plug, ArrowRight } from "lucide-svelte";
-  import { ErrorBanner } from "$lib/components/operator";
-  import { humanize } from "$lib/errors/humanize";
-  import SettingsSubPage from "../../components/settings/SettingsSubPage.svelte";
-  import SettingSectionSkeleton from "../../components/settings/SettingSectionSkeleton.svelte";
-  import OauthProviderCard from "../../components/integrations/OauthProviderCard.svelte";
-  import OauthCredentialRow from "../../components/integrations/OauthCredentialRow.svelte";
-  import OauthDriveFolders from "../../components/integrations/OauthDriveFolders.svelte";
+  import { Bot, Code, Lock, MessageSquare, Plug, ShieldCheck } from "lucide-svelte";
+  import { Badge } from "$lib/components/ui/badge";
+  import { Button } from "$lib/components/ui/button";
+  import { Checkbox } from "$lib/components/ui/checkbox";
+  import { addToast } from "$lib/components/ui/toast";
+  import { listFamilyConsents, type FamilyConsent } from "$lib/ipc/permissions";
+  import { describeTool, listTools } from "$lib/ipc/tools";
+  import { agents } from "$lib/stores/agents";
+  import { developerMode } from "$lib/stores/developerMode";
+  import { shareProfileDefault } from "$lib/stores/shareProfileDefault";
   import {
-    oauthListClientIds,
-    oauthSetClientId,
-    oauthSetClientSecret,
-    oauthSetApiKey,
-    type OauthClientIdStatus,
-  } from "$lib/ipc/oauthClients";
+    INTEGRATIONS_BLOCKS,
+    INTEGRATIONS_TEST_IDS,
+    INTEGRATION_DEFAULTS,
+    alwaysSummary,
+    defaultAccessRows,
+    openAuthorizations,
+    openConnections,
+    readIntegrationDefaults,
+    rowLocked,
+    toggledAccess,
+    writeAllowRequestMcp,
+    writeDefaultAccess,
+    writeShareProfile,
+    type DefaultAccessRow,
+    type DefaultAccessTool,
+    type IntegrationDefaults,
+  } from "$lib/settings/integrations";
+  import { APOLLIA_AGENT_ID, readableName } from "../../components/agents/sheet/agentSheet";
+  import SettingsFieldRow from "../../components/settings/SettingsFieldRow.svelte";
+  import SettingsSection from "../../components/settings/SettingsSection.svelte";
+  import SettingsSubPage from "../../components/settings/SettingsSubPage.svelte";
+  import SettingsToggle from "../../components/settings/SettingsToggle.svelte";
 
-  const REDIRECT_URI = "http://127.0.0.1/";
+  let defaults = $state<IntegrationDefaults>(INTEGRATION_DEFAULTS);
+  let tools = $state<DefaultAccessTool[]>([]);
+  let toolsRead = $state<"loading" | "read" | "failed">("loading");
+  let consents = $state<FamilyConsent[]>([]);
+  let writing = $state(false);
 
-  let statuses = $state<OauthClientIdStatus[]>([]);
-  let loading = $state(true);
-  let loaded = $state(false);
-  let rawError = $state<string | null>(null);
+  const rows = $derived(defaultAccessRows(tools, defaults.families, defaults.access));
+  const accessLocked = $derived(defaults.accessSource === "policy");
+  const always = $derived(
+    alwaysSummary(consents, (id) =>
+      id === APOLLIA_AGENT_ID
+        ? $t("authorizations.apollia_name")
+        : $agents.find((agent) => agent.name === id)?.name,
+    ),
+  );
 
-  const loadError = $derived(rawError ? humanize(rawError, $t) : null);
+  /**
+   * The name an access is shown by: its catalogue label, or its identifier
+   * made readable the way an agent sheet shows it.
+   */
+  function labelOf(id: string): string {
+    const key = `tools.labels.${id}`;
+    const label = $t(key);
+    return label === key ? readableName(id) : label;
+  }
 
-  async function refresh(): Promise<void> {
-    loading = true;
-    rawError = null;
+  async function loadTools(): Promise<void> {
     try {
-      statuses = await oauthListClientIds();
-      loaded = true;
-    } catch (err) {
-      rawError = err instanceof Error ? err.message : String(err);
-    } finally {
-      loading = false;
+      const listed = await listTools();
+      const native = listed.filter((tool) => tool.kind === "native");
+      tools = await Promise.all(
+        native.map(async (tool): Promise<DefaultAccessTool> => {
+          const descriptor = await describeTool(tool.name).catch(() => null);
+          return { name: tool.name, family: descriptor?.family ?? "unclassified" };
+        }),
+      );
+      toolsRead = "read";
+    } catch {
+      toolsRead = "failed";
     }
   }
 
-  function providerName(provider: string): string {
-    const key = `settings.integrations.provider.${provider}`;
-    const label = $t(key);
-    return label === key ? provider : label;
+  onMount(() => {
+    void readIntegrationDefaults().then((read) => {
+      defaults = read;
+      shareProfileDefault.set(read.shareProfile);
+    });
+    void loadTools();
+    // Without the list the summary shows its empty state; the link still leads
+    // to the screen that holds the truth.
+    void listFamilyConsents()
+      .then((listed) => (consents = listed))
+      .catch(() => (consents = []));
+  });
+
+  /**
+   * Shows `next` at once, then writes it; a refused write puts the section
+   * back as it was and says so.
+   */
+  async function change(
+    next: IntegrationDefaults,
+    write: (current: IntegrationDefaults) => Promise<IntegrationDefaults>,
+  ): Promise<void> {
+    if (writing) return;
+    const previous = defaults;
+    defaults = next;
+    writing = true;
+    try {
+      defaults = await write(previous);
+      shareProfileDefault.set(defaults.shareProfile);
+    } catch {
+      defaults = previous;
+      addToast($t("settings.integrations_section.write_error"), "error", {
+        "data-testid": "integrations-write-error",
+      });
+    } finally {
+      writing = false;
+    }
   }
 
-  function clientIdPlaceholder(provider: string): string {
-    return $t(`settings.integrations.placeholder.client_id_${provider}`);
+  function toggleAccess(row: DefaultAccessRow, on: boolean): void {
+    if (rowLocked(row, defaults.accessSource)) return;
+    void change({ ...defaults, access: toggledAccess(defaults.access, row.id, on) }, (current) =>
+      writeDefaultAccess(current, row.id, on),
+    );
   }
 
-  onMount(refresh);
+  function toggleShareProfile(on: boolean): void {
+    void change({ ...defaults, shareProfile: on }, (current) => writeShareProfile(current, on));
+  }
+
+  function toggleRequestMcp(on: boolean): void {
+    void change({ ...defaults, allowRequestMcp: on }, (current) =>
+      writeAllowRequestMcp(current, on),
+    );
+  }
 </script>
 
-<SettingsSubPage route="integrations" data-testid="settings-integrations-oauth">
-  {#if loading && !loaded}
-    <SettingSectionSkeleton />
-  {:else if loadError}
-    <ErrorBanner
-      tone="danger"
-      onretry={refresh}
-      retryLabel={$t("common.retry")}
-      {loading}
-      data-testid="oauth-settings-error"
-    >
-      <p class="font-medium">{$t("settings.integrations.load_error_title")}</p>
-      <p class="text-caption opacity-90">{$t("settings.integrations.load_error_body")}</p>
-    </ErrorBanner>
-  {:else if statuses.length === 0}
-    <div
-      class="flex flex-col items-center gap-2.5 rounded-xl border border-dashed border-border bg-surface-2/30 px-6 py-11 text-center"
-      data-testid="oauth-settings-empty"
-    >
-      <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-        <Plug size={20} strokeWidth={1.75} aria-hidden="true" />
-      </span>
-      <p class="text-body-sm font-medium text-foreground">
-        {$t("settings.integrations.empty_title")}
-      </p>
-      <p class="max-w-sm text-caption text-muted-foreground">
-        {$t("settings.integrations.empty_body")}
-      </p>
-    </div>
-  {:else}
-    <div
-      class="rounded-lg border border-border/60 bg-surface-2/40 px-4 py-3"
-      data-testid="oauth-resolution-explainer"
-    >
-      <p class="max-w-prose text-caption text-muted-foreground">
-        {$t("settings.integrations.explain_intro")}
-      </p>
-      <div class="mt-2.5 flex flex-wrap items-center gap-2 text-caption" aria-hidden="true">
-        <span class="rounded-full leading-none border border-border bg-surface-1 px-2.5 py-1">
-          <!-- i18n-ignore: environment variable name -->
-          <span class="font-mono">APOLLIA_*_CLIENT_ID</span>
-          <span class="text-foreground/80">{$t("settings.integrations.source.env")}</span>
-        </span>
-        <ArrowRight size={13} class="text-muted-foreground/60" />
-        <span class="rounded-full leading-none border border-primary/40 bg-primary/8 px-2.5 py-1 text-primary">
-          <span class="font-mono">oauth-clients.toml</span>
-          <span>{$t("settings.integrations.source.file")}</span>
-        </span>
-        <ArrowRight size={13} class="text-muted-foreground/60" />
-        <span class="rounded-full leading-none border border-border bg-surface-1 px-2.5 py-1">
-          {$t("settings.integrations.source.builtin")}
-        </span>
+<SettingsSubPage route="integrations" data-testid={INTEGRATIONS_TEST_IDS.section}>
+  <SettingsSection title={$t(INTEGRATIONS_BLOCKS[0])}>
+    {#snippet icon()}<Bot size={15} strokeWidth={1.75} />{/snippet}
+    <div class="flex flex-col gap-3" data-testid={INTEGRATIONS_TEST_IDS.access}>
+      <div>
+        <p class="text-label-md text-foreground">
+          {$t("settings.integrations_section.access_label")}
+        </p>
+        <p class="mt-0.5 text-caption text-muted-foreground">
+          {$t("settings.integrations_section.access_hint")}
+        </p>
+        {#if accessLocked}
+          <p
+            class="mt-1 inline-flex items-center gap-1.5 text-caption text-muted-foreground"
+            title={$t("settings.policy_locked_hint")}
+            data-testid={INTEGRATIONS_TEST_IDS.accessPolicy}
+          >
+            <Lock class="h-3 w-3" aria-hidden="true" />
+            {$t("settings.policy_locked")}
+          </p>
+        {/if}
       </div>
+      {#if toolsRead === "failed"}
+        <p class="text-caption text-muted-foreground" data-testid="integrations-access-error">
+          {$t("settings.integrations_section.access_error")}
+        </p>
+      {:else if toolsRead === "read" && rows.length === 0}
+        <p class="text-caption text-muted-foreground" data-testid="integrations-access-empty">
+          {$t("settings.integrations_section.access_empty")}
+        </p>
+      {:else}
+        <ul class="flex flex-col border-t border-border/60">
+          {#each rows as row (row.id)}
+            <li
+              class="flex items-center gap-3 border-b border-border/60 py-2 last:border-b-0"
+              title={row.byFamily ? $t("settings.integrations_section.access_by_family") : undefined}
+            >
+              <Checkbox
+                id="integrations-access-{row.id}"
+                checked={row.checked}
+                disabled={rowLocked(row, defaults.accessSource) || writing}
+                onchange={(on) => toggleAccess(row, on)}
+                data-testid="integrations-access-{row.id}"
+              />
+              <label
+                for="integrations-access-{row.id}"
+                class="min-w-0 flex-1 truncate text-body-sm text-foreground"
+              >
+                {labelOf(row.id)}
+              </label>
+              {#if row.sensitive}
+                <Badge variant="outline" data-testid="integrations-access-{row.id}-sensitive">
+                  {$t("settings.integrations_section.access_sensitive")}
+                </Badge>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </div>
+  </SettingsSection>
 
-    {#each statuses as status (status.provider)}
-      {@const provider = status.provider}
-      {@const isGoogle = provider === "google"}
-      <OauthProviderCard
-        {status}
-        name={providerName(provider)}
-        meta={$t(`settings.integrations.provider_meta.${provider}`)}
-        redirectUri={isGoogle ? REDIRECT_URI : undefined}
-        footerNote={isGoogle
-          ? $t("settings.integrations.stored_note")
-          : $t("settings.integrations.ms_no_secret")}
-        footerInfo={!isGoogle}
-        onimported={() => void refresh()}
-      >
-        <OauthCredentialRow
-          mode="public"
-          label={$t("settings.integrations.field.client_id")}
-          required
-          source={status.source}
-          configured={status.effective_client_id.length > 0}
-          currentValue={status.effective_client_id}
-          placeholder={clientIdPlaceholder(provider)}
-          help={isGoogle ? undefined : $t("settings.integrations.help.ms_builtin")}
-          onsave={async (v) => {
-            await oauthSetClientId(provider, v);
-            await refresh();
-          }}
-          inputTestid={`oauth-input-${provider}`}
-          saveTestid={`oauth-save-${provider}`}
-          data-testid={`oauth-field-client-id-${provider}`}
+  <SettingsSection title={$t(INTEGRATIONS_BLOCKS[1])}>
+    {#snippet icon()}<MessageSquare size={15} strokeWidth={1.75} />{/snippet}
+    <SettingsToggle
+      id="integrations-share-profile"
+      label={$t("settings.integrations_section.share_profile_label")}
+      description={$t("settings.integrations_section.share_profile_hint")}
+      checked={defaults.shareProfile}
+      source={defaults.shareProfileSource}
+      disabled={writing}
+      onChange={toggleShareProfile}
+      data-testid={INTEGRATIONS_TEST_IDS.shareProfile}
+    />
+  </SettingsSection>
+
+  <SettingsSection title={$t(INTEGRATIONS_BLOCKS[2])} bodyLayout="flush">
+    {#snippet icon()}<ShieldCheck size={15} strokeWidth={1.75} />{/snippet}
+    {#if always.length === 0}
+      <div class="border-b border-border/60 py-3" data-testid={INTEGRATIONS_TEST_IDS.alwaysEmpty}>
+        <p class="text-label-md text-foreground">
+          {$t("settings.integrations_section.always_empty_label")}
+        </p>
+        <p class="mt-0.5 text-caption text-muted-foreground">
+          {$t("settings.integrations_section.always_empty_hint")}
+        </p>
+      </div>
+    {:else}
+      <ul data-testid={INTEGRATIONS_TEST_IDS.always}>
+        {#each always as line (line.agentId)}
+          <li
+            class="flex items-center justify-between gap-5 border-b border-border/60 py-3"
+            data-testid="integrations-always-{line.agentId}"
+          >
+            <span class="min-w-0 flex-1 truncate text-label-md text-foreground">{line.name}</span>
+            <span class="flex-none text-body-sm text-muted-foreground">
+              {$t("settings.integrations_section.always_count", { values: { count: line.count } })}
+            </span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    <SettingsFieldRow
+      label={$t("settings.integrations_section.always_manage_label")}
+      hint={$t("settings.integrations_section.always_manage_hint")}
+      border={false}
+    >
+      {#snippet control()}
+        <Button
+          variant="outline"
+          size="sm"
+          onclick={openAuthorizations}
+          data-testid={INTEGRATIONS_TEST_IDS.openAuthorizations}
         >
-          {#snippet icon()}<Key size={13} strokeWidth={1.75} aria-hidden="true" />{/snippet}
-        </OauthCredentialRow>
+          {$t("settings.integrations_section.always_manage_action")}
+        </Button>
+      {/snippet}
+    </SettingsFieldRow>
+  </SettingsSection>
 
-        {#if status.requires_client_secret}
-          <OauthCredentialRow
-            mode="secret"
-            label={$t("settings.integrations.field.client_secret")}
-            required
-            source={status.client_secret_source}
-            configured={status.has_client_secret}
-            placeholder={$t("settings.integrations.placeholder.client_secret")}
-            help={$t("settings.integrations.help.client_secret")}
-            onsave={async (v) => {
-              await oauthSetClientSecret(provider, v);
-              await refresh();
-            }}
-            ondelete={async () => {
-              await oauthSetClientSecret(provider, "");
-              await refresh();
-            }}
-            inputTestid={`oauth-secret-input-${provider}`}
-            saveTestid={`oauth-save-secret-${provider}`}
-            deleteTestid={`oauth-clear-secret-${provider}`}
-            data-testid={`oauth-field-client-secret-${provider}`}
-          >
-            {#snippet icon()}<Lock size={13} strokeWidth={1.75} aria-hidden="true" />{/snippet}
-          </OauthCredentialRow>
-        {/if}
+  <SettingsSection title={$t(INTEGRATIONS_BLOCKS[3])} bodyLayout="flush">
+    {#snippet icon()}<Plug size={15} strokeWidth={1.75} />{/snippet}
+    <SettingsFieldRow
+      label={$t("settings.integrations_section.connections_label")}
+      hint={$t("settings.integrations_section.connections_hint")}
+      border={false}
+    >
+      {#snippet control()}
+        <Button
+          variant="outline"
+          size="sm"
+          onclick={openConnections}
+          data-testid={INTEGRATIONS_TEST_IDS.openConnections}
+        >
+          {$t("settings.integrations_section.connections_action")}
+        </Button>
+      {/snippet}
+    </SettingsFieldRow>
+  </SettingsSection>
 
-        {#if status.requires_api_key}
-          <OauthCredentialRow
-            mode="secret"
-            label={$t("settings.integrations.field.api_key")}
-            source={status.api_key_source}
-            configured={status.has_api_key}
-            placeholder={$t("settings.integrations.placeholder.api_key")}
-            help={$t("settings.integrations.help.api_key")}
-            onsave={async (v) => {
-              await oauthSetApiKey(provider, v);
-              await refresh();
-            }}
-            ondelete={async () => {
-              await oauthSetApiKey(provider, "");
-              await refresh();
-            }}
-            inputTestid={`oauth-api-key-input-${provider}`}
-            saveTestid={`oauth-save-api-key-${provider}`}
-            deleteTestid={`oauth-clear-api-key-${provider}`}
-            data-testid={`oauth-field-api-key-${provider}`}
-          >
-            {#snippet icon()}<Key size={13} strokeWidth={1.75} aria-hidden="true" />{/snippet}
-          </OauthCredentialRow>
-        {/if}
-      </OauthProviderCard>
-    {/each}
-
-    <OauthDriveFolders />
+  {#if $developerMode}
+    <SettingsSection title={$t(INTEGRATIONS_BLOCKS[4])}>
+      {#snippet icon()}<Code size={15} strokeWidth={1.75} />{/snippet}
+      <SettingsToggle
+        id="integrations-allow-request-mcp"
+        label={$t("dev.integrations.request_mcp_label")}
+        description={$t("dev.integrations.request_mcp_hint")}
+        checked={defaults.allowRequestMcp}
+        source={defaults.allowRequestMcpSource}
+        disabled={writing}
+        onChange={toggleRequestMcp}
+        data-testid={INTEGRATIONS_TEST_IDS.requestMcp}
+      />
+    </SettingsSection>
   {/if}
 </SettingsSubPage>

@@ -10,6 +10,8 @@
 #   Track 2 - RUNTIME (gated APOLLIA_REQUIRE_RUNTIME=1): daemon booted on a
 #     seeded HOME, so status/list surfaces return seeded state; plus CRUD and
 #     the runtime-only leaves.
+#     It ends on a second daemon and a second seeded HOME, where a package
+#     holding an agent and a workflow is installed, run and uninstalled.
 #   Track 3 - LLM CAPTURE (gated APOLLIA_REQUIRE_RUNTIME=1 + a real model):
 #     non-deterministic commands (run --stream, chat REPL, llm chat, do,
 #     explain). Asserts STRUCTURE only (exit, streaming, timing); the full
@@ -23,9 +25,9 @@
 #   APOLLIA_BIN              binary path. Default: ./target/release/apollia-os
 #                            (fallback ./target/debug/apollia-os). On Windows
 #                            the `.exe` suffix is added where it is missing.
-#   APOLLIA_TEST_MODEL_GGUF  GGUF for the local LLM backend (Track 3). Default:
-#                            ~/.apollia/models/Qwen3-30B-A3B-Q4_K_M.gguf. Absent
-#                            → Track 3 is SKIPped, never failed.
+#   APOLLIA_TEST_MODEL_GGUF  GGUF for the local LLM backend (Track 3). No
+#                            default: unset, or naming a file that does not
+#                            exist → Track 3 is SKIPped, never failed.
 #   APOLLIA_REQUIRE_RUNTIME  0|1 (default 0). Set to 1 to run Tracks 2 and 3.
 #   APOLLIA_TEST_REVIEW      0|1 (default 0). Set to 1 to run `review .` (slow).
 #   APOLLIA_TEST_VERBOSE     0|1 (default 0). Dump stdout/stderr on FAIL.
@@ -172,8 +174,7 @@ restore_profile() {
         export USERPROFILE="$REAL_USERPROFILE"
     fi
 }
-DEFAULT_GGUF="${REAL_HOME}/.apollia/models/Qwen3-30B-A3B-Q4_K_M.gguf"
-TEST_GGUF="${APOLLIA_TEST_MODEL_GGUF:-$DEFAULT_GGUF}"
+TEST_GGUF="${APOLLIA_TEST_MODEL_GGUF:-}"
 REQUIRE_RUNTIME="${APOLLIA_REQUIRE_RUNTIME:-0}"
 TEST_REVIEW="${APOLLIA_TEST_REVIEW:-0}"
 VERBOSE="${APOLLIA_TEST_VERBOSE:-0}"
@@ -182,13 +183,9 @@ REPORT_DIR="${APOLLIA_E2E_REPORT_DIR:-$SCRIPT_DIR/report}"
 # Hermetic secret storage (keyring is unreachable from a sub-shell on macOS).
 export APOLLIA_TOKEN_STORAGE="${APOLLIA_TOKEN_STORAGE:-file}"
 export APOLLIA_TOKEN_PASSPHRASE="${APOLLIA_TOKEN_PASSPHRASE:-cli-e2e-test-passphrase}"
-# Hermetic config resolution. `config show` resolves $XDG_CONFIG_HOME before
-# ~/.config (resolve_path, crates/apollia-cli/src/commands/config.rs), and the
-# suite only swaps HOME, so a host-set XDG_CONFIG_HOME points every config
-# assertion at a directory outside the seed and flips its verdict. With the
-# variable dropped, resolution falls back to $HOME/.config, which follows the
-# per-track HOME swaps into the seeded tree (build-seed.sh writes the seeded
-# apollia.toml there as well as under ~/.apollia).
+# Hermetic environment. apollia.toml resolves under $HOME/.apollia only, but
+# `service install` writes its Linux unit under $XDG_CONFIG_HOME, so a host-set
+# value would point it outside the seed; the variable is dropped.
 unset XDG_CONFIG_HOME
 # Keep INFO tracing off stdout so JSON-emitting commands stay parseable.
 export RUST_LOG="${RUST_LOG:-error}"
@@ -340,6 +337,44 @@ if [[ "$REQUIRE_RUNTIME" == "1" ]]; then
         printf '%s\n' "$seed_err" >&2
         CURRENT_TRACK="runtime"
         _record_fail "seed build (Track 2)" "$seed_err"
+    fi
+
+    # Track 2, packaged agent and workflow. A daemon of its own, on its own
+    # seeded HOME, started once the daemon above has stopped: two daemons at
+    # once cannot be told apart on Windows, where the pipe is named after the
+    # user and not after --socket. It is started twice, because the runtime
+    # hands the workflows of the installed packages to its engine when it
+    # starts: the package is installed under the first, and run under the
+    # second. No model is wired on this HOME, so neither boot loads one.
+    echo
+    echo "$(bold "═══ Track 2 - RUNTIME (packaged agent and workflow) ═══")"
+    CURRENT_TRACK="runtime"
+    SEED_PKG="$RUN_TMP/seed-packaged"
+    if seed_err=$(build_seed_home "$SEED_PKG" 2>&1); then
+        use_profile "$SEED_PKG"
+        for PACKAGED_PHASE in install run; do
+            "$BIN" start --socket "$SOCK" --port 0 >"$RUN_TMP/daemon-packaged-$PACKAGED_PHASE.log" 2>&1 &
+            DAEMON_PID=$!
+            if wait_for_socket "$SOCK" 30; then
+                _pass "daemon started + socket ready ($PACKAGED_PHASE)" "pid=$DAEMON_PID"
+                # shellcheck source=tracks/track2_packaged.sh
+                source "$TRACK_DIR/track2_packaged.sh"
+                "$BIN" --socket "$SOCK" stop >/dev/null 2>&1 || true
+                # The next start binds the same socket: wait for this process
+                # to be gone rather than for the stop command to return.
+                wait "$DAEMON_PID" 2>/dev/null || true
+                DAEMON_PID=""
+            else
+                daemon_tail=$(/usr/bin/tail -30 "$RUN_TMP/daemon-packaged-$PACKAGED_PHASE.log" 2>/dev/null)
+                _record_fail "daemon start ($PACKAGED_PHASE)" "daemon.log (tail): $daemon_tail"
+                echo "--- daemon.log (tail) ---"; printf '%s\n' "$daemon_tail"; echo "--- end ---"
+                break
+            fi
+        done
+        restore_profile
+    else
+        printf '%s\n' "$seed_err" >&2
+        _record_fail "seed build (Track 2, packaged)" "$seed_err"
     fi
 else
     echo

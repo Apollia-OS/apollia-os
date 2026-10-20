@@ -50,8 +50,32 @@ pub(in crate::commands::agent) fn format_a2a_agent_list(resp: &serde_json::Value
 
 /// Render `agent info` from the local `agents.db` row when the runtime
 /// registry returns 404 (e.g. disabled or not-yet-loaded agents).
-pub(in crate::commands::agent) fn run_info_local_fallback(agent_id: &str, json: bool) -> i32 {
-    match local_agent_detail(agent_id) {
+pub(in crate::commands::agent) fn run_info_local_fallback(
+    agent_id: &str,
+    definition: Option<serde_json::Value>,
+    json: bool,
+) -> i32 {
+    let detail = match (local_agent_detail(agent_id), &definition) {
+        (Some(mut detail), _) => {
+            if let Some(map) = detail.as_object_mut() {
+                map.insert(
+                    "definition".into(),
+                    definition.clone().unwrap_or(serde_json::Value::Null),
+                );
+            }
+            Some(detail)
+        }
+        // A declarative agent runs no code: its definition is all there is.
+        (None, Some(definition)) => Some(serde_json::json!({
+            "agent_id": null,
+            "name": definition.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            "version": definition.get("version").cloned().unwrap_or(serde_json::Value::Null),
+            "state": "stopped",
+            "definition": definition,
+        })),
+        (None, None) => None,
+    };
+    match detail {
         Some(detail) => {
             if json {
                 println!(
@@ -60,6 +84,9 @@ pub(in crate::commands::agent) fn run_info_local_fallback(agent_id: &str, json: 
                 );
             } else {
                 format_local_agent_detail(&detail);
+                if let Some(definition) = &definition {
+                    super::print_definition_section(definition);
+                }
             }
             exit_codes::SUCCESS
         }
@@ -123,23 +150,23 @@ pub(in crate::commands::agent) fn format_status_snapshot(
     }
 }
 
-/// Load a detailed snapshot of an installed agent from `agents.db`, bypassing
+/// Load a detailed snapshot of a stored agent from `agents.db`, bypassing
 /// the runtime registry. Returned as a JSON value so it can be either pretty-
 /// printed via `format_local_agent_detail` or emitted verbatim with `--json`.
 pub(in crate::commands::agent) fn local_agent_detail(agent_id: &str) -> Option<serde_json::Value> {
     let repo = open_repository()?;
-    let entry = repo.get(agent_id).ok().flatten()?;
+    let entry = repo.stored(agent_id).ok().flatten()?;
+    let manifest = apollia_tools::manifest_of(&entry);
     let body = serde_json::json!({
         "agent_id": null,
         "name": entry.name,
         "version": entry.version,
         "state": if entry.enabled { "stopped" } else { "disabled" },
-        "supports_a2a": entry.manifest.supports_a2a,
-        "skills": entry.manifest.skills,
-        "manifest": entry.manifest,
-        "install_path": entry.install_path,
+        "supports_a2a": manifest.supports_a2a,
+        "skills": manifest.skills,
+        "manifest": manifest,
         "installed_at": entry.installed_at,
-        "_source": "local agents.db (runtime registry has no live entry - agent is disabled or failed to load)",
+        "_source": "local agents.db (runtime registry has no live entry - agent is disabled or stopped)",
     });
     Some(body)
 }
@@ -158,14 +185,9 @@ fn format_local_agent_detail(detail: &serde_json::Value) {
         .get("installed_at")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    let install_path = detail
-        .get("install_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
     println!("  Name         : {name}");
     println!("  Version      : {version}");
     println!("  State        : {state}  (from local agents.db; not running in registry)");
-    println!("  Install path : {install_path}");
     println!("  Installed at : {installed_at}");
     if let Some(manifest) = detail.get("manifest") {
         if let Some(skills) = manifest.get("skills").and_then(|s| s.as_array()) {
@@ -178,47 +200,15 @@ fn format_local_agent_detail(detail: &serde_json::Value) {
                 }
             }
         }
-        if let Some(tools) = manifest.get("tools_required").and_then(|t| t.as_array()) {
-            let names: Vec<&str> = tools.iter().filter_map(|v| v.as_str()).collect();
-            if !names.is_empty() {
-                println!("  Tools (required) : {}", names.join(", "));
-            }
-        }
     }
     note!(
         "  Hint         : run `apollia-os agent enable {name}` then `apollia-os agent start {name}` to load."
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// New commands (install/uninstall/enable/disable/update)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// The agent-code trust statement shown before every install.
-///
-/// Restates the v0.1.0 trust model: agent Python runs in-process with the full
-/// rights of the current user and there is no OS sandbox around agent code, so
-/// only audited agents should be installed.
-pub(in crate::commands::agent) fn trust_banner_text() -> &'static str {
-    "This agent runs Python in-process with the full rights of your user account: \
-     filesystem, network, and credentials in your keyring. There is no OS sandbox \
-     around agent code. Only install agents you have written or audited."
-}
-
-/// Prints the trust banner to stderr before an install proceeds.
-///
-/// Suppressed under `--json` so machine-readable output stays clean, matching the
-/// existing operator-warning convention. The banner is informational, not a
-/// prompt: it never blocks the install.
-pub(in crate::commands::agent) fn print_trust_banner(json: bool) {
-    if !json {
-        eprintln!("Security notice: {}", trust_banner_text());
-    }
-}
-
 /// Build a merged JSON array for `agent list --json`.
 pub(in crate::commands::agent) fn build_list_json(
-    installed: &[InstalledAgent],
+    installed: &[StoredAgent],
     runtime: &Option<serde_json::Value>,
 ) -> serde_json::Value {
     let runtime_agents = runtime
@@ -300,7 +290,7 @@ pub(in crate::commands::agent) fn build_list_json(
 
 /// Format an enriched agent list as a human-readable table.
 pub(in crate::commands::agent) fn format_enriched_agent_list(
-    installed: &[InstalledAgent],
+    installed: &[StoredAgent],
     runtime: &Option<serde_json::Value>,
 ) {
     let runtime_agents = runtime
@@ -428,37 +418,5 @@ pub(in crate::commands::agent) fn handle_error(err: ClientError, json: bool) -> 
             "runtime not started (connection refused)",
         ),
         other => crate::output::emit_error(json, exit_codes::GENERAL_ERROR, &other.to_string()),
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Logs
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Print a single audit event as an aligned text row for `agent logs`.
-pub(in crate::commands::agent) fn print_audit_event_row(e: &serde_json::Value) {
-    println!("{}", format_audit_event_row(e));
-}
-
-/// Format a single audit event as an aligned text row for `agent logs`.
-///
-/// Reads the audit-event JSON shape returned by `GET /api/v1/agents/:id/logs`
-/// (`started_at`, `tool_name`, `success`, `error_code`, `duration_ms`,
-/// `task_id`), matching what `agent logs --json` emits.
-pub(in crate::commands::agent) fn format_audit_event_row(e: &serde_json::Value) -> String {
-    let ts = e.get("started_at").and_then(|v| v.as_str()).unwrap_or("?");
-    let tool = e.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
-    let outcome = match e.get("success").and_then(|v| v.as_bool()) {
-        Some(true) => "ok",
-        Some(false) => e
-            .get("error_code")
-            .and_then(|v| v.as_str())
-            .unwrap_or("FAILED"),
-        None => "?",
-    };
-    let task = e.get("task_id").and_then(|v| v.as_str()).unwrap_or("-");
-    match e.get("duration_ms").and_then(|v| v.as_u64()) {
-        Some(ms) => format!("  {ts}  {tool:<32} {outcome:<8} {ms:>5}ms  task={task}"),
-        None => format!("  {ts}  {tool:<32} {outcome:<8}          task={task}"),
     }
 }

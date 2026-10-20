@@ -1,4 +1,4 @@
-//! MCP servers, STT configuration, audit, approvals and resilience.
+//! MCP servers, STT configuration, audit and resilience.
 
 use crate::client::{encode_path_segment, extract_error, ClientError, RuntimeClient};
 
@@ -11,6 +11,37 @@ impl RuntimeClient {
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
         let resp = self.post("/api/v1/mcp/servers", Some(body)).await?;
+        if resp.status >= 400 {
+            return Err(ClientError::ServerError {
+                status: resp.status,
+                body: extract_error(&resp.body, resp.status),
+            });
+        }
+        Ok(serde_json::from_str(&resp.body)?)
+    }
+
+    // ─── MCP bridge ───────────────────────────────────────────────────────────
+
+    /// The tools the MCP bridge serves via `GET /api/v1/mcp/bridge/tools`.
+    pub async fn mcp_bridge_tools(&self) -> Result<serde_json::Value, ClientError> {
+        let resp = self.get("/api/v1/mcp/bridge/tools").await?;
+        if resp.status >= 400 {
+            return Err(ClientError::ServerError {
+                status: resp.status,
+                body: extract_error(&resp.body, resp.status),
+            });
+        }
+        Ok(serde_json::from_str(&resp.body)?)
+    }
+
+    /// Run an exposed item to its end via `POST /api/v1/mcp/bridge/call`.
+    pub async fn mcp_bridge_call(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        let body = serde_json::json!({ "name": name, "arguments": arguments });
+        let resp = self.post("/api/v1/mcp/bridge/call", Some(&body)).await?;
         if resp.status >= 400 {
             return Err(ClientError::ServerError {
                 status: resp.status,
@@ -154,34 +185,6 @@ impl RuntimeClient {
         // idempotent), so an empty body is success, not malformed JSON.
         if resp.body.trim().is_empty() {
             return Ok(serde_json::json!({ "deleted": id }));
-        }
-        Ok(serde_json::from_str(&resp.body)?)
-    }
-
-    // ─── Audit ────────────────────────────────────────────────────────────────
-
-    /// Get audit statistics via `GET /api/v1/audit/stats`.
-    pub async fn get_audit_stats(&self) -> Result<serde_json::Value, ClientError> {
-        let resp = self.get("/api/v1/audit/stats").await?;
-        if resp.status >= 400 {
-            return Err(ClientError::ServerError {
-                status: resp.status,
-                body: extract_error(&resp.body, resp.status),
-            });
-        }
-        Ok(serde_json::from_str(&resp.body)?)
-    }
-
-    // ─── Approvals ────────────────────────────────────────────────────────────
-
-    /// List resolved HITL approvals via `GET /api/v1/approvals/resolved`.
-    pub async fn list_resolved_approvals(&self) -> Result<serde_json::Value, ClientError> {
-        let resp = self.get("/api/v1/approvals/resolved").await?;
-        if resp.status >= 400 {
-            return Err(ClientError::ServerError {
-                status: resp.status,
-                body: extract_error(&resp.body, resp.status),
-            });
         }
         Ok(serde_json::from_str(&resp.body)?)
     }

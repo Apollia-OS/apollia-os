@@ -16,8 +16,8 @@ sovereignty decision before it is a technical one.
 | Channel | What | Producer | Consumer |
 |---|---|---|---|
 | `tracing` | structured logs and spans | every crate | `tracing-subscriber` console, log files |
-| `EventBus` | runtime events | `apollia-runtime` actors | `AuditTrail`, CLI subscribers, desktop UI |
-| `AuditTrail` | append-only event ledger | `apollia-runtime` | SQLite, exported via `apollia audit list` |
+| `EventBus` | runtime events | `apollia-runtime` actors | the audit journal, CLI subscribers, desktop UI |
+| Audit journal | append-only, hash-chained event ledger | `apollia-runtime` | SQLite, read via `apollia-os audit journal`, exported via `apollia-os audit export` |
 | CLI human stdout | user-facing prose or table | `apollia-cli` only | terminal |
 | CLI machine stdout | `--json` payloads | `apollia-cli` only | scripts |
 
@@ -25,7 +25,7 @@ Rules :
 - `tracing` is the only acceptable log producer outside `apollia-cli`.
 - `println!`, `eprintln!`, `dbg!` are forbidden outside `apollia-cli`.
 - EventBus events are past-tense (they record what happened).
-- AuditTrail entries are immutable. No update, no delete.
+- Audit journal entries are immutable. No update, no delete.
 
 ---
 
@@ -108,9 +108,9 @@ that introduces it and update this file.
 |---|---|---|
 | `tool_name` | `&str` | tool invoked |
 | `backend` | `&str` | LLM or MCP backend name |
-| `provider` | `&str` | upstream provider (`anthropic`, `openai`, `ollama`, ...) |
-| `scope` | `&str` | permission scope (`session`, `project`, `global`) |
-| `decision` | `&str` | permission decision (`allow`, `ask`, `deny`) |
+| `provider` | `&str` | upstream provider (`llama-cpp`, `openai`, `ollama`) |
+| `scope` | `&str` | scope of a permission rule (`agent`, `global`) |
+| `decision` | `&str` | governance decision (`allowed`, `ask_user`, `pending`, `denied`) |
 | `reason` | `&str` | why the event happened, when the label cannot say it |
 | `detail` | `&str` | the consequence the label does not carry (`"agent starts degraded"`) |
 
@@ -181,7 +181,7 @@ or `model recommend` ranks models. All are `debug` except where noted.
 | `recommend.probe.failed` | `file`, `error` | a header that could not be read |
 | `recommend.ready` (info) | `recommended`, `top` | the ranked list, and the family at its head |
 | `recommend.hub.unreachable` (warn) | `detail` | no publisher answered, so there is no catalogue |
-| `recommend.manifest.invalid` (error) | `error` | the shipped generation table failed to load |
+| `recommend.registry.invalid` (error) | `error` | the model registry could not be read or its cards did not group |
 
 ### Completion timings
 
@@ -317,7 +317,7 @@ double the noise without doubling the information.
 
 | Convention | Rule |
 |---|---|
-| Naming | Past-tense, `UpperCamelCase` (`TaskCompleted`, `AgentLoadFailed`) |
+| Naming | Past-tense, `UpperCamelCase` (`TaskCompleted`, `AgentDegraded`) |
 | Variants | Carry typed fields, no `String` blobs |
 | Sensitive data | Never. PII or secrets must not appear in EventBus payloads |
 | Capacity | Bounded broadcast channel, capacity [64, 65536] |
@@ -334,20 +334,82 @@ category no listener reads reaches the interface and is dropped in silence.
 
 ---
 
-## 9. AuditTrail
+## 9. Audit journal
 
 The audit journal persists events to SQLite as a hash-chained,
 append-only ledger. Module : `crates/apollia-runtime/src/audit_journal/`.
-Retention is `retention_days` under `[observability]` in the config
-(`crates/apollia-core/src/observability.rs`), default 90 days. There is no
-`[audit]` table.
+Retention belongs to the signed organisation policy: `journal.retention_days`
+is the only thing that removes entries, after a signed `journal_purged` entry
+(`crates/apollia-runtime/src/audit_journal/actor/purge.rs`). Without a policy,
+or without that key, nothing is removed. `retention_days` under
+`[observability]` in `apollia.toml` (default 90) bounds the run history, not
+the journal. There is no `[audit]` table.
 
-CLI surface (`apollia audit ...`) : `list`, `journal`, `stats`, `export`,
-`verify`, `anchor`, `replay`, `show`.
+CLI surface (`apollia-os audit ...`) : `journal`, `export`, `verify`,
+`anchor`, `replay`, `show`.
 
 Add a new audit-worthy event by extending the `JournalEntryKind` enum,
 not by emitting a free-form string. Inter-agent mailbox events are
 journaled as `MessageSent`, `MessageDelivered`, and `MessageDropped`.
+Governance changes are journaled as `AccessChanged`, `AgentInstalled`,
+`AgentUpdated`, and `AgentUninstalled`, one run per agent
+(`governance:<agent_id>`), written through the `GovernanceContract` of
+`crates/apollia-runtime/src/governance/`. Connection changes are journaled as
+`ConnectionAdded`, `ConnectionModified`, `ConnectionRemoved`,
+`ConnectionWarningAccepted`, `ConnectionSecretSet`, `ConnectionSecretRemoved`,
+`AccountConnected`, `AccountDisconnected`, and `FolderAdded`, one run per
+connection (`connection:<connection_id>`), written through
+`ConnectionGovernance` in the same module. A secret is journaled by the name
+of its key, never by its value.
+The one-shot access upgrade run at startup records each conversion or
+removal it makes as an `AccessChanged` entry with the actor `upgrade` and a
+`reason`; a change that concerns every agent goes to the run
+`governance:*`.
+Decisions are journaled in the run of their agent: `ConsentAnswered` (once,
+always, refuse), `PolicyRefused` and `RuleRefused` from the decision on a
+tool call, `AlwaysWithdrawn` and `BatchAccessGranted` from the consent store,
+`RuleAdded` and `RuleRemoved` from the rule store (a rule binding every agent
+goes to `governance:rules:global`). None of them carries the argument of the
+call, its result, or a reason typed with a refusal. The stores of
+`governance.db` never write the journal: they leave each event in the
+`journal_outbox` table, in the same transaction as the change, and the
+governance actor moves it to the journal when it starts and whenever it reads
+the database again, so a change made by the CLI with no runtime running is
+journaled at the next start, dated when it was made. The run
+`governance:policy:organisation` holds `PolicyApplied` at each start (with the
+key fingerprint and the SHA-256 of the policy file), `PolicyChanged` when that
+digest differs from the last one applied, `PolicyUnreadable` with its reason,
+`PolicySettingEnforced` for each setting of the compatible server the policy
+fixes against a file that had left the server on and open (the entry names the
+dotted key and holds no value), and `FailClosedTriggered` on each entry into
+fail-closed. `JournalExported`
+goes to `governance:journal:export`.
+
+A change of `apollia.toml` is `ConfigurationChanged`, in the run
+`governance:configuration`, written by the configuration reloader
+(`crates/apollia-runtime/src/config_reload/journal.rs`) each time it applies a
+text. The payload names the dotted keys whose value changed, the origin
+(`editor`, `settings`, `cli`, `api`, `external_file`, `at_startup`) and the
+SHA-256 of the text before and after; it never carries a value. A caller of
+`PUT /api/v1/config` declares its origin; a file found changed by the watcher
+is `external_file`; a file whose fingerprint at startup is not the last one
+journaled is `at_startup`, which is how a write of the CLI made with no
+runtime running is journaled. The keys of that last case come from the copy of
+the last text applied, kept beside the file as `apollia.toml.applied` and
+trusted only when its fingerprint is the journaled one; otherwise the entry
+has no `keys` field.
+
+A request the compatible server received is `ServerCall`, in the run
+`server:calls`, written by a layer above every other layer of its router
+(`crates/apollia-runtime/src/compat_server/journal.rs`), so a request the
+token check refused has its entry too. The payload names the method and the
+path, the model or the agent the request named, the name of the token (never
+its value), the address read when the connection was accepted and whether it
+is the machine or the local network, the status, the tokens the answer stated
+and the duration; a call that started an agent or a workflow adds `task_id`
+and `run_id`. It never carries a message, an answer or a header. The entry of
+a stream is written when the stream closes, with the tokens read in passing
+from its events.
 
 ---
 

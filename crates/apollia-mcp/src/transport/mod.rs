@@ -7,6 +7,7 @@
 //! - [`SseTransport`]: persistent SSE stream with HTTP POST for requests.
 
 pub mod http;
+pub mod node;
 pub mod sse;
 pub mod stdio;
 
@@ -32,6 +33,14 @@ pub enum TransportError {
     /// The subprocess could not be spawned.
     #[error("subprocess spawn failed: {0}")]
     SpawnFailed(String),
+
+    /// The server runs on Node.js (`node` or `npx`) and the engine store holds
+    /// none yet. Installing Node.js through the engine store lifts it.
+    #[error("`{command}` requires Node.js, which Apollia installs and has not installed yet")]
+    NodeRequired {
+        /// The command of the configuration.
+        command: String,
+    },
 
     /// The transport channel was closed (remote end exited or pipe broken).
     #[error("transport closed")]
@@ -184,12 +193,13 @@ mod tests {
             env: HashMap::new(),
             transport: transport.to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 5,
             call_timeout_secs: 5,
             max_response_bytes: 8 * 1024 * 1024,
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         }
     }
 

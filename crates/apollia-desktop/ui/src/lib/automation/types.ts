@@ -121,6 +121,18 @@ export interface SelectOptionStep extends Target {
   index?: number;
   timeoutMs?: number;
 }
+/** Drag the target onto another element with the pointer: press on the
+ *  target, move past the drag threshold to the centre of the destination,
+ *  release there. Pointer events, not the drag and drop of HTML, which the
+ *  window keeps for the drops of the system and never delivers to the page. */
+export interface DragStep extends Target {
+  kind: "drag";
+  /** Exact `data-testid` of the element the target is released on. */
+  toTestid: string;
+  /** Which match of `toTestid`, as `nth` reads (negative counts from the end). */
+  toNth?: number;
+  timeoutMs?: number;
+}
 /** Dispatch a keyboard event (keydown/keypress/keyup) with optional modifiers.
  *  Targets the given testid (focused first) or, when none is given, the active
  *  element. Reaches window/document-level shortcut listeners via bubbling.
@@ -161,7 +173,7 @@ export interface PressStep extends Target {
  *  one armed across a turn. */
 export interface StubInvokeStep {
   kind: "stubInvoke";
-  /** Tauri command name, e.g. `list_projects` or `plugin:dialog|open`. */
+  /** Tauri command name, e.g. `list_agents` or `plugin:dialog|open`. */
   command: string;
   /** Resolve with this value (JSON `null` is a legal value: a cancelled picker). */
   resolve?: unknown;
@@ -228,6 +240,24 @@ export interface ClearToastsStep {
   kind: "clearToasts";
 }
 
+/**
+ * Hold the time elapsed since the launch to a budget.
+ *
+ * The clock starts when the webview starts loading the interface, which is
+ * the launch as a recipe can observe it: what the process does before its
+ * window exists is not counted, and neither is a compilation. The step fails
+ * past `maxMs`, and records the measure in the report either way, in
+ * milliseconds, under `captures[as]`. Place it right after the wait that
+ * closes the promise being measured.
+ */
+export interface ExpectElapsedStep {
+  kind: "expectElapsed";
+  /** Budget in milliseconds; the step fails when the elapsed time exceeds it. */
+  maxMs: number;
+  /** Key under which the measured milliseconds are recorded in the report. */
+  as: string;
+}
+
 export type Step =
   | GotoStep
   | WaitForStep
@@ -243,9 +273,11 @@ export type Step =
   | SetCheckedStep
   | SelectOptionStep
   | PressStep
+  | DragStep
   | StubInvokeStep
   | ClearStubsStep
   | ClearToastsStep
+  | ExpectElapsedStep
   | ResizeWindowStep
   | FaultStep
   | EmitEventStep;

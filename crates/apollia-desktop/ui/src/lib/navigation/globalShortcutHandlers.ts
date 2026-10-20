@@ -13,7 +13,14 @@
  *
  *  - `palette.open` (Cmd/Ctrl+K): the sole legacy owner was
  *    `$lib/keyboard/globalShortcuts`, removed in favour of this path.
- *  - `companion.focus` (Cmd/Ctrl+Shift+C): previously unhandled.
+ *  - `companion.toggle` (Cmd+/ on macOS, Ctrl+/ elsewhere): opens the detail
+ *    sidebar on the Guide tab, or collapses it when the guide is shown.
+ *  - `companion.focus` (Cmd/Ctrl+Shift+C): opens the Guide tab and focuses
+ *    its input.
+ *  - `chat.new_conversation` (Cmd/Ctrl+T): shows the chat and starts a new
+ *    conversation, unless the focus is in a text field.
+ *  - `settings.engines` (Cmd/Ctrl+Shift+R) and `settings.hardware`
+ *    (Cmd/Ctrl+Shift+H): open the settings window on the System group.
  *
  * The remaining global chords stay on the surfaces that already own them and
  * are tracked as a follow-up (each requires editing that surface to drop its
@@ -21,18 +28,25 @@
  *  - `help.overlay` (?)                -> KeyboardHintOverlay.svelte
  *  - `nav.back` / `nav.forward` (Cmd+[ / Cmd+]) -> Main.svelte
  *  - `nav.sidebar` (Cmd+B)             -> chat.toggle_sidebar (chat route)
- *  - `companion.toggle` (Cmd+/)        -> CompanionToggle.svelte + chat.help
- *  - `companion.move` (Cmd+Alt+Arrows) -> CompanionPanel.svelte (directional,
- *    not dispatchable by the catalog dispatcher)
  *  - `app.quit` (Cmd+Q)               -> native window manager
  */
 import { registerShortcutHandler } from "$lib/navigation/shortcutDispatcher";
+import { openNewChatRequested } from "$lib/stores/chat";
 import { commandPaletteOpen } from "$lib/stores/commandPalette";
-import { companionStore } from "$lib/stores/companion";
+import { detailSidebar } from "$lib/stores/detailSidebar";
+import { navigateTo } from "$lib/stores/navigation";
+import { openSettingsWindow } from "$lib/stores/settingsWindow";
+import type { SettingsSubRoute } from "$lib/stores/settings";
+
+/** The System sections each have a chord that opens the settings on them. */
+export const SETTINGS_SECTION_SHORTCUTS: Readonly<Record<string, SettingsSubRoute>> = {
+  "settings.engines": "engines",
+  "settings.hardware": "hardware",
+};
 
 /**
- * Focus the Companion chat input once the panel has had a frame to render.
- * The lookup is scoped to the panel and fails silently when the input is not
+ * Focus the guide's chat input once the Guide tab has had a frame to render.
+ * The lookup is scoped to the tab and fails silently when the input is not
  * present, so a missing surface never throws.
  */
 function focusCompanionInput(): void {
@@ -58,13 +72,34 @@ export function registerGlobalShortcutHandlers(): () => void {
       handler: () => commandPaletteOpen.update((open) => !open),
     }),
     registerShortcutHandler({
+      id: "chat.new_conversation",
+      handler: () => {
+        navigateTo("chat");
+        openNewChatRequested.set(Date.now());
+      },
+    }),
+    registerShortcutHandler({
+      id: "companion.toggle",
+      allowInInput: true,
+      handler: () => detailSidebar.toggleGuide(),
+    }),
+    registerShortcutHandler({
       id: "companion.focus",
       allowInInput: true,
       handler: () => {
-        companionStore.openCompanion();
+        detailSidebar.openGuide();
         focusCompanionInput();
       },
     }),
+    ...Object.entries(SETTINGS_SECTION_SHORTCUTS).map(([id, section]) =>
+      registerShortcutHandler({
+        id,
+        allowInInput: true,
+        handler: () => {
+          openSettingsWindow(section);
+        },
+      }),
+    ),
   ];
 
   return () => {

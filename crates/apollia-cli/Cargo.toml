@@ -1,6 +1,6 @@
 [package]
 name = "apollia-cli"
-version = "0.2.0-preview"
+version = "0.3.0"
 edition.workspace = true
 description = "Apollia OS CLI binary (apollia-os)"
 license.workspace = true
@@ -22,9 +22,13 @@ path = "src/main.rs"
 ## Documentation generation (CLI reference). Pulls clap-markdown and is excluded
 ## from the default build, so the shipped binary carries no doc-tooling surface.
 gen-docs = ["dep:clap-markdown"]
+## Optical character recognition of scanned pages and pictures in sources.
+## Compiles Tesseract from source and links it statically; off by default.
+ocr = ["apollia-runtime/ocr"]
 
 [dependencies]
 apollia-auth      = { workspace = true }
+apollia-signing   = { workspace = true }
 apollia-connectors = { workspace = true }
 apollia-core      = { workspace = true, features = ["net"] }
 apollia-workspace = { workspace = true }
@@ -32,7 +36,6 @@ apollia-aip      = { workspace = true }
 apollia-mcp      = { workspace = true }
 apollia-permissions = { workspace = true }
 apollia-tools    = { workspace = true }
-apollia-triggers = { workspace = true }
 apollia-memory   = { workspace = true }
 apollia-oria     = { workspace = true }
 apollia-runtime  = { workspace = true }
@@ -42,7 +45,6 @@ chrono           = { workspace = true }
 tokio              = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
-serde_yaml         = { workspace = true }
 thiserror          = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -57,9 +59,7 @@ toml               = { workspace = true }
 toml_edit          = { workspace = true }
 rpassword          = { workspace = true }
 pyo3               = { workspace = true }
-async-trait        = { workspace = true }
 futures            = { workspace = true }
-hf-hub             = { workspace = true }
 indicatif          = { workspace = true }
 semver             = { workspace = true }
 scopeguard         = { workspace = true }

@@ -42,12 +42,29 @@ export const currentSession = writable<
 export const pendingChatSessionId = writable<string | null>(null);
 
 /**
+ * What another screen hands the composer of a conversation it opened: the
+ * text of the request, written but not sent, and the files joined to it.
+ * The composer of that conversation takes it once; nothing is sent until the
+ * person sends it.
+ */
+export interface PendingComposer {
+  sessionId: string;
+  text: string;
+  files: File[];
+}
+
+export const pendingComposer = writable<PendingComposer | null>(null);
+
+/**
  * Cross-component signal: sidebar / command palette flips this to
  * `Date.now()`, `Chat.svelte` watches it and opens the new-chat picker.
  */
 export const openNewChatRequested = writable<number>(0);
 
-/** Whether user memory injection is enabled for the current session. */
+/**
+ * Profile switch of the current session, as the session stores it: whether
+ * the built-in assistant receives the profile of the conversation.
+ */
 export const useUserMemory = writable<boolean>(true);
 
 /** Number of user memory entries injected into the current session. */

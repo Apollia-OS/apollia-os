@@ -65,6 +65,7 @@ SCHEMAS = {
     "setChecked": ({"checked"}, set(), "one"),
     "selectOption": (set(), {"timeoutMs", "value", "labelText", "index"}, "one"),
     "press": ({"key"}, {"meta", "ctrl", "shift", "alt", "mod", "timeoutMs"}, "opt"),
+    "drag": ({"toTestid"}, {"toNth", "timeoutMs"}, "one"),
     # Exactly one of resolve/reject/patch, by key presence (`"resolve": null`
     # is a cancelled picker); checked in check_step like selectOption.
     "stubInvoke": ({"command"}, {"resolve", "reject", "patch", "once", "argsMatch"}, None),
@@ -73,6 +74,7 @@ SCHEMAS = {
     "resizeWindow": ({"width", "height"}, set(), None),
     "fault": ({"name"}, set(), None),
     "emitEvent": ({"event"}, {"payload"}, None),
+    "expectElapsed": ({"maxMs", "as"}, set(), None),
 }
 SCRIPT_KEYS = {"name", "stopOnError", "destructive", "notes", "dynamicTestids", "steps"}
 
@@ -235,8 +237,10 @@ def build_corpus(ui_root=UI):
                     prefixes.update(lit + frags[1] for lit in pool)  # `{testid}-{opt.value}`
         # TabBar/FilterChipBar: a `testidPrefix="X"` prop yields child ids
         # `X-tabbar`, `X-tab-<key>` (TabBar) and `X-<key>` (FilterChipBar).
-        # SplitLayout: sidebarTestid="X" / detailTestid="X" render as data-testid.
-        for pm in re.finditer(f'(?:sidebarTestid|detailTestid)\\s*=\\s*["\\\']({ID}+)["\\\']', txt):
+        # SplitLayout: sidebarTestid="X" / detailTestid="X" render as data-testid,
+        # and so do DetailHeader's titleTestid="X" on its title and Tooltip's
+        # triggerTestid="X" on its trigger.
+        for pm in re.finditer(f'(?:sidebarTestid|detailTestid|titleTestid|triggerTestid)\\s*=\\s*["\\\']({ID}+)["\\\']', txt):
             static_ids.add(pm.group(1))
         for pm in re.finditer(f'testidPrefix\\s*=\\s*["\\\']({ID}+)["\\\']', txt):
             X = pm.group(1)

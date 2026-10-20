@@ -1,17 +1,18 @@
 <script lang="ts">
   /**
-   * CustomMcpForm - the "custom MCP server" builder (transport, env, approval).
+   * CustomMcpForm - the "custom connection" builder: an address and headers;
+   * in developer mode also the transport and the command line.
    *
    * Self-contained: owns its form state and the test / install IPC calls, and
    * emits `oninstalled` once a server is added so the parent can refresh + close.
    */
   import { t } from "svelte-i18n";
+  import { developerMode } from "$lib/stores/developerMode";
   import { ErrorBanner } from "$lib/components/operator";
   import { Banner } from "$lib/components/ui/banner";
   import { Input } from "$lib/components/ui/input";
   import { Select } from "$lib/components/ui/select";
   import { Textarea } from "$lib/components/ui/textarea";
-  import { Checkbox } from "$lib/components/ui/checkbox";
   import { Button } from "$lib/components/ui/button";
   import { addMcpServer, testMcpConnection } from "$lib/ipc/connections";
   import { formatTauriError } from "$lib/connections/errors";
@@ -30,8 +31,13 @@
     args: "",
     url: "",
     headers: "",
-    requires_approval: true,
   });
+  /**
+   * The transport the form builds. Outside the developer mode a custom
+   * connection is one reached at an address: the transport and the command
+   * line are developer-mode choices.
+   */
+  const transport = $derived<CustomTransport>($developerMode ? form.transport : "streamable-http");
   let busy = $state(false);
   let error = $state<string | null>(null);
   let testResult = $state<string | null>(null);
@@ -57,11 +63,10 @@
     const base: Record<string, unknown> = {
       name: sanitizeServerName(form.name || "custom-mcp"),
       env,
-      transport: form.transport,
-      requires_approval: form.requires_approval,
+      transport,
       tags: [],
     };
-    if (form.transport === "stdio") {
+    if (transport === "stdio") {
       if (!form.command.trim()) {
         error = $t("connections.custom_error_command_required");
         return null;
@@ -120,7 +125,9 @@
 </script>
 
 <div class="max-w-2xl flex-1 overflow-auto px-6 pb-6 pt-4">
-  <p class="mb-4 text-body-xs text-muted-foreground">{$t("connections.custom_intro")}</p>
+  <p class="mb-4 text-body-xs text-muted-foreground">
+    {$developerMode ? $t("dev.connections.custom_intro") : $t("connections.custom_intro")}
+  </p>
 
   <div class="space-y-3">
     <label class="block text-label-sm font-medium text-foreground">
@@ -135,16 +142,18 @@
       />
     </label>
 
-    <label class="block text-label-sm font-medium text-foreground">
-      {$t("connections.custom_transport_label")}
-      <Select class="mt-1" bind:value={form.transport} disabled={busy} data-testid="custom-mcp-transport-select">
-        <option value="stdio">{$t("connections.custom_transport_stdio")}</option>
-        <option value="streamable-http">{$t("connections.custom_transport_http")}</option>
-        <option value="sse">{$t("connections.custom_transport_sse")}</option>
-      </Select>
-    </label>
+    {#if $developerMode}
+      <label class="block text-label-sm font-medium text-foreground">
+        {$t("dev.connections.custom_transport_label")}
+        <Select class="mt-1" bind:value={form.transport} disabled={busy} data-testid="custom-mcp-transport-select">
+          <option value="stdio">{$t("dev.connections.custom_transport_stdio")}</option>
+          <option value="streamable-http">{$t("dev.connections.custom_transport_http")}</option>
+          <option value="sse">{$t("dev.connections.custom_transport_sse")}</option>
+        </Select>
+      </label>
+    {/if}
 
-    {#if form.transport === "stdio"}
+    {#if transport === "stdio"}
       <label class="block text-label-sm font-medium text-foreground">
         {$t("connections.custom_command_label")}
         <!-- i18n-ignore: executable names and a filesystem path -->
@@ -175,7 +184,7 @@
         <Input
           type="url"
           class="mt-1 font-mono"
-          placeholder="https://mcp.example.com/v1"
+          placeholder="https://example.com/connection"
           bind:value={form.url}
           disabled={busy}
           data-testid="custom-mcp-url-input"
@@ -184,25 +193,20 @@
     {/if}
 
     <label class="block text-label-sm font-medium text-foreground">
-      {form.transport === "stdio"
+      {transport === "stdio"
         ? $t("connections.custom_env_label")
         : $t("connections.custom_headers_label")}
       <span class="font-normal text-muted-foreground">{@html $t("connections.custom_env_hint_html")}</span>
       <Textarea
         class="mt-1 font-mono"
         rows={3}
-        placeholder={form.transport === "stdio"
+        placeholder={transport === "stdio"
           ? "NOTION_TOKEN=ntn_xxxxx\nDEBUG=1"
           : "Authorization=Bearer xxx\nX-Custom-Header=value"}
         bind:value={form.headers}
         disabled={busy}
         data-testid="custom-mcp-env-input"
       />
-    </label>
-
-    <label class="flex items-center gap-2 pt-1 text-label-sm font-medium text-foreground">
-      <Checkbox bind:checked={form.requires_approval} disabled={busy} data-testid="custom-mcp-approval-toggle" />
-      {$t("connections.custom_require_approval")}
     </label>
   </div>
 

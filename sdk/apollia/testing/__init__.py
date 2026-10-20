@@ -1,14 +1,14 @@
 """Apollia SDK testing utilities.
 
-The recommended entry point is :func:`mock`::
+The entry point is :class:`MockContext`, the ``ctx`` a tool or a workflow
+receives. Both are plain ``async def`` functions, awaited as written::
 
-    from apollia.testing import mock, assert_result_completed, assert_skill_called
+    from apollia.testing import MockContext, assert_llm_called
 
-    agent, ctx = mock(MyAgent)
+    ctx = MockContext()
     ctx.llm.responses = [{"content": "answer"}]
-    result = await agent.invoke_skill("my.skill", x=1)
-    assert_result_completed(result)
-    assert_skill_called(ctx, "child.worker")
+    result = await my_workflow(ctx, {"path": "notes.txt"})
+    assert_llm_called(ctx, times=1)
 """
 
 from apollia.testing.assertions import (
@@ -19,12 +19,11 @@ from apollia.testing.assertions import (
     assert_result_completed,
     assert_result_failed,
     assert_result_input_required,
-    assert_skill_called,
     assert_template_rendered,
     assert_tool_called,
 )
 from apollia.testing.context import (
-    MockA2A,
+    MockAgents,
     MockBudget,
     MockDatasources,
     MockEvents,
@@ -33,9 +32,11 @@ from apollia.testing.context import (
     MockSecrets,
     MockStt,
     MockTemplates,
+    MockUser,
+    MockWorkflows,
     MockWorkspace,
 )
-from apollia.testing.mock_factory import MockContext, mock
+from apollia.testing.mock_factory import MockContext
 from apollia.testing.mocks import (
     MockLlmProxy,
     MockLlmResponse,
@@ -45,7 +46,7 @@ from apollia.testing.mocks import (
 
 __all__ = [
     # Per-surface mocks (advanced usage)
-    "MockA2A",
+    "MockAgents",
     "MockBudget",
     "MockContext",
     "MockDatasources",
@@ -59,6 +60,8 @@ __all__ = [
     "MockStt",
     "MockTemplates",
     "MockToolProxy",
+    "MockUser",
+    "MockWorkflows",
     "MockWorkspace",
     # Interaction assertions
     "assert_emitted_thought",
@@ -69,9 +72,6 @@ __all__ = [
     "assert_result_completed",
     "assert_result_failed",
     "assert_result_input_required",
-    "assert_skill_called",
     "assert_template_rendered",
     "assert_tool_called",
-    # Factory + main context
-    "mock",
 ]

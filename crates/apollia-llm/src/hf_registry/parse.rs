@@ -5,10 +5,9 @@
 //! turn them into the crate's types live here.
 
 use crate::hardware::{CompatibilityBadge, HardwareProfile};
-use crate::hf_registry::compat::{compat_from_pipeline_tag, extract_model_type};
+use crate::hf_registry::compat::{compat_from_pipeline_tag, extract_config_facts, ConfigFacts};
 use crate::hf_registry::{
-    CompatIssue, HfFile, HfModelCard, HfModelTypeCache, HfSearchFilter, TreeEntry, HF_API_BASE,
-    HF_CDN_BASE,
+    CompatIssue, HfFile, HfModelCard, HfModelTypeCache, TreeEntry, HF_CDN_BASE,
 };
 
 /// Extract the `base_model` (org/name) from the `/api/models/{id}` response.
@@ -81,17 +80,65 @@ pub(super) fn build_gguf_files(
         .filter(|e| e.entry_type == "file" && e.path.ends_with(".gguf"))
         .map(|e| {
             let size_bytes = e.size;
-            let size_gb = size_bytes as f64 / 1_073_741_824.0;
-            let compatibility = hardware.map(|hw| CompatibilityBadge::compute(size_gb, hw));
+            let compatibility = hardware.map(|hw| listed_file_badge(size_bytes, hw));
             HfFile {
                 filename: e.path.clone(),
                 size_bytes,
                 size_human: format_size(size_bytes),
                 compatibility,
                 download_url: format!("{HF_CDN_BASE}/{repo_id}/resolve/main/{}", e.path),
+                sha256: e.lfs.as_ref().and_then(|lfs| normalize_sha256(&lfs.oid)),
+                quantization: file_quantization(&e.path),
             }
         })
         .collect()
+}
+
+/// The quantisation a file name declares, a projector never declaring one.
+fn file_quantization(path: &str) -> Option<String> {
+    if crate::model_index::is_projector_name(std::path::Path::new(path)) {
+        return None;
+    }
+    crate::recommend::gguf_file_quantization(path)
+}
+
+/// The badge of a file the Hub lists by size alone.
+///
+/// No header has been read, so the estimator's proportional cache applies;
+/// the verdict is still the one [`crate::recommend::fit::grade`] gives every
+/// other surface for the same inputs.
+pub(crate) fn listed_file_badge(size_bytes: u64, hardware: &HardwareProfile) -> CompatibilityBadge {
+    crate::recommend::assess_fit(
+        size_bytes,
+        &crate::gguf_probe::GgufHeaderFacts::default(),
+        hardware,
+        &crate::recommend::RuntimeShape::default(),
+    )
+    .badge
+}
+
+/// Map every LFS file of a repository tree to its SHA-256.
+///
+/// HuggingFace publishes the content hash of an LFS file as `lfs.oid`. A file
+/// committed outside LFS carries a git blob id instead (`oid` at the top
+/// level, SHA-1 of the git object, not of the content) and is left out.
+pub(super) fn lfs_sha256_by_path(
+    tree_entries: &[TreeEntry],
+) -> std::collections::HashMap<String, String> {
+    tree_entries
+        .iter()
+        .filter(|e| e.entry_type == "file")
+        .filter_map(|e| {
+            let sha = normalize_sha256(&e.lfs.as_ref()?.oid)?;
+            Some((e.path.clone(), sha))
+        })
+        .collect()
+}
+
+/// A SHA-256 as 64 lowercase hex digits, or `None` when `raw` is not one.
+pub(super) fn normalize_sha256(raw: &str) -> Option<String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    (lower.len() == 64 && lower.bytes().all(|b| b.is_ascii_hexdigit())).then_some(lower)
 }
 /// Re-evaluate `NoGgufFiles` from the authoritative tree data.
 pub(super) fn reevaluate_gguf_compat(card: &mut HfModelCard) {
@@ -105,69 +152,25 @@ pub(super) fn reevaluate_gguf_compat(card: &mut HfModelCard) {
         _ => {}
     }
 }
-/// Determine the `model_type`: prefer the cache, then `config.json`.
+/// Determine what `config.json` says: prefer the cache, then the response.
 /// On a miss, populate the cache with the resolved value.
-pub(super) async fn resolve_model_type(
-    cached_model_type: Option<Option<String>>,
+pub(super) async fn resolve_config_facts(
+    cached: Option<Option<ConfigFacts>>,
     config_resp: Result<Option<reqwest::Response>, reqwest::Error>,
     type_cache: Option<&HfModelTypeCache>,
     repo_id: &str,
-) -> Option<String> {
-    if let Some(cached) = cached_model_type {
+) -> Option<ConfigFacts> {
+    if let Some(cached) = cached {
         return cached;
     }
-    let mt = match config_resp {
-        Ok(Some(r)) => extract_model_type(Ok(r)).await,
+    let facts = match config_resp {
+        Ok(Some(r)) => extract_config_facts(Ok(r)).await,
         _ => None,
     };
     if let Some(cache) = type_cache {
-        cache.set(repo_id, mt.clone()).await;
+        cache.set(repo_id, facts.clone()).await;
     }
-    mt
-}
-/// Build the `/api/models` search URL from the query and filters.
-pub(super) fn build_search_url(query: &str, filter: &HfSearchFilter) -> String {
-    let sort = filter.sort.as_deref().unwrap_or("downloads");
-    let tag = filter.filter.as_deref().unwrap_or("gguf");
-    let limit = filter.limit.unwrap_or(50);
-
-    let mut u = format!("{HF_API_BASE}/models?filter={tag}&sort={sort}&limit={limit}&full=false");
-    if !query.is_empty() {
-        // URL-encode the query to handle spaces and special chars.
-        let encoded: String = query
-            .chars()
-            .flat_map(|c| {
-                if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                    vec![c]
-                } else {
-                    format!("%{:02X}", c as u32).chars().collect::<Vec<_>>()
-                }
-            })
-            .collect();
-        u.push_str(&format!("&search={encoded}"));
-    }
-    if let Some(pt) = filter.pipeline_tag.as_deref() {
-        u.push_str(&format!("&pipeline_tag={pt}"));
-    }
-    if let Some(lang) = filter.language.as_deref() {
-        u.push_str(&format!("&language={lang}"));
-    }
-    u
-}
-/// Extract the `rel="next"` URL from HuggingFace's HTTP `Link` header.
-///
-/// Format: `Link: <https://huggingface.co/api/models?...>; rel="next", <...>; rel="first"`
-pub(super) fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
-    let link = headers.get("Link")?.to_str().ok()?;
-    for part in link.split(',') {
-        let part = part.trim();
-        if part.contains(r#"rel="next""#) {
-            if let (Some(start), Some(end)) = (part.find('<'), part.find('>')) {
-                return Some(part[start + 1..end].to_string());
-            }
-        }
-    }
-    None
+    facts
 }
 /// Extract the basic metadata of a model from the HF JSON response.
 /// Does NOT include file sizes (available only via the tree API).
@@ -182,6 +185,7 @@ pub(super) fn parse_model_list_item(
     let author = json["author"].as_str().map(String::from);
     let downloads = json["downloads"].as_u64().unwrap_or(0);
     let likes = json["likes"].as_u64().unwrap_or(0);
+    let last_modified = json["lastModified"].as_str().map(String::from);
     let gated = json["gated"].as_bool().unwrap_or(false);
     let tags: Vec<String> = json["tags"]
         .as_array()
@@ -222,6 +226,8 @@ pub(super) fn parse_model_list_item(
                         size_human: String::new(),
                         compatibility: None,
                         download_url: format!("{HF_CDN_BASE}/{repo_id}/resolve/main/{name}"),
+                        sha256: None,
+                        quantization: file_quantization(name),
                     })
                 })
                 .collect()
@@ -233,11 +239,22 @@ pub(super) fn parse_model_list_item(
         compatibility_issue = Some(CompatIssue::NoGgufFiles);
     }
 
+    let publisher_kind = crate::recommend::publisher_kind(&repo_id);
+    // A search result lists names only: no template, so tools and reasoning
+    // stay unknown, and vision is the projector a download would fetch.
+    let capabilities = crate::capabilities::Capabilities::default().with_catalogue_vision(
+        gguf_files
+            .iter()
+            .any(|f| crate::model_index::is_projector_name(std::path::Path::new(&f.filename))),
+    );
+
     Some(HfModelCard {
         repo_id,
         author,
+        publisher_kind,
         downloads,
         likes,
+        last_modified,
         license,
         tags,
         gated,
@@ -246,6 +263,8 @@ pub(super) fn parse_model_list_item(
         generation_config: None,
         compatibility_issue,
         model_type: None,
+        capabilities,
+        variants: Vec::new(),
     })
 }
 pub(super) fn format_size(bytes: u64) -> String {

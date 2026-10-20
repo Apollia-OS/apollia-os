@@ -18,8 +18,6 @@ pub use tool_proxy::{
 };
 pub use workspace::WorkspaceContextPy;
 
-use std::collections::HashMap;
-
 use apollia_core::events::{AgentId, EventBusSender, RuntimeEvent};
 use apollia_llm::StepBudgetView;
 use apollia_runtime::a2a::A2AInvoker;
@@ -92,19 +90,15 @@ pub struct RuntimeContext {
     /// Optional recipient allowlist for `ctx.mail.send`. `None` means any
     /// registered agent (once `supports_mailbox` is true).
     mailbox_allowlist: Option<Vec<String>>,
-    /// Whether `ctx.mail.send` is gated behind human approval (opt-in via the
-    /// manifest `tools_requiring_approval` containing `mailbox:send`).
+    /// Whether `ctx.mail.send` is gated behind human approval, as the host
+    /// sets it for the run.
     mailbox_send_requires_approval: bool,
     /// Name of the agent owning this context.
     agent_name: String,
-    /// User memory injected in chat mode; `None` in task mode.
-    ///
-    /// Structure: `{"preferences": [("key", "value"), ...], "habits": [...], "context": [...]}`.
-    /// The agent decides what to do with it; this is never deterministic.
-    user_context: Option<HashMap<String, Vec<(String, String)>>>,
     /// High-level A2A orchestrator; `None` if unavailable in this context.
     ///
-    /// Exposes `ctx.a2a_invoke`, `ctx.a2a_discover`, `ctx.a2a_list_skills` to Python agents.
+    /// No Python surface exposes it: `ctx.mail` reads the agent directory
+    /// through it.
     a2a_invoker: Option<Arc<A2AInvoker>>,
     /// If `true`, the agent can write into the global user memory (`__user__`)
     /// via `ctx.memory.remember_user()`. Reading the `__user__` namespace is
@@ -159,13 +153,6 @@ pub struct RuntimeContext {
     task_id: Option<String>,
 
     // Nested surfaces
-    /// Consolidated A2A facade: `ctx.a2a`.
-    ///
-    /// Shares the same `Arc<A2AInvoker>` as [`Self::a2a_invoker`]. Always built
-    /// (the agent always sees `ctx.a2a`, but the methods raise `RuntimeError`
-    /// when the invoker is unavailable).
-    a2a_iface: Option<Py<crate::a2a::A2AInterface>>,
-
     /// Typed event-emission surface: `ctx.events`.
     ///
     /// Always built (at worst in silent no-op mode when the bus is absent).
@@ -228,7 +215,7 @@ impl RuntimeContext {
     /// Injected tools proxy; `None` if no tool is allocated.
     ///
     /// Python property `ctx.tools`. Returns Python `None` (no exception) if the
-    /// agent has no `tools_required` or the factory did not provide a proxy.
+    /// run was granted no tool or the factory did not provide a proxy.
     ///
     /// ctx-attachment: optional, the production constructor takes an `Option` and
     ///     leaves `tools` unset when the agent declares no tool.
@@ -375,23 +362,6 @@ impl RuntimeContext {
     }
 
     // Getters for the nested surfaces.
-    /// Consolidated A2A facade: `ctx.a2a`.
-    ///
-    /// Always returns an `A2AInterface` (never `None`); the internal methods
-    /// raise `RuntimeError("A2A invoker not available ...")` if the runtime has
-    /// no active invoker. This uniformity spares the agent from branching on
-    /// the presence of `ctx.a2a`.
-    ///
-    /// ctx-attachment: always, `a2a_iface` is built systematically by the production
-    ///     constructor; the methods raise when the invoker is missing.
-    #[getter]
-    fn a2a(&self, py: Python<'_>) -> PyObject {
-        match &self.a2a_iface {
-            Some(p) => p.clone_ref(py).into_any(),
-            None => py.None(),
-        }
-    }
-
     /// Asynchronous inter-agent messaging: `ctx.mail`.
     ///
     /// Built on each access so the caller's current `run_id` (set after
@@ -508,19 +478,6 @@ impl RuntimeContext {
         logging.call_method1("getLogger", (logger_name,))
     }
 
-    /// User context injected in chat mode; `None` in task mode.
-    ///
-    /// Python property `ctx.user_context`. Returns a `dict[str, list[tuple[str, str]]]`
-    /// with the categories `preferences`, `habits`, `context`, or Python `None`
-    /// if the agent is not in chat mode or the user memory is empty.
-    #[getter]
-    fn user_context(&self, py: Python<'_>) -> PyResult<PyObject> {
-        match &self.user_context {
-            Some(ctx) => Ok(ctx.clone().into_pyobject(py)?.into_any().unbind()),
-            None => Ok(py.None()),
-        }
-    }
-
     /// Whether this agent can write into the global user memory (`__user__`)
     /// via `ctx.memory.remember_user()`.
     ///
@@ -599,99 +556,15 @@ impl RuntimeContext {
     }
 }
 
-/// Computes the effective memory namespace for an agent in a session context.
-///
-/// If the agent runs inside a project (`project_id` not empty), the namespace
-/// is prefixed with the `project_id` to guarantee isolation between projects.
-///
-/// Convention: `"{project_id}:{manifest_namespace}"` | `"{manifest_namespace}"`
-///
-/// The `shared_memory_namespaces` are NOT prefixed; they are global.
-pub fn effective_memory_namespace(manifest_namespace: &str, project_id: Option<&str>) -> String {
-    match project_id {
-        Some(pid) if !pid.is_empty() => format!("{pid}:{manifest_namespace}"),
-        _ => manifest_namespace.to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod runtime_context_tests {
 
     use super::*;
 
     use apollia_core::events::RuntimeEvent;
-    use apollia_llm::{ObservabilityConfig, StepBudgetView, ToolCallHelper, ToolInvoker};
-    use std::pin::Pin;
+    use apollia_llm::{LlmRouter, ObservabilityConfig, StepBudgetView};
     use std::sync::Arc;
     use tokio::sync::broadcast;
-
-    use apollia_llm::{
-        CompletionModel, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmRouter,
-        StreamChunk, TokenUsage,
-    };
-    use futures::Stream;
-
-    // Mocks for building the ToolCallHelper (never actually called).
-
-    struct NoopModel;
-
-    #[async_trait::async_trait]
-    impl CompletionModel for NoopModel {
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-            Ok(CompletionResponse {
-                engine_timings: None,
-                content: String::new(),
-                tool_calls: vec![],
-                usage: TokenUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cost_usd: None,
-                    ..Default::default()
-                },
-                finish_reason: FinishReason::Stop,
-                latency_ms: 0,
-                ttft_ms: None,
-            })
-        }
-
-        async fn stream(
-            &self,
-            _req: CompletionRequest,
-        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk, LlmError>> + Send>>, LlmError>
-        {
-            Ok(Box::pin(futures::stream::empty()))
-        }
-
-        fn is_available(&self) -> bool {
-            true
-        }
-        fn backend_name(&self) -> &str {
-            "noop"
-        }
-        fn model_id(&self) -> &str {
-            "noop"
-        }
-    }
-
-    struct NoopInvoker;
-
-    #[async_trait::async_trait]
-    impl ToolInvoker for NoopInvoker {
-        async fn invoke(
-            &self,
-            _tool_name: &str,
-            _arguments: &serde_json::Value,
-        ) -> Result<String, String> {
-            Ok(String::new())
-        }
-    }
-
-    fn make_tool_helper() -> Arc<ToolCallHelper> {
-        Arc::new(ToolCallHelper::new(
-            Arc::new(NoopModel),
-            Arc::new(NoopInvoker),
-        ))
-    }
 
     /// `ctx.llm` is `None` if the router has no backend.
     #[tokio::test]
@@ -703,7 +576,6 @@ mod runtime_context_tests {
         let ctx = RuntimeContext::new_with_llm(
             Some(router),
             Arc::new(StepBudgetView::unlimited()),
-            make_tool_helper(),
             Arc::new(ObservabilityConfig::default()),
             tx,
             AgentId::new_v4(),
@@ -711,7 +583,6 @@ mod runtime_context_tests {
             None,          // memory_interface
             None,          // mailbox
             String::new(), // agent_name
-            None,          // user_context
             None,          // a2a_invoker
             false,         // user_memory_writable
         );
@@ -730,7 +601,6 @@ mod runtime_context_tests {
         let _ctx = RuntimeContext::new_with_llm(
             Some(router),
             Arc::new(StepBudgetView::unlimited()),
-            make_tool_helper(),
             Arc::new(ObservabilityConfig::default()),
             tx,
             agent_id,
@@ -738,7 +608,6 @@ mod runtime_context_tests {
             None,          // memory_interface
             None,          // mailbox
             String::new(), // agent_name
-            None,          // user_context
             None,          // a2a_invoker
             false,         // user_memory_writable
         );
@@ -763,7 +632,6 @@ mod runtime_context_tests {
         let ctx = RuntimeContext::new_with_llm(
             None,
             Arc::new(StepBudgetView::unlimited()),
-            make_tool_helper(),
             Arc::new(ObservabilityConfig::default()),
             tx,
             AgentId::new_v4(),
@@ -771,7 +639,6 @@ mod runtime_context_tests {
             None,          // memory_interface
             None,          // mailbox
             String::new(), // agent_name
-            None,          // user_context
             None,          // a2a_invoker
             false,         // user_memory_writable
         );
@@ -813,6 +680,28 @@ mod runtime_context_tests {
         });
     }
 
+    // The context a tool or a workflow receives carries no call between
+    // agents of its own and its `ctx.llm` no tool loop.
+    #[test]
+    fn test_the_context_exposes_neither_a2a_nor_the_tool_loop() {
+        // GIVEN the context of a package tool and the class of `ctx.llm`
+        pyo3::prepare_freethreaded_python();
+        pyo3::Python::with_gil(|py| {
+            let ctx = Py::new(py, RuntimeContext::for_test()).expect("context");
+            let llm = py.get_type::<crate::llm::LlmProxy>();
+
+            // WHEN Python looks the former members up
+            let a2a = ctx.bind(py).hasattr("a2a").expect("hasattr");
+            let tool_loop = llm.hasattr("run_tools").expect("hasattr");
+            let mail = ctx.bind(py).hasattr("mail").expect("hasattr");
+
+            // THEN neither is bound, and `ctx.mail` still is
+            assert!(!a2a, "ctx.a2a is still bound");
+            assert!(!tool_loop, "ctx.llm.run_tools is still bound");
+            assert!(mail, "ctx.mail is no longer bound");
+        });
+    }
+
     // ctx.step_budget returns None when no budget is configured
     #[tokio::test]
     async fn test_step_budget_none_when_not_configured() {
@@ -837,7 +726,6 @@ mod runtime_context_tests {
         let ctx = RuntimeContext::new_with_llm(
             None,
             Arc::new(StepBudgetView::unlimited()),
-            make_tool_helper(),
             Arc::new(ObservabilityConfig::default()),
             tx,
             AgentId::new_v4(),
@@ -845,7 +733,6 @@ mod runtime_context_tests {
             None,          // memory_interface
             None,          // mailbox
             String::new(), // agent_name
-            None,          // user_context
             None,          // a2a_invoker
             false,         // user_memory_writable
         );
@@ -1012,7 +899,9 @@ mod tests {
             output_schema: None,
             sandbox_profile: SandboxProfile::FileSystem,
             tags: vec![],
-            dangerous: false,
+            family: apollia_tools::ActionFamily::Unclassified,
+            family_source: apollia_tools::FamilySource::Unsourced,
+            target_arg: None,
             is_read_only: false,
             risk_score: 5,
             approval_risk_level: None,
@@ -1031,7 +920,9 @@ mod tests {
             output_schema: None,
             sandbox_profile: SandboxProfile::FileSystem,
             tags: vec![],
-            dangerous: false,
+            family: apollia_tools::ActionFamily::Unclassified,
+            family_source: apollia_tools::FamilySource::Unsourced,
+            target_arg: None,
             is_read_only: false,
             risk_score: 8,
             approval_risk_level: None,
@@ -1166,22 +1057,18 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 10,
             call_timeout_secs: 10,
             max_response_bytes: 8 * 1024 * 1024,
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
-        let manager = McpClientManagerHandle::start(
-            vec![mcp_config],
-            &registry,
-            None,
-            None,
-            LoadingMode::Eager,
-        )
-        .await
-        .expect("mcp manager start failed");
+        let manager =
+            McpClientManagerHandle::start(vec![mcp_config], &registry, None, LoadingMode::Eager)
+                .await
+                .expect("mcp manager start failed");
 
         // AND a ToolProxy backed by the runtime's own MCP executor assembly
         let execs = build_agent_tool_executors(&manager).await;
@@ -1497,7 +1384,9 @@ mod tests {
             ),
             sandbox_profile: SandboxProfile::FileSystem,
             tags: vec!["shell".to_string(), "execution".to_string()],
-            dangerous: false,
+            family: apollia_tools::ActionFamily::Unclassified,
+            family_source: apollia_tools::FamilySource::Unsourced,
+            target_arg: None,
             is_read_only: false,
             risk_score: 8,
             approval_risk_level: None,
@@ -1534,7 +1423,9 @@ mod tests {
             output_schema: None,
             sandbox_profile: SandboxProfile::ReadOnly,
             tags: vec![],
-            dangerous: false,
+            family: apollia_tools::ActionFamily::Unclassified,
+            family_source: apollia_tools::FamilySource::Unsourced,
+            target_arg: None,
             is_read_only: true,
             risk_score: 0,
             approval_risk_level: None,
@@ -1668,88 +1559,6 @@ mod a2a_tests {
 
         handle.shutdown().await;
     }
-
-    #[tokio::test]
-    async fn test_user_context_some_in_chat_mode() {
-        // GIVEN a RuntimeContext with user_context populated (chat mode)
-        let mut uc = HashMap::new();
-        uc.insert(
-            "preferences".to_string(),
-            vec![
-                ("langue".to_string(), "francais".to_string()),
-                ("format".to_string(), "markdown".to_string()),
-            ],
-        );
-        uc.insert(
-            "habits".to_string(),
-            vec![("working_hours".to_string(), "9h-18h".to_string())],
-        );
-        uc.insert("context".to_string(), vec![]);
-
-        let mut ctx = RuntimeContext::for_test();
-        ctx.user_context = Some(uc);
-
-        // WHEN the context is read back
-        // THEN user_context is Some with expected categories
-        assert!(ctx.user_context.is_some());
-        let uc = ctx.user_context.as_ref().expect("should be Some");
-        assert_eq!(uc.get("preferences").expect("preferences").len(), 2);
-        assert_eq!(uc.get("habits").expect("habits").len(), 1);
-        assert!(uc.get("context").expect("context").is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_user_context_none_in_task_mode() {
-        // GIVEN a RuntimeContext with user_context = None (task mode)
-        let ctx = RuntimeContext::for_test();
-
-        // WHEN user_context is read
-        // THEN user_context is None
-        assert!(ctx.user_context.is_none());
-    }
-
-    // GIVEN a RuntimeContext whose user_context is populated
-    // WHEN the Python `ctx.user_context` getter is invoked
-    // THEN it converts to a Python dict without unwrapping / panicking
-    #[test]
-    fn test_user_context_getter_returns_dict() {
-        // GIVEN
-        let mut uc = HashMap::new();
-        uc.insert(
-            "preferences".to_string(),
-            vec![("langue".to_string(), "francais".to_string())],
-        );
-        let mut ctx = RuntimeContext::for_test();
-        ctx.user_context = Some(uc);
-
-        // WHEN / THEN
-        Python::with_gil(|py| {
-            let obj = ctx
-                .user_context(py)
-                .expect("getter must return Ok, not panic");
-            let bound = obj.bind(py);
-            assert!(!bound.is_none(), "populated user_context must not be None");
-            assert!(
-                bound.is_instance_of::<pyo3::types::PyDict>(),
-                "user_context must convert to a Python dict"
-            );
-        });
-    }
-
-    // GIVEN a RuntimeContext with no user_context (task mode)
-    // WHEN the Python getter is invoked
-    // THEN it returns Python None, still via a Result (no unwrap)
-    #[test]
-    fn test_user_context_getter_none() {
-        // GIVEN
-        let ctx = RuntimeContext::for_test();
-
-        // WHEN / THEN
-        Python::with_gil(|py| {
-            let obj = ctx.user_context(py).expect("getter must return Ok");
-            assert!(obj.bind(py).is_none());
-        });
-    }
 }
 
 #[cfg(test)]
@@ -1779,7 +1588,8 @@ mod tool_proxy_a2a_tests {
              _input: serde_json::Value,
              _timeout: u64,
              _chain: Vec<apollia_core::AgentId>,
-             _caller: apollia_core::AgentId| {
+             _caller: apollia_core::AgentId,
+             _invocation: Option<apollia_runtime::a2a::ClientInvocation>| {
                 let fut: Pin<
                     Box<dyn Future<Output = Result<A2aDelegateResult, LowLevelA2aError>> + Send>,
                 > = Box::pin(async move {
@@ -1797,20 +1607,17 @@ mod tool_proxy_a2a_tests {
 
     fn make_excel_manifest() -> AgentManifest {
         AgentManifest {
+            autonomy_level: None,
             format_version: 1,
             name: "excel-worker".to_string(),
             version: "0.1.0".to_string(),
             description: "Excel worker".to_string(),
-            tools_required: vec![],
-            tools_optional: vec![],
             supports_streaming: false,
             supports_a2a: true,
             memory_namespace: None,
             shared_memory_namespaces: vec![],
             max_concurrent_tasks: 1,
             step_budget: None,
-            network_allowlist: None,
-            dangerous_tools_allowed: false,
             tags: vec!["worker".to_string()],
             skills: vec![AgentSkill {
                 id: "read-excel".to_string(),
@@ -1825,8 +1632,7 @@ mod tool_proxy_a2a_tests {
             supports_mailbox: false,
             mailbox_allowlist: None,
             system_prompt: None,
-            tools_requiring_approval: vec![],
-            llm_backend: None,
+            model: None,
             packages: vec![],
             memory_config: None,
             agent_type: None,
@@ -2095,82 +1901,6 @@ mod workspace_context_tests {
         // THEN workspace is None
         assert!(ctx.workspace.is_none());
     }
-
-    // ── effective_memory_namespace ──────────────────────────────────────────────
-
-    #[test]
-    fn test_effective_namespace_with_project_id() {
-        // GIVEN
-        let manifest_ns = "dev-assistant";
-        let project_id = Some("proj_abc123");
-        // WHEN
-        let ns = effective_memory_namespace(manifest_ns, project_id);
-        // THEN
-        assert_eq!(ns, "proj_abc123:dev-assistant");
-    }
-
-    #[test]
-    fn test_effective_namespace_without_project_id() {
-        // GIVEN
-        let manifest_ns = "dev-assistant";
-        let project_id: Option<&str> = None;
-        // WHEN
-        let ns = effective_memory_namespace(manifest_ns, project_id);
-        // THEN
-        assert_eq!(ns, "dev-assistant");
-    }
-
-    #[test]
-    fn test_effective_namespace_empty_project_id_treated_as_none() {
-        // GIVEN
-        let manifest_ns = "test-agent";
-        let project_id = Some("");
-        // WHEN
-        let ns = effective_memory_namespace(manifest_ns, project_id);
-        // THEN
-        assert_eq!(ns, "test-agent");
-    }
-
-    #[test]
-    fn test_isolation_between_two_projects() {
-        use apollia_memory::{
-            manager::MemoryManager,
-            semantic::{RememberInput, SemanticMemory},
-        };
-        use tempfile::TempDir;
-
-        // GIVEN an agent that wrote "forbidden_deps" in proj_A
-        let dir = TempDir::new().expect("temp dir");
-
-        let ns_a = effective_memory_namespace("dev-assistant", Some("proj_A"));
-        let ns_b = effective_memory_namespace("dev-assistant", Some("proj_B"));
-
-        {
-            let mut mgr = MemoryManager::new(dir.path(), Some(ns_a.clone()), vec![]);
-            let store = mgr.store(&ns_a).expect("open store for proj_A");
-            let sem = SemanticMemory::new(store);
-            sem.remember(RememberInput {
-                namespace: &ns_a,
-                key: "forbidden_deps",
-                value: &serde_json::json!("no_async_std"),
-                confidence: 1.0,
-                source: None,
-                expires_at: None,
-            })
-            .expect("write to proj_A");
-        }
-
-        // WHEN reading from the same agent in proj_B
-        let mut mgr_b = MemoryManager::new(dir.path(), Some(ns_b.clone()), vec![]);
-        let store_b = mgr_b.store(&ns_b).expect("open store for proj_B");
-        let sem_b = SemanticMemory::new(store_b);
-        let found = sem_b
-            .recall(&ns_b, "forbidden_deps")
-            .expect("recall from proj_B");
-
-        // THEN the key written in proj_A is invisible in proj_B
-        assert!(found.is_none());
-    }
 }
 
 /// Pure-helper suite run under Miri to check the FFI-adjacent Rust code for
@@ -2236,16 +1966,9 @@ mod miri_pure {
         );
         assert_eq!(extract_a2a_skill_id("bash"), None);
     }
+}
 
-    // GIVEN a namespace and an optional project id, WHEN composed, THEN the
-    // prefixing rule holds and the formatting allocates cleanly.
-    #[test]
-    fn miri_pure_effective_memory_namespace_prefixes_project() {
-        assert_eq!(
-            super::effective_memory_namespace("mem", Some("proj")),
-            "proj:mem"
-        );
-        assert_eq!(super::effective_memory_namespace("mem", None), "mem");
-        assert_eq!(super::effective_memory_namespace("mem", Some("")), "mem");
-    }
+#[cfg(test)]
+mod access {
+    mod tests;
 }

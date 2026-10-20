@@ -1,52 +1,87 @@
 import { writable, get } from "svelte/store";
 import { invoke } from "@tauri-apps/api/core";
+import { readConfigFile, type ConfigFileView } from "$lib/ipc/configFile";
+import {
+  listEngines,
+  getPythonInterpreter,
+  type EnginesResponse,
+  type PythonInterpreterSetting,
+} from "$lib/ipc/system";
+import { getHardwareProfile, type HardwareProfile } from "$lib/ipc/modelHub";
 import type {
-  ApollaConfigView,
   SystemInfo,
   SecurityPosture,
   SttModelInfo,
   SttConfigView,
-  LlmBackendConfig,
   CliStatus,
 } from "$lib/types";
 
-/** The canonical settings sub-routes. */
+/**
+ * The canonical settings sub-routes, in the order of the navigation column:
+ * the "Settings" group, then the "System" group. The built-in tools live on
+ * the Connections screen, the permission rules on the Authorizations screen
+ * and the discovery of models on the AI screen.
+ */
 export type SettingsSubRoute =
+  | "general"
   | "appearance"
   | "profile"
+  | "chat"
   | "stt"
-  | "llm"
-  | "model-hub"
-  | "configuration"
-  | "tools"
-  | "permissions"
+  | "model-defaults"
   | "integrations"
-  | "system"
-  | "shortcuts"
-  | "observability"
-  | "help"
-  | "about"
-  | "danger";
+  | "notifications"
+  | "developer"
+  | "configuration"
+  | "engines"
+  | "hardware";
 
 export const SETTINGS_SUB_ROUTES: SettingsSubRoute[] = [
+  "general",
   "appearance",
   "profile",
+  "chat",
   "stt",
-  "llm",
-  "model-hub",
-  "configuration",
-  "tools",
-  "permissions",
+  "model-defaults",
   "integrations",
-  "system",
-  "shortcuts",
-  "observability",
-  "help",
-  "about",
-  "danger",
+  "notifications",
+  "developer",
+  "configuration",
+  "engines",
+  "hardware",
 ];
 
-export const DEFAULT_SETTINGS_SUB_ROUTE: SettingsSubRoute = "appearance";
+/**
+ * Former sections and the section that now holds their content. A caller that
+ * still names one of them (palette action, user menu, help link) lands on the
+ * section that carries the moved content rather than on the default.
+ */
+export const MOVED_SETTINGS_SUB_ROUTES: Readonly<Record<string, SettingsSubRoute>> = {
+  about: "general",
+  help: "general",
+  danger: "general",
+  shortcuts: "chat",
+  system: "hardware",
+};
+
+/**
+ * The sections that exist only with the developer mode on: absent from the
+ * column, the palette and the window with the mode off.
+ */
+export const DEVELOPER_ONLY_SETTINGS_SUB_ROUTES: readonly SettingsSubRoute[] = ["configuration"];
+
+/** Whether a section is shown with the developer mode in this position. */
+export function settingsSubRouteVisible(route: SettingsSubRoute, developerMode: boolean): boolean {
+  return developerMode || !DEVELOPER_ONLY_SETTINGS_SUB_ROUTES.includes(route);
+}
+
+/**
+ * Key of a settings form in the unsaved-changes store: a settings section, or
+ * the capture policy that moved to the Observability screen and keeps its form.
+ */
+export type SettingsFormRoute = SettingsSubRoute | "observability";
+
+export const DEFAULT_SETTINGS_SUB_ROUTE: SettingsSubRoute = "general";
 
 /** Active settings sub-route. Persists across `<Settings />` remounts. */
 export const settingsSubRoute = writable<SettingsSubRoute>(DEFAULT_SETTINGS_SUB_ROUTE);
@@ -55,9 +90,18 @@ export function isSettingsSubRoute(value: string | null | undefined): value is S
   return !!value && (SETTINGS_SUB_ROUTES as string[]).includes(value);
 }
 
-/** Navigate to a sub-route, falling back to `appearance` if unknown. */
+/** The section a name resolves to: itself, its new home if it moved, or the default. */
+export function resolveSettingsSubRoute(route: string | null | undefined): SettingsSubRoute {
+  if (isSettingsSubRoute(route)) return route;
+  if (route && Object.hasOwn(MOVED_SETTINGS_SUB_ROUTES, route)) {
+    return MOVED_SETTINGS_SUB_ROUTES[route];
+  }
+  return DEFAULT_SETTINGS_SUB_ROUTE;
+}
+
+/** Navigate to a sub-route, falling back to `general` if unknown. */
 export function goToSettingsSubRoute(route: string | null | undefined): SettingsSubRoute {
-  const target = isSettingsSubRoute(route) ? route : DEFAULT_SETTINGS_SUB_ROUTE;
+  const target = resolveSettingsSubRoute(route);
   if (get(settingsSubRoute) !== target) {
     settingsSubRoute.set(target);
   }
@@ -84,7 +128,7 @@ export function installSettingsNavigationGuard(guard: NavigationGuard): () => vo
 /** Navigate, consulting the installed guard. */
 export function requestSettingsSubRoute(route: string | null | undefined): SettingsSubRoute | null {
   const current = get(settingsSubRoute);
-  const target = isSettingsSubRoute(route) ? route : DEFAULT_SETTINGS_SUB_ROUTE;
+  const target = resolveSettingsSubRoute(route);
   if (target === current) return target;
   if (navigationGuard && !navigationGuard(current, target)) return null;
   settingsSubRoute.set(target);
@@ -106,13 +150,18 @@ function loadState<T>(): LoadState<T> {
   return { data: null, loading: false, error: null, loaded: false };
 }
 
-export const configStore = writable<LoadState<ApollaConfigView>>(loadState());
+export const configStore = writable<LoadState<ConfigFileView>>(loadState());
 export const systemInfoStore = writable<LoadState<SystemInfo>>(loadState());
 export const securityPostureStore = writable<LoadState<SecurityPosture>>(loadState());
 export const cliStatusStore = writable<LoadState<CliStatus>>(loadState());
 export const sttModelsStore = writable<LoadState<SttModelInfo[]>>(loadState());
 export const sttConfigStore = writable<LoadState<SttConfigView>>(loadState());
-export const llmBackendsStore = writable<LoadState<LlmBackendConfig[]>>(loadState());
+/** System > Engines: the engines of this machine and their stated versions. */
+export const enginesStore = writable<LoadState<EnginesResponse>>(loadState());
+/** System > Hardware: the single hardware probe of the inference. */
+export const hardwareStore = writable<LoadState<HardwareProfile>>(loadState());
+/** System > Hardware, developer mode: the Python interpreter setting. */
+export const pythonInterpreterStore = writable<LoadState<PythonInterpreterSetting>>(loadState());
 
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -136,7 +185,7 @@ async function loadOnce<T>(
 
 export const settingsLoaders = {
   config: (force = false) =>
-    loadOnce(configStore, () => invoke<ApollaConfigView>("get_config"), force),
+    loadOnce(configStore, readConfigFile, force),
   systemInfo: (force = false) =>
     loadOnce(systemInfoStore, () => invoke<SystemInfo>("get_system_info"), force),
   securityPosture: (force = false) =>
@@ -151,6 +200,8 @@ export const settingsLoaders = {
     loadOnce(sttModelsStore, () => invoke<SttModelInfo[]>("list_stt_models"), force),
   sttConfig: (force = false) =>
     loadOnce(sttConfigStore, () => invoke<SttConfigView>("get_stt_config"), force),
-  llmBackends: (force = false) =>
-    loadOnce(llmBackendsStore, () => invoke<LlmBackendConfig[]>("list_llm_backends"), force),
+  engines: (force = false) => loadOnce(enginesStore, listEngines, force),
+  hardware: (force = false) => loadOnce(hardwareStore, getHardwareProfile, force),
+  pythonInterpreter: (force = false) =>
+    loadOnce(pythonInterpreterStore, getPythonInterpreter, force),
 };

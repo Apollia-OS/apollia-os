@@ -2,7 +2,9 @@ use apollia_connectors::google::operations as google_operations;
 use apollia_connectors::microsoft::operations as microsoft_operations;
 use apollia_connectors::operation::{ApprovalPolicy, OperationSpec};
 use apollia_core::SandboxProfile;
-use apollia_tools::descriptor::{ApprovalRiskLevel, ToolDescriptor, ToolKind};
+use apollia_tools::descriptor::{
+    ActionFamily, ApprovalRiskLevel, FamilySource, ToolDescriptor, ToolKind,
+};
 use serde_json::json;
 
 /// Build the full set of [`ToolDescriptor`]s for the Google Workspace
@@ -25,13 +27,6 @@ pub fn microsoft_tool_descriptors() -> Vec<ToolDescriptor> {
         .collect()
 }
 
-/// All connector tool descriptors registered at supervisor boot (Google + Microsoft).
-pub fn all_connector_descriptors() -> Vec<ToolDescriptor> {
-    let mut descs = google_tool_descriptors();
-    descs.extend(microsoft_tool_descriptors());
-    descs
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn op_to_descriptor(connector_id: &str, op: &OperationSpec) -> ToolDescriptor {
@@ -51,12 +46,43 @@ fn op_to_descriptor(connector_id: &str, op: &OperationSpec) -> ToolDescriptor {
         // not the sandbox.
         sandbox_profile: SandboxProfile::ReadOnly,
         tags: connector_tags(connector_id, op),
-        dangerous: false,
+        family: action_family(op),
+        family_source: FamilySource::Builtin,
+        target_arg: target_arg_for(op.id).map(str::to_owned),
         is_read_only: read_only,
         risk_score,
         approval_risk_level: Some(risk_level),
         impact_description: Some(short_impact(op)),
         reject_reason_required: matches!(op.approval, ApprovalPolicy::ConfirmPhrase),
+    }
+}
+
+/// The action family of a connector operation, fixed by its declaration.
+///
+/// A send is a send whatever its approval policy, so the verb is read first.
+/// An auto-approved operation reads the connected account, which holds
+/// personal data; every operation that needs an approval writes or deletes.
+fn action_family(op: &OperationSpec) -> ActionFamily {
+    if op.action == "send" {
+        return ActionFamily::SendExternal;
+    }
+    match op.approval {
+        ApprovalPolicy::AutoApprove => ActionFamily::ReadPersonal,
+        ApprovalPolicy::AlwaysRequireApproval | ApprovalPolicy::ConfirmPhrase => {
+            ActionFamily::WriteOrDelete
+        }
+    }
+}
+
+/// The argument of a connector operation that names what the call acts on: a
+/// recipient or a file name, never a body. An operation addressed by an opaque
+/// identifier has none.
+fn target_arg_for(op_id: &str) -> Option<&'static str> {
+    match op_id {
+        "gmail.send" | "gmail.compose_draft" | "outlook.send" => Some("to"),
+        "gdrive.workspace_share" => Some("email"),
+        "gdrive.workspace_write" | "gdrive.write_to_folder" => Some("name"),
+        _ => None,
     }
 }
 

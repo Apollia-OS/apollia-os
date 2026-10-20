@@ -1,11 +1,10 @@
 {
   "name": "plan-gate-llm (run-keyed plan gate: operator PlanReview then builder PlanReviewBuilder + PlanEditFlow; needs APOLLIA_SEED_PLANNER=1 and -seeded-llama)",
-  "stopOnError": false,
+  "stopOnError": true,
   "dynamicTestids": [
     "automation-row-seed-trigger-planner",
     "automation-run-now-seed-trigger-planner",
-    "sidebar-mode-option-builder",
-    "sidebar-mode-option-operator"
+    "settings-nav-developer"
   ],
   "steps": [
     {
@@ -24,17 +23,26 @@
       "timeoutMs": 5000
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
-      "timeoutMs": 6000
+      "testid": "settings-page",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-operator"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-off"
     },
     {
       "kind": "sleep",
@@ -177,15 +185,6 @@
       "label": "08-operator-plan-approved"
     },
     {
-      "kind": "goto",
-      "route": "tasks"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "tasks-page",
-      "timeoutMs": 15000
-    },
-    {
       "kind": "waitFor",
       "testid": "topbar-agents-at-work",
       "contains": "1 agent",
@@ -205,21 +204,39 @@
       "timeoutMs": 15000
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
-      "timeoutMs": 6000
+      "testid": "settings-page",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-builder"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-on"
     },
     {
       "kind": "sleep",
       "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "automations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 15000
     },
     {
       "kind": "waitFor",
@@ -420,21 +437,39 @@
       "label": "15-builder-plan-submitted"
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
-      "timeoutMs": 6000
+      "testid": "settings-page",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-operator"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-off"
     },
     {
       "kind": "sleep",
       "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "automations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "automations-table",
+      "timeoutMs": 15000
     },
     {
       "kind": "screenshot",
@@ -442,7 +477,8 @@
     }
   ],
   "notes": [
-    "Seed: build with APOLLIA_SEED_PLANNER=1 (tests/cli/seed/README.md, Planner). The run-keyed PlanApprovalRequired is emitted only by ORIAEngine::execute (crates/apollia-oria/src/engine/orchestrated.rs, await_plan_gate), which the desktop enters for a TASK of an agent whose agents.db manifest_json says execution_mode orchestrated (crates/apollia-desktop/src/backend/runner.rs, ExecutionBackend::execute; the row reaches the backend through bootstrap.rs auto_load_installed_agents). No base agent is orchestrated, so the base seed never shows plan-mode-host. Run: APOLLIA_SEED_PLANNER=1 just desktop-dev-automation-seeded-llama scripts/automation/plan-gate-llm.json <model.gguf>, CTX=32768 is enough (the planner prompt is a few hundred tokens).",
+    "READ FIRST: on the application as it is, this book stops at its first wait for plan-mode-host, and stopOnError is on so that it stops there instead of waiting out every later timeout. A task of an agent that plans always now runs through the one agent executor, whose plan-first mode builds its ORIA engine with the plan gate forced off and no gate registry (crates/apollia-runtime/src/chat/agent_executor/plan_first.rs, with_plan_gate_override(Some(false)); its module comment says there is no gate of its own on the plan). No other code builds an engine, so nothing emits the run-keyed PlanApprovalRequired that PlanModeHost (mounted in App.svelte) listens for. The steps are kept as they were derived, for the day the gate is wired again or the host is removed; the notes below describe the earlier execution path (execution_mode orchestrated, a backend under crates/apollia-desktop/src/backend, $uiMode) and are kept for the gestures they document, not for that path.",
+    "Seed: build with APOLLIA_SEED_PLANNER=1 (tests/cli/seed/README.md, Planner). The run-keyed PlanApprovalRequired is emitted only by ORIAEngine::execute (crates/apollia-oria/src/engine/orchestrated.rs, await_plan_gate), which the desktop enters for a TASK of an agent whose agents.db manifest_json says execution_mode orchestrated (crates/apollia-desktop/src/backend/runner.rs, ExecutionBackend::execute; the row reaches the backend through bootstrap.rs auto_load_installed_agents). No base agent is orchestrated, so the base seed never shows plan-mode-host. Run: APOLLIA_SEED_PLANNER=1 just automation-seeded-llama scripts/automation/plan-gate-llm.json <model.gguf>, CTX=32768 is enough (the planner prompt is a few hundred tokens).",
     "The gate is opened from the Automations page: automation-run-now-seed-trigger-planner (AutomationRow.svelte fireNow -> fire_trigger -> TriggerEngine::fire_now) submits a task with no picker and no confirm. The planner is an LLM call, so plan-mode-host is waited for with a long timeout. The card rendered under the host is chosen by $uiMode (PlanModeHost.svelte:31,42-45): plan-review for the operator, plan-review-builder for the builder, so the mode is forced before each fire and put back to operator at the end.",
     "Operator: request-changes opens plan-review-adjust; cancel is local (PlanReview.svelte cancelAdjust) and brings the approval bar back; send submits decision reject (PlanReview.svelte submitAdjust), which sets the store to rejected and HIDES the host (PlanModeHost renders only pending_approval or editing), then the engine replans with the feedback and re-opens the gate for the same run (orchestrated.rs plan_with_feedback), so the book waits for the host to go and come back before approving. The reason textarea (id plan-adjust-reason) carries no testid and the reason is optional, so the revision is sent empty.",
     "plan-review-approve and plan-review-request-changes exist in the DOM (PlanReview.svelte:214-215 pass them as approveTestid / secondaryTestid, PlanApprovalBar.svelte:59,78 render data-testid={approveTestid}) but validate.py's corpus does not reconstruct a prop-passed id, so no step may name them (plan-review-reject, the builder's, has the same shape). The book drives the same two handlers through the card's own keyboard shortcuts (PlanReview.svelte:89-104 onCardKeydown on the wrapper of plan-review): press r opens the revision (openAdjust), press Meta+Enter approves (handleApprove); the runner dispatches keydown on the plan-review element and the event bubbles to the wrapper. The two ids therefore stay uncounted as gestures until the validator learns the prop-passed shape (a tooling gap to capture).",

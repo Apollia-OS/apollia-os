@@ -12,9 +12,19 @@ pub struct ChatSessionManagerHandle {
     /// are routed to this manager's background drainer task.
     pub(in crate::chat::manager) pending_user_inputs:
         apollia_tools::tools::ask_user::PendingUserInputs,
-    /// Shared lifecycle hook executor, exposed so the API can list the active
-    /// handlers. `None` when no hooks are configured.
-    pub(in crate::chat::manager) hook_executor: Option<Arc<HookExecutor>>,
+    /// The tool approvals the actor waits on, the same store it resolves:
+    /// read to list what they ask, never resolved through the handle.
+    pub(in crate::chat::manager) pending_chat_approvals: PendingChatApprovals,
+    /// The lifecycle hook executor in force, exposed so the API can list the
+    /// active handlers. `None` when no hooks are configured.
+    pub(in crate::chat::manager) hook_executor:
+        tokio::sync::watch::Receiver<Option<Arc<HookExecutor>>>,
+    /// Plan-mode state a new session starts in, the `[chat] plan_mode_default`
+    /// key of `apollia.toml` in force.
+    pub(in crate::chat::manager) plan_mode_default: tokio::sync::watch::Receiver<bool>,
+    /// The data directory `chat.db` lives in, where the images of the
+    /// conversations are kept and the models are indexed.
+    pub(in crate::chat::manager) data_dir: Option<std::path::PathBuf>,
 }
 
 impl ChatSessionManagerHandle {
@@ -28,13 +38,39 @@ impl ChatSessionManagerHandle {
         self.pending_user_inputs.clone()
     }
 
+    /// What every tool approval waiting for the user asks, oldest first: those
+    /// of the conversations and those of the runs outside any conversation.
+    pub fn pending_tool_approvals(&self) -> Vec<crate::chat::ChatApprovalAsked> {
+        self.pending_chat_approvals.asked()
+    }
+
+    /// What the tool approval `key` (`session::message::tool_call`) asks, when
+    /// it waits and is listed.
+    pub fn pending_tool_approval(&self, key: &str) -> Option<crate::chat::ChatApprovalAsked> {
+        self.pending_chat_approvals.asked_for(key)
+    }
+
+    /// The tool approvals store the actor waits on, for a test that plays the
+    /// tool asking for one.
+    #[cfg(test)]
+    pub(crate) fn pending_chat_approvals(&self) -> PendingChatApprovals {
+        self.pending_chat_approvals.clone()
+    }
+
     /// Return a summary of every registered lifecycle hook handler, in
     /// declaration order. Empty when no hooks are configured.
     pub fn hook_summaries(&self) -> Vec<crate::hooks::HookHandlerSummary> {
         self.hook_executor
+            .borrow()
             .as_ref()
             .map(|exec| exec.registry().list_all())
             .unwrap_or_default()
+    }
+
+    /// The plan-mode state a new session starts in, the
+    /// `[chat] plan_mode_default` key of `apollia.toml` in force.
+    pub fn plan_mode_default(&self) -> bool {
+        *self.plan_mode_default.borrow()
     }
 }
 
@@ -52,19 +88,16 @@ impl ChatSessionManagerHandle {
         db_path: &Path,
         llm_router: Option<Arc<LlmRouter>>,
         tool_registry: ToolRegistryHandle,
-        _agent_loader: Arc<dyn AgentLoader>,
         agent_runner: Option<Arc<dyn ChatAgentRunner>>,
         event_bus: EventBusSender,
         runtime_budget: StepBudgetConfig,
         user_memory: Option<Arc<std::sync::Mutex<UserMemoryRepository>>>,
         registry_handle: AgentRegistryHandle,
         a2a_invoker: Option<Arc<A2AInvoker>>,
-        project_context: Option<Arc<dyn ProjectContextProvider>>,
-        project_repo: Option<Arc<ProjectRepository>>,
         mcp_handle: Option<apollia_mcp::manager::McpClientManagerHandle>,
         // Supervisor-built config so the chat dispatcher can include
         // config-dependent natives (web_search, web_read, http_fetch,
-        // memory_search, permission_rule_*) alongside MCP + connectors.
+        // memory_search) alongside MCP + connectors.
         // `None` keeps the minimal behaviour (only read-only file tools in
         // the dispatcher, the rest in the fast path).
         chat_tools_config: Option<Arc<ChatToolsConfig>>,
@@ -102,7 +135,7 @@ impl ChatSessionManagerHandle {
         );
 
         let pending_chat_approvals = PendingChatApprovals::new();
-        let pending_fs_approvals = PendingFilesystemApprovals::new();
+        let handle_chat_approvals = pending_chat_approvals.clone();
         let pending_user_inputs = apollia_tools::tools::ask_user::PendingUserInputs::new();
 
         let enrichment_extractor = match (&llm_router, &user_memory) {
@@ -115,8 +148,12 @@ impl ChatSessionManagerHandle {
 
         let (tx, rx) = mpsc::channel(256);
 
-        // Keep a handle-side clone so the API can list active hook handlers.
-        let hook_executor_for_handle = hook_executor.clone();
+        // The handles read the hook executor and the plan-mode default the
+        // actor holds, which follow the configuration once it is handed over.
+        let (hook_executor_tx, hook_executor_for_handle) =
+            tokio::sync::watch::channel(hook_executor.clone());
+        let (plan_mode_default_tx, plan_mode_default_rx) =
+            tokio::sync::watch::channel(plan_mode_default);
 
         // The governance database lives beside the other runtime databases.
         // Deriving the path here, from the injected data directory, is what
@@ -138,13 +175,10 @@ impl ChatSessionManagerHandle {
             runtime_budget,
             plan_mode_default,
             pending_chat_approvals,
-            pending_fs_approvals,
             user_memory,
             enrichment_extractor,
             tx: tx.clone(),
             a2a_invoker,
-            project_context,
-            project_repo,
             pending_user_inputs: pending_user_inputs.clone(),
             mcp_handle,
             chat_tools_config,
@@ -156,10 +190,17 @@ impl ChatSessionManagerHandle {
             todo_handle,
             plan_handle,
             hook_executor,
+            package_tools: None,
+            composer: None,
+            governance: None,
             pause_tokens: HashMap::new(),
             pause_states: HashMap::new(),
             pending_injections: HashMap::new(),
+            answer_prefills: HashMap::new(),
             pending_plan_continuations: HashMap::new(),
+            config_feed: None,
+            plan_mode_default_tx,
+            hook_executor_tx,
         };
 
         // Restore active sessions from SQLite before entering the actor loop
@@ -194,7 +235,10 @@ impl ChatSessionManagerHandle {
         Ok(Self {
             tx,
             pending_user_inputs,
+            pending_chat_approvals: handle_chat_approvals,
             hook_executor: hook_executor_for_handle,
+            plan_mode_default: plan_mode_default_rx,
+            data_dir: db_path.parent().map(Path::to_path_buf),
         })
     }
 
@@ -208,7 +252,7 @@ impl ChatSessionManagerHandle {
             agent_name,
             system_prompt,
             tools,
-            project_id,
+            model,
         } = params;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -217,7 +261,7 @@ impl ChatSessionManagerHandle {
                 agent_name,
                 system_prompt,
                 tools,
-                project_id,
+                model,
                 reply: reply_tx,
             })
             .await
@@ -226,6 +270,42 @@ impl ChatSessionManagerHandle {
         reply_rx
             .await
             .map_err(|_| ChatError::InternalError("actor reply dropped".into()))?
+    }
+
+    /// Create a conversation limited to the accesses `params.tools` names:
+    /// of what its agent holds only they are offered, and those the agent
+    /// does not hold are proposed, each of their calls asking. The limit is
+    /// a setting of the conversation, in place before its identifier is
+    /// known to anyone; a conversation whose limit cannot be stored is
+    /// deleted rather than left unlimited.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::InvalidSettings`] when no access is named or one is
+    /// blank, and what [`Self::create_session`] returns.
+    pub async fn create_limited_session(
+        &self,
+        params: CreateSessionParams,
+    ) -> Result<SessionInfo, ChatError> {
+        let settings = SessionSettings {
+            instructions: params.system_prompt.clone(),
+            only_accesses: params.tools.clone(),
+            ..SessionSettings::default()
+        }
+        .checked()?;
+        if !settings.is_limited() {
+            return Err(ChatError::InvalidSettings(
+                crate::chat::session_settings::SessionSettingsError::Accesses(
+                    "a limited conversation names at least one access".into(),
+                ),
+            ));
+        }
+        let info = self.create_session(params).await?;
+        if let Err(error) = self.set_session_settings(info.id.clone(), settings).await {
+            let _ = self.delete_session(info.id.clone()).await;
+            return Err(error);
+        }
+        Ok(info)
     }
 
     /// Send a user message.
@@ -234,34 +314,28 @@ impl ChatSessionManagerHandle {
         session_id: SessionId,
         content: String,
     ) -> Result<MessageId, ChatError> {
+        self.send_message_with_images(session_id, content, Vec::new())
+            .await
+    }
+
+    /// Send a user message carrying images after its text.
+    ///
+    /// The images are refused with [`ChatError::ImagesNotSupported`] when the
+    /// model of the conversation does not read images, and with
+    /// [`ChatError::ImageRejected`] when one breaks a limit or a format.
+    pub async fn send_message_with_images(
+        &self,
+        session_id: SessionId,
+        content: String,
+        images: Vec<apollia_llm::message_image::MessageImage>,
+    ) -> Result<MessageId, ChatError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ChatCommand::SendMessage {
                 session_id,
                 content,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| ChatError::InternalError("actor channel closed".into()))?;
-
-        reply_rx
-            .await
-            .map_err(|_| ChatError::InternalError("actor reply dropped".into()))?
-    }
-
-    /// Resolve a pending filesystem HITL request.
-    ///
-    /// Called by the `respond_hitl_filesystem` Tauri command.
-    pub async fn resolve_fs_hitl(
-        &self,
-        request_id: String,
-        decision: super::super::types::FsHitlDecision,
-    ) -> Result<(), ChatError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(ChatCommand::ResolveFsHitl {
-                request_id,
-                decision,
+                images,
+                documents: None,
                 reply: reply_tx,
             })
             .await
@@ -345,6 +419,20 @@ impl ChatSessionManagerHandle {
             .map_err(|_| ChatError::InternalError("actor reply dropped".into()))?
     }
 
+    /// What the draft of an agent may hold: the accesses, the sources and
+    /// the models that exist on the machine now.
+    pub async fn agent_draft_offer(&self) -> Result<crate::agents::draft::DraftOffer, ChatError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ChatCommand::AgentDraftOffer { reply: reply_tx })
+            .await
+            .map_err(|_| ChatError::InternalError("actor channel closed".into()))?;
+
+        reply_rx
+            .await
+            .map_err(|_| ChatError::InternalError("actor reply dropped".into()))
+    }
+
     /// List all currently pending `ask_user` requests.
     pub async fn list_pending_user_inputs(&self) -> Result<Vec<PendingUserInputView>, ChatError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -358,21 +446,18 @@ impl ChatSessionManagerHandle {
             .map_err(|_| ChatError::InternalError("actor reply dropped".into()))
     }
 
-    /// Update session configuration (system_prompt, tools, llm_backend).
+    /// Update session configuration (system_prompt, tools, llm_backend,
+    /// profile); an absent field keeps its value.
     pub async fn update_session(
         &self,
         session_id: SessionId,
-        system_prompt: Option<String>,
-        available_tools: Option<Vec<String>>,
-        llm_backend: Option<Option<String>>,
+        update: SessionConfigUpdate,
     ) -> Result<(), ChatError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ChatCommand::UpdateSession {
                 session_id,
-                system_prompt,
-                available_tools,
-                llm_backend,
+                update,
                 reply: reply_tx,
             })
             .await
@@ -383,37 +468,53 @@ impl ChatSessionManagerHandle {
             .map_err(|_| ChatError::InternalError("actor reply dropped".into()))?
     }
 
-    /// List the in-memory (scope=session) authorizations on active sessions.
-    /// Returns an empty vector if the actor does not respond.
-    pub async fn list_session_authorizations(&self) -> Vec<SessionAuthorizationView> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(ChatCommand::ListSessionAuthorizations { reply: reply_tx })
-            .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        reply_rx.await.unwrap_or_default()
-    }
-
-    /// Remove a `scope=session` authorization from an active session.
-    /// Returns `true` if the entry existed and was removed.
-    pub async fn revoke_session_authorization(
+    /// Replace the settings of a conversation; returns them as stored.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::InvalidSettings`] for settings that cannot be applied,
+    /// [`ChatError::SessionNotFound`], [`ChatError::SessionClosed`].
+    pub async fn set_session_settings(
         &self,
-        session_id: String,
-        tool_name: String,
-    ) -> Result<bool, ChatError> {
+        session_id: SessionId,
+        settings: SessionSettings,
+    ) -> Result<SessionSettings, ChatError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(ChatCommand::RevokeSessionAuthorization {
+            .send(ChatCommand::SetSessionSettings {
                 session_id,
-                tool_name,
+                settings,
                 reply: reply_tx,
             })
             .await
             .map_err(|_| ChatError::InternalError("actor channel closed".into()))?;
+
+        reply_rx
+            .await
+            .map_err(|_| ChatError::InternalError("actor reply dropped".into()))?
+    }
+
+    /// Replace the notes of a conversation; returns them as stored.
+    ///
+    /// # Errors
+    ///
+    /// [`ChatError::InvalidSettings`] for notes too long,
+    /// [`ChatError::SessionNotFound`], [`ChatError::SessionClosed`].
+    pub async fn set_session_notes(
+        &self,
+        session_id: SessionId,
+        notes: String,
+    ) -> Result<String, ChatError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(ChatCommand::SetSessionNotes {
+                session_id,
+                notes,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| ChatError::InternalError("actor channel closed".into()))?;
+
         reply_rx
             .await
             .map_err(|_| ChatError::InternalError("actor reply dropped".into()))?

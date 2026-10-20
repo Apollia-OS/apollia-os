@@ -73,12 +73,11 @@ fn make_skill(id: &str) -> AgentSkill {
 /// Builds an A2A Worker Agent manifest declaring the given skills.
 fn make_worker_manifest(name: &str, skill_ids: &[&str]) -> AgentManifest {
     AgentManifest {
+        autonomy_level: None,
         format_version: 1,
         name: name.to_string(),
         version: "0.1.0".to_string(),
         description: format!("Test worker agent: {name}"),
-        tools_required: vec![],
-        tools_optional: vec![],
         supports_streaming: false,
         supports_a2a: true,
         supports_mailbox: false,
@@ -87,14 +86,11 @@ fn make_worker_manifest(name: &str, skill_ids: &[&str]) -> AgentManifest {
         shared_memory_namespaces: vec![],
         max_concurrent_tasks: 1,
         step_budget: None,
-        network_allowlist: None,
-        dangerous_tools_allowed: false,
         tags: vec![],
         skills: skill_ids.iter().map(|id| make_skill(id)).collect(),
         execution_mode: "direct".to_string(),
         system_prompt: None,
-        tools_requiring_approval: vec![],
-        llm_backend: None,
+        model: None,
         packages: vec![],
         memory_config: None,
         agent_type: None,
@@ -177,6 +173,7 @@ async fn test_full_a2a_routing_success() {
             a2a_depth: 0,
             timeout: None,
             chain_deadline: None,
+            invocation_id: None,
         })
         .await;
 
@@ -221,6 +218,7 @@ async fn test_skill_not_found_lists_available() {
             a2a_depth: 0,
             timeout: None,
             chain_deadline: None,
+            invocation_id: None,
         })
         .await;
 
@@ -264,6 +262,7 @@ async fn test_degraded_agent_rejected() {
             a2a_depth: 0,
             timeout: None,
             chain_deadline: None,
+            invocation_id: None,
         })
         .await;
 
@@ -302,6 +301,7 @@ async fn test_timeout_respected() {
             a2a_depth: 0,
             timeout: Some(Duration::from_millis(500)),
             chain_deadline: None,
+            invocation_id: None,
         })
         .await;
 
@@ -380,6 +380,7 @@ async fn test_events_emitted() {
             a2a_depth: 0,
             timeout: None,
             chain_deadline: None,
+            invocation_id: None,
         })
         .await
         .expect("the invocation must succeed");

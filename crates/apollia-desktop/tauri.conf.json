@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui-dev/tauri-v2-schema/main/tauri.conf.schema.json",
   "productName": "Apollia OS",
-  "version": "0.2.0-1",
+  "version": "0.3.0",
   "identifier": "com.apollia.desktop",
   "build": {
     "devUrl": "http://127.0.0.1:5173",
@@ -27,7 +27,7 @@
     },
     "windows": [
       {
-        "title": "Apollia OS",
+        "title": "Apollia Desktop",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -49,18 +49,29 @@
     ],
     "publisher": "Apollia",
     "homepage": "https://apollia.fr",
-    "copyright": "Copyright (c) 2026 Nidal Zoumita",
+    "copyright": "Copyright 2026 Apollia",
     "license": "MIT OR Apache-2.0",
     "licenseFile": "../../packaging/windows/eula.rtf",
     "category": "DeveloperTool",
     "shortDescription": "Sovereign runtime for autonomous AI agents",
-    "longDescription": "Apollia OS runs autonomous AI agents on your own machine. Local inference, local storage, local tools: nothing leaves the machine without an explicit action.",
+    "longDescription": "Apollia Desktop runs autonomous AI agents on your own machine. Local inference, local storage, local tools: nothing leaves the machine without an explicit action.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "apo"
+        ],
+        "name": "Apollia package",
+        "description": "Apollia package",
+        "mimeType": "application/x-apollia-package",
+        "role": "Viewer"
+      }
     ],
     "resources": [
       "apollia-os*",

@@ -3,8 +3,7 @@
   "stopOnError": false,
   "dynamicTestids": [
     "command-item-companion.toggle",
-    "sidebar-mode-option-builder",
-    "sidebar-mode-option-operator"
+    "settings-nav-developer"
   ],
   "steps": [
     {
@@ -18,17 +17,26 @@
       "timeoutMs": 3000
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
+      "testid": "settings-page",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-operator"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-off"
     },
     {
       "kind": "sleep",
@@ -41,7 +49,7 @@
     },
     {
       "kind": "goto",
-      "route": "dashboard"
+      "route": "chat"
     },
     {
       "kind": "sleep",
@@ -49,7 +57,7 @@
     },
     {
       "kind": "screenshot",
-      "label": "01-operator-dashboard"
+      "label": "01-operator-chat"
     },
     {
       "kind": "click",
@@ -98,88 +106,32 @@
     },
     {
       "kind": "waitFor",
-      "testid": "companion-minimize",
+      "testid": "detail-sidebar",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "companion-close",
+      "testid": "detail-sidebar-collapse",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "companion-drag-handle",
-      "timeoutMs": 2500
+      "testid": "guide-context",
+      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "companion-resize-handle",
-      "timeoutMs": 2500
+      "testid": "guide-action",
+      "timeoutMs": 3000
     },
     {
       "kind": "screenshot",
-      "label": "04-companion-handles (pointer drag and the mid-drag snap guides are pointer-only; the keyboard nudges below play both handles)"
-    },
-    {
-      "kind": "press",
-      "testid": "companion-drag-handle",
-      "key": "ArrowRight",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "sleep",
-      "ms": 200
-    },
-    {
-      "kind": "screenshot",
-      "label": "04b-companion-nudged-right"
-    },
-    {
-      "kind": "press",
-      "testid": "companion-drag-handle",
-      "key": "ArrowLeft",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "sleep",
-      "ms": 200
-    },
-    {
-      "kind": "press",
-      "testid": "companion-resize-handle",
-      "key": "ArrowRight",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "sleep",
-      "ms": 200
-    },
-    {
-      "kind": "screenshot",
-      "label": "04c-companion-resized-wider"
-    },
-    {
-      "kind": "press",
-      "testid": "companion-resize-handle",
-      "key": "ArrowLeft",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "sleep",
-      "ms": 200
-    },
-    {
-      "kind": "expect",
-      "testid": "companion-panel"
+      "label": "04-guide-tab"
     },
     {
       "kind": "click",
-      "testid": "companion-minimize",
+      "testid": "detail-sidebar-collapse",
       "timeoutMs": 2000
-    },
-    {
-      "kind": "sleep",
-      "ms": 400
     },
     {
       "kind": "waitGone",
@@ -188,7 +140,7 @@
     },
     {
       "kind": "screenshot",
-      "label": "05-companion-minimized"
+      "label": "05-guide-collapsed"
     },
     {
       "kind": "click",
@@ -228,7 +180,7 @@
     },
     {
       "kind": "click",
-      "testid": "companion-close",
+      "testid": "detail-sidebar-collapse",
       "timeoutMs": 2000
     },
     {
@@ -272,25 +224,71 @@
       "testid": "command-item-companion.toggle"
     },
     {
+      "kind": "waitFor",
+      "testid": "companion-panel",
+      "timeoutMs": 5000
+    },
+    {
+      "kind": "screenshot",
+      "label": "08-companion-toggled-open (the palette entry opens the column the collapse button closed)"
+    },
+    {
+      "kind": "click",
+      "testid": "topbar-search"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "command-palette",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "fill",
+      "testid": "command-palette-input",
+      "text": "companion"
+    },
+    {
       "kind": "sleep",
       "ms": 300
     },
     {
-      "kind": "screenshot",
-      "label": "08-companion-disabled (toggle resets the enabled preference to off so the builder pass opens from a clean single toggle; no panel expected here)"
-    },
-    {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
-    },
-    {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
+      "testid": "command-item-companion.toggle",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-builder"
+      "testid": "command-item-companion.toggle"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "companion-panel",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "08b-companion-toggled-closed (the same entry collapses the column it opened, so the developer pass starts from a closed column)"
+    },
+    {
+      "kind": "goto",
+      "route": "settings"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-page",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-on"
     },
     {
       "kind": "sleep",
@@ -298,7 +296,7 @@
     },
     {
       "kind": "goto",
-      "route": "dashboard"
+      "route": "chat"
     },
     {
       "kind": "sleep",
@@ -306,7 +304,7 @@
     },
     {
       "kind": "screenshot",
-      "label": "09-builder-dashboard"
+      "label": "09-builder-chat"
     },
     {
       "kind": "click",
@@ -342,21 +340,11 @@
     },
     {
       "kind": "screenshot",
-      "label": "10-companion-panel-builder (the panel is a global overlay, mode-invariant: same component, same testids in operator and builder)"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "companion-minimize",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "companion-close",
-      "timeoutMs": 3000
+      "label": "10-companion-panel-builder (the Guide tab is global, mode-invariant: same component, same testids in operator and builder)"
     },
     {
       "kind": "click",
-      "testid": "companion-close",
+      "testid": "detail-sidebar-collapse",
       "timeoutMs": 2000
     },
     {
@@ -373,21 +361,34 @@
       "label": "11-companion-closed-builder"
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
+      "testid": "settings-page",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-operator"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-off"
     },
     {
       "kind": "sleep",
       "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
     },
     {
       "kind": "screenshot",

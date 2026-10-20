@@ -20,6 +20,7 @@
 
 pub mod auth_manager;
 pub mod callback;
+pub mod connector_consent;
 pub mod connector_providers;
 pub mod drive_prefs;
 pub mod error;
@@ -27,6 +28,7 @@ pub mod mcp_oauth;
 pub mod mcp_oauth_orchestrator;
 pub mod mcp_token_store;
 pub mod multi_account;
+pub mod oauth_client_secrets;
 pub mod oauth_clients_file;
 pub mod pkce;
 pub mod providers;
@@ -35,6 +37,9 @@ pub mod storage;
 pub mod token;
 
 pub use auth_manager::AuthManager;
+pub use connector_consent::{
+    ConnectedAccount, ConsentError, ConsentStart, PendingConsent, PendingConsents,
+};
 pub use connector_providers::{
     build_google_provider, build_microsoft_provider, build_microsoft_provider_for_tenant,
     ConnectorProvider, GoogleScope, MicrosoftScope, MICROSOFT_DEFAULT_CLIENT_ID,
@@ -50,7 +55,7 @@ pub use mcp_oauth_orchestrator::{
 };
 pub use mcp_token_store::{
     delete_mcp_token, extract_identity_claims, load_mcp_token, save_mcp_token, JwtIdentityClaims,
-    StoredMcpToken, MCP_OAUTH_SERVICE,
+    StoredMcpToken, MCP_CLIENT_ID_SERVICE, MCP_OAUTH_SERVICE,
 };
 pub use multi_account::{AccountId, MultiAccountStorage};
 pub use pkce::{build_auth_url, generate_code_challenge, generate_code_verifier, OAuth2PkceFlow};

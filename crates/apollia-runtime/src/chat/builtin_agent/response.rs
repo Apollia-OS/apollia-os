@@ -7,7 +7,9 @@ pub struct ChatAgentResponse {
     pub content: String,
     /// All tool calls made during the exchange.
     pub tool_calls: Vec<ToolCallRecord>,
-    /// Tool names newly added to the session allowlist (via AlwaysAccept).
+    /// Tool names newly added to the session allowlist by the agent mode
+    /// that resumes a code agent after its approval. The built-in loop leaves
+    /// it empty: its "always" is a standing consent governance holds.
     pub newly_authorized: Vec<String>,
     /// Cumulative token usage across all LLM calls in the exchange.
     pub tokens_used: TokenUsage,
@@ -44,6 +46,10 @@ pub struct ChatAgentResponse {
     /// occupancy against [`Self::context_window_tokens`]. Zero when no usage was
     /// reported for the exchange.
     pub context_tokens_used: u32,
+    /// The measure of every model call of the exchange, in order, verification
+    /// retries included. Empty for a path that does not stream through the
+    /// built-in loop.
+    pub llm_calls: Vec<apollia_llm::CallMeasure>,
 }
 
 impl ChatAgentResponse {

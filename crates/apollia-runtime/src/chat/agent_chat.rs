@@ -1,11 +1,12 @@
-//! AgentChatExecutor, executes Python agents in Chat Agent mode.
+//! AgentChatExecutor, the chat mode of an agent run by a [`ChatAgentRunner`].
 //!
 //! Orchestrates the flow: validate agent → convert session to [`AIPTask`] →
 //! run agent via [`ChatAgentRunner`] → process [`AIPResult`] → emit events.
 //!
-//! The [`ChatAgentRunner`] trait decouples
-//! `apollia-runtime` from PyO3 so that the concrete implementation using
-//! `AIPBridge` + `RuntimeContext` lives in `apollia-cli`.
+//! No runner ships: the one that ran the Python of an agent is gone, and a
+//! conversation with an agent goes through the agent executor
+//! (`crate::chat::manager::declarative`). A session that reaches this path is
+//! answered that the mode is unavailable.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,18 +39,13 @@ const CHAT_AGENT_RUN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Trait abstracting Python agent execution for chat sessions.
 ///
-/// Decouples `apollia-runtime` from PyO3
-/// by defining the execution contract as a trait. The concrete implementation
-/// using `AIPBridge` + `RuntimeContext` lives in `apollia-cli`.
+/// Defines the execution contract as a trait. No implementation ships; the
+/// tests of the executor use their own.
 #[async_trait::async_trait]
 pub trait ChatAgentRunner: Send + Sync {
     /// Execute an agent's `run()` with the given task and return the result.
     ///
-    /// The implementation is responsible for:
-    /// - Loading the agent module via PyO3 (if not cached)
-    /// - Creating the `RuntimeContext` (tools, memory, LLM, budget)
-    /// - Calling `AIPBridge.call_run(task, ctx)`
-    /// - Returning the `AIPResult`
+    /// The implementation runs the agent on the task and returns its result.
     async fn run_agent(&self, agent_name: &str, task: AIPTask) -> Result<AIPResult, String>;
 }
 
@@ -265,10 +261,30 @@ impl AgentChatExecutor {
             tool_call_id: "agent_action".into(),
             tool_name: "agent_action".into(),
             prompt: prompt.clone(),
+            answers: ["once", "always", "refuse"].map(String::from).to_vec(),
+            detail: prompt.clone(),
+            code: None,
+            working_dir: None,
         });
 
         let key = format!("{}::{}::agent_action", session.id, message_id);
-        let rx = pending_approvals.register(key.clone());
+        let rx = pending_approvals.register_asked(
+            key.clone(),
+            crate::chat::ChatApprovalAsked {
+                session_id: session.id.clone(),
+                message_id: message_id.to_string(),
+                tool_call_id: "agent_action".into(),
+                tool_name: "agent_action".into(),
+                agent_id: session.agent_name.clone(),
+                family: None,
+                prompt: prompt.clone(),
+                detail: None,
+                code: None,
+                working_dir: None,
+                answers: crate::governance::NO_ALWAYS_ANSWERS.to_vec(),
+                asked_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
         pending_approvals.start_timeout(ApprovalTimeoutParams {
             key,
             duration: CHAT_APPROVAL_TIMEOUT,
@@ -296,7 +312,7 @@ impl AgentChatExecutor {
                 Ok(build_response(content, vec![]))
             }
 
-            ToolDecision::Accept | ToolDecision::AlwaysAccept { .. } => {
+            ToolDecision::Accept | ToolDecision::AlwaysAccept => {
                 let newly_authorized = if decision.is_always_accept() {
                     vec!["agent_action".to_string()]
                 } else {
@@ -402,7 +418,6 @@ fn session_to_task(session: &ChatSession, user_message: &str) -> AIPTask {
         // No skill_id: conversational chat-mode invocation, not an A2A
         // delegation to a targeted skill.
         skill_id: None,
-        project_id: session.project_id.clone(),
         input: AIPInput {
             parts: vec![AIPPart::Text(TextPart {
                 text: user_message.to_string(),
@@ -490,6 +505,7 @@ fn build_response(content: String, newly_authorized: Vec<String>) -> ChatAgentRe
         // reported as unknown (window None, occupancy zero).
         context_window_tokens: None,
         context_tokens_used: 0,
+        llm_calls: Vec::new(),
     }
 }
 
@@ -620,7 +636,6 @@ mod tests {
             id: "sess-test".into(),
             mode: ChatMode::Agent,
             agent_name: Some(agent_name.into()),
-            system_prompt: String::new(),
             status: super::super::types::SessionStatus::Active,
             history: vec![],
             authorized_tools: HashSet::new(),
@@ -631,11 +646,12 @@ mod tests {
             title: None,
             parent_session_id: None,
             fork_depth: 0,
-            project_id: None,
-            force_project_context_inject: false,
-            fs_allow_rules: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             plan_mode: false,
             plan_phase: super::super::types::PlanPhase::Done,
+            profile_id: None,
+            use_profile: true,
+            settings: crate::chat::SessionSettings::default(),
+            notes: String::new(),
         }
     }
 
@@ -644,7 +660,6 @@ mod tests {
             id: "sess-history".into(),
             mode: ChatMode::Agent,
             agent_name: Some("test-agent".into()),
-            system_prompt: String::new(),
             status: super::super::types::SessionStatus::Active,
             history: vec![
                 ChatMessage {
@@ -706,11 +721,12 @@ mod tests {
             title: None,
             parent_session_id: None,
             fork_depth: 0,
-            project_id: None,
-            force_project_context_inject: false,
-            fs_allow_rules: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             plan_mode: false,
             plan_phase: super::super::types::PlanPhase::Done,
+            profile_id: None,
+            use_profile: true,
+            settings: crate::chat::SessionSettings::default(),
+            notes: String::new(),
         }
     }
 
@@ -1001,32 +1017,37 @@ mod tests {
         assert!(response.newly_authorized.is_empty());
     }
 
-    /// Runner whose one tool call goes through the MCP task approval gate, the
-    /// way a gated executor answers inside a real agent run.
+    /// Runner that pauses on an approval payload, and runs its call only when
+    /// the response it is resumed with carries that very payload, approved.
     struct GatedCallRunner;
 
     #[async_trait::async_trait]
     impl ChatAgentRunner for GatedCallRunner {
         async fn run_agent(&self, _name: &str, task: AIPTask) -> Result<AIPResult, String> {
-            let input = serde_json::json!({"page": "notes", "text": "hello"});
-            let approval = apollia_mcp::task_approval::TaskApproval::new(task.input_response);
-            match apollia_mcp::task_approval::decide("espace-write/write_page", &input, &approval) {
-                apollia_mcp::task_approval::GateDecision::Run => {
-                    Ok(AIPResult::completed("page written"))
+            let payload = serde_json::json!({
+                "genre": "approbation",
+                "geste": "espace-write/write_page",
+                "risque": "medium",
+                "detail": ["page: notes", "text: hello"],
+            });
+            match task.input_response {
+                None => Ok(AIPResult::input_required_with_payload(
+                    "Approve the call to espace-write/write_page",
+                    serde_json::json!({}),
+                    payload,
+                )),
+                Some(response) if response.payload.as_ref() != Some(&payload) => {
+                    Ok(AIPResult::failed("MISMATCH", "the payload was not carried"))
                 }
-                apollia_mcp::task_approval::GateDecision::Require { prompt, payload } => Ok(
-                    AIPResult::input_required_with_payload(&prompt, serde_json::json!({}), payload),
-                ),
-                apollia_mcp::task_approval::GateDecision::Deny { .. } => {
-                    Ok(AIPResult::failed("DENIED", "call denied"))
-                }
+                Some(response) if response.approved => Ok(AIPResult::completed("page written")),
+                Some(_) => Ok(AIPResult::failed("DENIED", "call denied")),
             }
         }
     }
 
     #[tokio::test]
     async fn test_chat_approval_runs_the_gated_call_it_approved() {
-        // GIVEN an agent whose call to a server requiring approval pauses on the gate
+        // GIVEN an agent whose call pauses on an approval payload
         let runner = Arc::new(GatedCallRunner);
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel(128);
         let executor = AgentChatExecutor::new(runner, event_tx);
@@ -1054,7 +1075,7 @@ mod tests {
             .await
             .expect("should succeed after approval");
 
-        // THEN the resumed run carries the pause's payload, so the gate runs the call
+        // THEN the resumed run carries the pause's payload, so the call runs
         assert_eq!(response.content, "page written");
     }
 
@@ -1073,7 +1094,7 @@ mod tests {
         tokio::spawn(async move {
             let key = format!("{sid}::msg-hitl3::agent_action");
             poll_until(Duration::from_secs(5), || {
-                approvals_clone.resolve(&key, ToolDecision::always_accept_default())
+                approvals_clone.resolve(&key, ToolDecision::AlwaysAccept)
             })
             .await;
         });

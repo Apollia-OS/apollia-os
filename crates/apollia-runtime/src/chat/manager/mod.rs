@@ -18,40 +18,35 @@ use tracing::{debug, error, info, warn};
 
 use apollia_core::plan::{Plan, PlanMutation};
 use apollia_core::todo::TodoItem;
-use apollia_core::{
-    AutonomyConfig, AutonomyLevel, AutonomyLevelConfig, RunId, RuntimeEvent, StepBudgetConfig,
-};
+use apollia_core::{AutonomyLevel, RunId, RuntimeEvent, StepBudgetConfig};
 use apollia_llm::{LlmRouter, ToolInvoker};
 use apollia_mcp::session::LoadingMode;
 use apollia_mcp::tool_search::{ToolIndexSnapshot, ToolSearchExecutor};
 use apollia_memory::user_memory::UserMemoryRepository;
-use apollia_oria::budget::StepBudget;
-use apollia_oria::verification::{CriticPass, VerificationLoop};
-use apollia_permissions::prefix_rule_engine::RuleAction;
-use apollia_permissions::PrefixRuleEngine;
-use apollia_tools::chat_libre_config::ChatLibreConfigRepository;
+use apollia_oria::context_manager::ContextOverflow;
 use apollia_tools::governance_db::GOVERNANCE_DB_FILENAME;
-use apollia_tools::{ProjectRepository, ToolRegistryHandle};
+use apollia_tools::ToolRegistryHandle;
 
 use super::a2a_tools::CompositeToolInvoker;
 use super::agent_chat::{AgentChatExecutor, AgentChatRequest, ChatAgentRunner};
-use super::builtin_agent::{
-    BuiltInChatAgent, BuiltInChatAgentDeps, ChatAgentResponse, HitlInvokerParams,
-    NativeChatToolInvoker, DEFAULT_CONTEXT_WINDOW_SIZE,
+use super::agent_executor::{
+    AgentExecutor, AgentExecutorDeps, AgentRunSpec, ApolliaContext, Composition, RunInput,
+    SessionWiring,
 };
+use super::builtin_agent::{ChatAgentResponse, NativeChatToolInvoker, DEFAULT_CONTEXT_WINDOW_SIZE};
 use super::extractor::UserMemoryExtractor;
 use super::plan_actor::{spawn_plan_actor, PlanHandle};
 use super::repository::{AppendMessageParams, ChatSessionRepository, ToolApprovalLogEntry};
+use super::session_settings::SessionSettings;
 use super::todo_actor::spawn_todo_actor;
 use super::todo_handle::TodoHandle;
 use super::types::{
     ChatError, ChatMessage, ChatMode, ChatRole, ChatSession, ExchangeState, InjectedInstruction,
-    MessageId, PauseState, PendingChatApprovals, PendingFilesystemApprovals, PlanPhase,
-    ProjectContextProvider, RecentSessionSummary, SessionDetail, SessionId, SessionInfo,
-    SessionMetrics, SessionStatus, ToolCallRecord, ToolDecision,
+    MessageId, PauseState, PendingChatApprovals, PlanPhase, RecentSessionSummary,
+    SessionConfigUpdate, SessionDetail, SessionId, SessionInfo, SessionMetrics, SessionStatus,
+    ToolCallRecord, ToolDecision,
 };
 use crate::a2a::A2AInvoker;
-use crate::api::routes_agents::AgentLoader;
 use crate::eventbus::EventBusSender;
 use crate::hooks::executor::HookExecutor;
 use crate::registry::AgentRegistryHandle;
@@ -120,8 +115,6 @@ struct ChatSessionManager {
     plan_mode_default: bool,
     /// Pending tool approval channels (operator HITL).
     pending_chat_approvals: PendingChatApprovals,
-    /// Pending filesystem HITL approval channels.
-    pending_fs_approvals: PendingFilesystemApprovals,
     /// Optional user memory repository for system prompt enrichment.
     user_memory: Option<Arc<std::sync::Mutex<UserMemoryRepository>>>,
     /// Stateful extractor for passive memory enrichment from conversations.
@@ -130,10 +123,6 @@ struct ChatSessionManager {
     tx: mpsc::Sender<ChatCommand>,
     /// Optional A2A invoker, when present, worker agent skills are exposed as virtual tools.
     a2a_invoker: Option<Arc<A2AInvoker>>,
-    /// Optional project context provider for injecting project context into system prompts.
-    project_context: Option<Arc<dyn ProjectContextProvider>>,
-    /// Optional project repository for resolving workspace_path per session.
-    project_repo: Option<Arc<ProjectRepository>>,
     /// Pending user input registry for the `ask_user` tool.
     pending_user_inputs: apollia_tools::tools::ask_user::PendingUserInputs,
     /// MCP manager handle, populated when the supervisor's MCP bootstrap
@@ -182,6 +171,16 @@ struct ChatSessionManager {
     /// Shared lifecycle hook executor, cloned into each exchange so the ReAct
     /// loop can run PreToolUse and the best-effort hooks. `None` disables hooks.
     hook_executor: Option<Arc<HookExecutor>>,
+    /// Source of the executors of the package tools, set once the embedded
+    /// interpreter is available. `None` leaves every `pkg:` tool unrunnable.
+    package_tools: Option<Arc<dyn crate::package_tools::PackageToolHost>>,
+    /// Reads and runs the agents and workflows an agent was granted, set once
+    /// the workflow engine is up. `None` offers no `agent:` or `workflow:`
+    /// tool.
+    composer: Option<Arc<dyn crate::composition::Composer>>,
+    /// The governance every tool call of a run is decided by, set once the
+    /// supervisor has started it. `None` decides from an empty state.
+    governance: Option<crate::governance::GovernanceHandle>,
     /// Per-session cooperative pause tokens.
     ///
     /// A fresh [`CancellationToken`] is inserted when a turn is dispatched and a
@@ -198,6 +197,10 @@ struct ChatSessionManager {
     /// Operator instructions queued for a paused session, consumed on the next
     /// resume turn. At most one is held per session.
     pending_injections: HashMap<SessionId, InjectedInstruction>,
+    /// The answer the next exchange of a session continues, set when the user
+    /// asks for the last answer to be continued and taken by the dispatch of
+    /// that exchange.
+    answer_prefills: HashMap<SessionId, String>,
     /// Plan continuation directives that arrived while the session was still
     /// `Processing`, re-dispatched when its `ExchangeComplete` lands.
     ///
@@ -208,44 +211,107 @@ struct ChatSessionManager {
     /// approved plans unexecuted), it is parked here. At most one is held per
     /// session, latest decision wins.
     pending_plan_continuations: HashMap<SessionId, String>,
+    /// The live sections of the configuration this actor follows, once the
+    /// supervisor handed them over; `None` keeps the values it was spawned
+    /// with.
+    config_feed: Option<crate::config_reload::ConfigFeed>,
+    /// Sends the plan-mode default to the handles, which answer it without a
+    /// round trip.
+    plan_mode_default_tx: tokio::sync::watch::Sender<bool>,
+    /// Sends the hook executor in force to the handles, which list its
+    /// handlers.
+    hook_executor_tx: tokio::sync::watch::Sender<Option<Arc<HookExecutor>>>,
 }
 
 mod actor;
+mod agent_draft;
+mod agent_task;
+mod answers;
+mod apollia_agent;
 mod authz;
+mod code_context;
 mod command;
 mod control;
+mod declarative;
+mod disabled;
 mod dispatcher;
+mod documents;
 mod exchange;
+mod folders;
 mod handle;
 mod handle_ext;
+mod images;
 mod libre;
+mod listing;
+mod live_config;
 mod plan;
 mod session;
+mod sources;
+mod trash;
 mod types;
 mod user_input;
 
 #[cfg(test)]
+mod answers_tests;
+#[cfg(test)]
+mod documents_tests;
+#[cfg(test)]
+mod images_tests;
+#[cfg(test)]
+mod live_config_tests;
+#[cfg(test)]
 mod plan_regression_tests;
 #[cfg(test)]
+mod preferred_backend_tests;
+#[cfg(test)]
+mod profile_tests;
+#[cfg(test)]
+mod session_settings_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trash_tests;
 
 pub(in crate::chat::manager) use dispatcher::{
     now_rfc3339, resolve_workspace_for_session, session_to_info,
 };
 pub(in crate::chat::manager) use libre::{
-    accumulate_exchange_metrics, apply_libre_overrides, load_chat_libre_overrides,
-    log_resolution_metadata, merge_live_authorized_tools, persist_chat_allow_rule,
-    run_libre_exchange,
+    accumulate_exchange_metrics, apollia_mission, libre_session_defaults, log_resolution_metadata,
+    run_libre_exchange, session_run_grants,
 };
 pub(in crate::chat::manager) use types::{
-    AlwaysAcceptScopeCtx, ChatLibreOverrides, ExchangeSummaryParams, FullDispatcherParams,
-    LibreExchangeParams, LibreSessionDefaults, PendingUserInputMeta, RegisterUserInputReplyParams,
+    ChatLibreOverrides, ExchangeSummaryParams, FullDispatcherParams, LibreExchangeParams,
+    LibreSessionDefaults, PendingUserInputMeta, RegisterUserInputReplyParams,
     ResolvedSessionInvoker, WorkspaceResolutionParams,
 };
 
+/// The executors of the package tools for one run of `caller`, stopped by
+/// `cancel`; none while no host is set.
+pub(in crate::chat::manager) fn package_executors(
+    host: &Option<Arc<dyn crate::package_tools::PackageToolHost>>,
+    caller: &str,
+    cancel: &CancellationToken,
+) -> Vec<Box<dyn apollia_tools::executor::ToolExecutor>> {
+    host.as_ref()
+        .map(|host| host.executors(caller, cancel))
+        .unwrap_or_default()
+}
+
+/// The default access in force, as `[tools.new_agent]` states it; the reading
+/// family when the chat was given no configuration.
+pub(in crate::chat::manager) fn default_access_of(
+    cfg: Option<&ChatToolsConfig>,
+) -> apollia_tools::DefaultAccess {
+    cfg.map(|cfg| apollia_tools::DefaultAccess::from_config(&cfg.tools_config.new_agent))
+        .unwrap_or_default()
+}
+
+pub use agent_task::AgentTaskRun;
+pub use answers::{AnswerAction, AnswerOutcome, Continuation, ContinuationRefusal};
 pub use command::ChatCommand;
+pub use folders::FolderAction;
 pub use handle::ChatSessionManagerHandle;
 pub use types::{
     ChatPlanSnapshot, ChatToolsConfig, CreateSessionParams, InjectError, PauseError,
-    PendingUserInputView, SessionAuthorizationView, APOLLIA_CHAT_AGENT_ID,
+    PendingUserInputView, APOLLIA_CHAT_AGENT_ID,
 };

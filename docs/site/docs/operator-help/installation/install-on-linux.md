@@ -1,17 +1,20 @@
 ---
-title: Install Apollia on Linux
+title: Install Apollia Desktop on Linux
 slug: /operator-help/installation/install-on-linux
 sidebar_position: 3
 ---
 
-# Install Apollia on Linux
+# Install Apollia Desktop on Linux
+
+The application is Apollia Desktop. Its installers and the files they put on
+disk still carry the name of the engine underneath, Apollia OS, which is the
+name you will read below.
 
 Every file below is attached to each release on the publication page,
 `https://github.com/Apollia-OS/apollia-os/releases`.
 
 - **`.AppImage`** (recommended, x86_64): portable desktop application, no installation required.
 - **`.deb`** (x86_64): Debian/Ubuntu package (`sudo apt install ./Apollia-OS_<version>_amd64.deb`).
-- **`Apollia-OS_<version>_amd64-cuda.deb`**: the same package with a CUDA build of the inference engine, for an NVIDIA card. No CUDA AppImage is published.
 - **`apollia-os-linux-x86-cpu.tar.gz`** and **`apollia-os-linux-x86-vulkan.tar.gz`**: the two command-line bundles for x86_64, one per engine, CPU or Vulkan.
 - **`apollia-os-linux-arm-cpu.tar.gz`**: the command-line bundle for aarch64. No desktop installer is published for that architecture.
 
@@ -34,8 +37,8 @@ The app starts the daemon in the background. The daemon serves local LLM inferen
 
 One thing to know before you pick this format: an AppImage is a read-only mount
 that exists only while the app runs. The command line lives inside that mount,
-and the `/usr/local/bin` link offered by **Settings > System** points into it, so
-the link dangles as soon as you quit. For a command line that survives, install
+and the `/usr/local/bin` link offered by **System > Hardware** in the settings, with the
+developer mode on, points into it, so the link dangles as soon as you quit. For a command line that survives, install
 the `.deb` or unpack one of the `apollia-os-linux-*` archives.
 
 ## Installation (.deb)
@@ -44,11 +47,13 @@ the `.deb` or unpack one of the `apollia-os-linux-*` archives.
 sudo apt install ./Apollia-OS_<version>_amd64.deb
 ```
 
-Then launch **Apollia OS** from your desktop application menu: the app starts
+Then launch the application from your desktop application menu, under the
+entry **Apollia OS**: the app starts
 the daemon itself. The `apollia-os` command line ships inside the package
-(`/usr/lib/Apollia OS/`) but is not on your `PATH` until you enable it from
-**Settings > System** in the app, which creates the `/usr/local/bin` link. The
-verification commands below assume that link exists.
+(`/usr/lib/Apollia OS/`) but is not on your `PATH` until you enable it in the
+app: turn the developer mode on in **Settings > Developer**, then click
+**Install CLI** in **System > Hardware**, which creates the `/usr/local/bin`
+link. The verification commands below assume that link exists.
 
 ## Verification
 
@@ -84,12 +89,17 @@ menu-bar icon.
 Two accelerations, and Linux answers them differently.
 
 **Local LLM inference already runs on the GPU.** The desktop bundles, AppImage
-and `.deb` alike, embed a Vulkan build of the `llama-server` engine, the
-`-cuda.deb` a CUDA build for NVIDIA cards, and the
+and `.deb` alike, embed a Vulkan build of the `llama-server` engine, and the
 `apollia-os-linux-x86-vulkan.tar.gz` command-line bundle the Vulkan one. Vulkan drives
 NVIDIA, AMD and Intel cards alike. Nothing to install and nothing to set: with a
 working driver the engine uses the card. The `-cpu` bundle is the one to take on
 a machine with no graphics driver.
+
+**An NVIDIA card can go further.** There is one installer per system, and no
+separate one for NVIDIA cards. When the application detects such a card, its AI
+screen offers the accelerated engine, **Speed up with your NVIDIA card**: one
+click downloads it, after its signature is verified, and the next model load
+uses it. On Linux that engine relies on the CUDA libraries of the machine.
 
 **Dictation runs on the processor in the desktop packages.** Speech to text
 runs in the `apollia-runner` sidecar, which is built on whisper. The desktop

@@ -1,10 +1,14 @@
 ---
-title: Installer Apollia sur macOS
+title: Installer Apollia Desktop sur macOS
 slug: /operator-help/installation/install-on-macos
 sidebar_position: 1
 ---
 
-# Installer Apollia sur macOS
+# Installer Apollia Desktop sur macOS
+
+L'application s'appelle Apollia Desktop. Ses installeurs et les fichiers qu'ils
+déposent sur le disque portent encore le nom du moteur qu'elle embarque,
+Apollia OS : c'est le nom que vous lirez ci-dessous.
 
 Apollia est distribué pour macOS depuis la page de publication,
 `https://github.com/Apollia-OS/apollia-os/releases`, qui attache trois fichiers
@@ -16,9 +20,9 @@ pour cette plateforme :
 
 ## Pré-requis
 
-- macOS 13 (Ventura) ou plus récent.
-- Apple Silicon (M1, M2, M3, M4). Le support Intel via Rosetta n'est pas officiel pour v0.1.0.
-- 4 Go de RAM libres minimum. La liste curée proposée à l'accueil est Qwen3 en quatre tailles, 4B, 8B, 14B et 30B-A3B ; 8 Go est un plancher confortable pour le 8B.
+- macOS 13 (Ventura) ou plus récent ; les modèles au format MLX demandent macOS 14 ou plus récent.
+- Apple Silicon (M1, M2, M3, M4). Les Mac Intel ne sont pas pris en charge : aucun installeur n'est publié pour eux.
+- 4 Go de RAM libres minimum. Les modèles proposés au premier lancement sont classés pour votre machine ; 8 Go est un plancher confortable pour un modèle de 8 milliards de paramètres.
 - 10 Go d'espace disque pour le bundle + un modèle quantifié.
 
 ## Installation (DMG)
@@ -71,9 +75,13 @@ Windows et Linux diffèrent ici : la croix y quitte directement.
 Le bundle macOS contient :
 
 - `llama-server` : le moteur d'inférence LLM local (modèles GGUF, accélération Metal). Le daemon le lance et le supervise automatiquement.
+- le moteur MLX, vllm-mlx, exécuté sur l'interpréteur Python embarqué : il sert les modèles au format MLX sur Apple Silicon.
 - `apollia-runner-metal` et `apollia-runner-cpu` : le runner de reconnaissance vocale (STT, whisper), avec accélération Metal ou repli CPU.
 
-Le daemon sélectionne automatiquement l'accélération Metal au démarrage.
+Le daemon sélectionne automatiquement l'accélération Metal au démarrage. Le
+moteur d'un modèle suit son format, GGUF sur `llama-server`, MLX sur vllm-mlx ;
+**Système > Moteurs**, dans les réglages, montre chaque moteur avec sa version
+et permet de changer le moteur d'un format.
 
 ## Mettre à jour
 

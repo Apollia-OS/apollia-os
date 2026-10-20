@@ -26,14 +26,6 @@ export interface GgufModelInfo {
   recommended: boolean;
 }
 
-export interface WhisperModelInfo {
-  path: string;
-  filename: string;
-  size_bytes: number;
-  model_size: string;
-  recommended: boolean;
-}
-
 export interface DownloadProgress {
   id: string;
   downloaded_bytes: number;
@@ -82,7 +74,6 @@ export type RecommendReason =
   | { reason: "tight"; needs_gb: number; budget_gb: number; pool: MemoryPool }
   | { reason: "split_across_memory"; gpu_gb: number; vram_gb: number; system_gb: number }
   | { reason: "native_tool_calling" }
-  | { reason: "supersedes_generation"; replaces: string }
   | { reason: "trained_context"; tokens: number; asked_tokens: number }
   | { reason: "reduced_context"; tokens: number; default_tokens: number }
   | { reason: "fully_accelerated"; layers: number }
@@ -107,8 +98,8 @@ export type RecommendCaveat =
 /** A reason the embedded engine will not run a file. */
 export type RecommendBlocker =
   | { kind: "not_generative"; architecture: string }
+  | { kind: "pooled_output"; architecture: string; pooling_type: number }
   | { kind: "unknown_pre_tokenizer"; pre_tokenizer: string; llama_cpp_tag: string }
-  | { kind: "sharded_download"; shard_count: number }
   | { kind: "not_gguf"; detail: string };
 
 /** What the compatibility gate concluded about a file. */
@@ -162,6 +153,8 @@ export interface RecommendedModel {
   };
   family_id: string;
   family_label: string;
+  /** The model's own name, as its registry card gives it. */
+  model_label: string;
   params_b: number;
   /** Quantisation format, when the file name declares one. */
   quant: string | null;
@@ -181,6 +174,8 @@ export interface HardwareProfileView {
   cpu_model: string;
   cpu_cores: number;
   memory_budget_gb: number;
+  /** What a model can occupy here, GB to the tenth. */
+  total_capacity_gb: number;
   accelerator: { kind: string; [key: string]: unknown };
 }
 
@@ -191,10 +186,41 @@ export interface HardwareProfileView {
  * network means no catalogue, and telling the operator their machine runs
  * nothing would be a different and false claim.
  */
+/** One size of a curated generation, with the repositories that carry it. */
+export interface SelectionVariant {
+  name: string;
+  params_b: number;
+  gguf_repos: string[];
+  /** Empty when no MLX conversion exists. */
+  mlx_repos: string[];
+}
+
+/** One generation of the editorial selection, read from the binary. */
+export interface SelectionFamily {
+  id: string;
+  label: string;
+  publisher: string;
+  released: string;
+  license: string;
+  tool_calling: "none" | "prompted" | "native";
+  variants: SelectionVariant[];
+}
+
+/** Every outcome carries the editorial selection, offline included. */
 export type RecommendOutcome =
-  | { status: "ok"; models: RecommendedModel[]; hardware: HardwareProfileView }
-  | { status: "unreachable"; detail: string; hardware: HardwareProfileView }
-  | { status: "empty"; hardware: HardwareProfileView };
+  | {
+      status: "ok";
+      models: RecommendedModel[];
+      hardware: HardwareProfileView;
+      selection: SelectionFamily[];
+    }
+  | {
+      status: "unreachable";
+      detail: string;
+      hardware: HardwareProfileView;
+      selection: SelectionFamily[];
+    }
+  | { status: "empty"; hardware: HardwareProfileView; selection: SelectionFamily[] };
 
 export async function recommendModels(params?: {
   hf_token?: string | null;
@@ -212,10 +238,6 @@ export async function getAiSetupInfo(): Promise<SystemInfo> {
 
 export async function scanForGgufModels(): Promise<GgufModelInfo[]> {
   return invoke<GgufModelInfo[]>("scan_for_gguf_models");
-}
-
-export async function scanForWhisperModels(): Promise<WhisperModelInfo[]> {
-  return invoke<WhisperModelInfo[]>("scan_for_whisper_models");
 }
 
 // ── LLM setup ────────────────────────────────────────────────────────────────
@@ -278,13 +300,6 @@ export async function getSttConfig(): Promise<SttConfig> {
 
 export async function updateSttConfig(config: SttConfig): Promise<void> {
   return invoke<void>("update_stt_config", { config });
-}
-
-export async function setupWhisperModel(
-  modelPath: string,
-  language: string | undefined,
-): Promise<void> {
-  return invoke<void>("setup_whisper_model", { modelPath, language });
 }
 
 export async function reloadStt(): Promise<void> {

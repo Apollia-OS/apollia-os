@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 /// allowlists, and `tmpfs` mounts are NOT YET ENFORCED (roadmap). Per-process
 /// resource limits (CPU seconds, address space, file descriptors) are applied
 /// via `setrlimit` on Unix; see the `rlimits` module in apollia-tools. The
-/// variant a tool declares is recorded in the audit trail and drives the
-/// `dangerous` opt-in check, not runtime confinement.
+/// variant a tool declares is recorded in the audit trail and, for `Full`,
+/// restricts the descriptor to the code-execution action family; it is not
+/// runtime confinement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxProfile {
@@ -24,17 +25,19 @@ pub enum SandboxProfile {
     /// Enforced today: PID and mount namespace on Linux; nothing on macOS.
     /// NOT YET ENFORCED (roadmap): scoped writable mount, RAM cap, per-profile timeout.
     FileSystem,
-    /// Intent: network access limited to the manifest's `network_allowlist`.
+    /// Intent: network access limited to an allowlist of hosts.
     /// Enforced today: same as `FileSystem` (no network namespace is created).
     /// NOT YET ENFORCED (roadmap): network namespace, `iptables` allowlist.
     NetworkRestricted,
     /// Intent: everything allowed, no isolation restriction.
-    /// REQUIRES `dangerous=true` in ToolDescriptor. Not recommended in production.
+    /// Reserved to a ToolDescriptor of the code-execution action family. Not
+    /// recommended in production.
     Full,
 }
 
 impl SandboxProfile {
-    /// Returns true when this profile requires `dangerous=true` in ToolDescriptor.
+    /// Returns true when this profile restricts a ToolDescriptor to the
+    /// code-execution action family.
     pub fn requires_dangerous_flag(&self) -> bool {
         matches!(self, SandboxProfile::Full)
     }

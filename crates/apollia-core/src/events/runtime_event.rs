@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::mcp_health::McpHealth;
 
-use super::{AgentId, FilesystemPreview, RunId, TaskId, ToolCallRationale};
+use super::{AgentId, ModelUnloadReason, RunId, TaskId, ToolCallRationale};
 
 /// Complete catalogue of Apollia OS runtime events.
 ///
@@ -51,17 +51,6 @@ pub enum RuntimeEvent {
     /// Shutdown requested (SIGTERM or CLI command).
     ShutdownRequested,
 
-    /// Loading an installed agent failed at boot.
-    ///
-    /// Emitted by the Supervisor during auto-load of installed agents.
-    /// The agent is skipped but the runtime continues (graceful degradation).
-    AgentLoadFailed {
-        /// Name of the agent that failed to load.
-        name: String,
-        /// Error message detailing the cause of the failure.
-        error: String,
-    },
-
     /// An agent was installed permanently.
     AgentInstalled {
         /// Unique name of the installed agent.
@@ -72,16 +61,6 @@ pub enum RuntimeEvent {
     /// An installed agent was removed.
     AgentUninstalled {
         /// Name of the uninstalled agent.
-        name: String,
-    },
-    /// An installed agent was enabled for auto-start at boot.
-    AgentEnabled {
-        /// Name of the enabled agent.
-        name: String,
-    },
-    /// An installed agent was disabled (no longer loaded at boot).
-    AgentDisabled {
-        /// Name of the disabled agent.
         name: String,
     },
 
@@ -132,6 +111,32 @@ pub enum RuntimeEvent {
         count: usize,
     },
 
+    /// The `apollia.toml` read at startup was refused: the embedded runtime
+    /// runs on the default values instead, and says so here rather than in
+    /// silence.
+    ///
+    /// Emitted once by the desktop's embedded runtime when it is up; the daemon
+    /// refuses to start on the same file instead.
+    ConfigInvalid {
+        /// Path of the refused file.
+        path: String,
+        /// Every fault found, each at its line.
+        diagnostics: Vec<crate::config::ConfigDiagnostic>,
+    },
+
+    /// A new `apollia.toml`, saved through the configuration routes or changed
+    /// on disk, was applied by the running runtime.
+    ///
+    /// Emitted after each application, by the configuration reloader: the
+    /// sections whose new values the runtime now uses, and the keys whose new
+    /// value waits for a restart.
+    ConfigReloaded {
+        /// The sections applied without a restart, such as `tools` or `hitl`.
+        sections: Vec<String>,
+        /// The dotted keys changed since the start that wait for a restart.
+        pending_restart: Vec<String>,
+    },
+
     /// An MCP server was hot-reloaded successfully.
     ///
     /// Emitted by `McpClientManagerHandle::reload_server` after the new session
@@ -173,6 +178,22 @@ pub enum RuntimeEvent {
         /// Model identifier: file name without extension (.gguf) or API model_id.
         model_id: String,
     },
+    /// A resident local model was relaunched under its preset's new load settings.
+    LlmModelReloaded {
+        /// Logical backend name, the model the preset belongs to.
+        backend: String,
+        /// Path to the `.gguf` file the new process serves.
+        model_path: String,
+    },
+    /// A resident local model was unloaded and its memory given back.
+    LlmModelUnloaded {
+        /// Wire name of the engine that served it (`llama-server`, `vllm-mlx`).
+        engine: String,
+        /// Path the model was loaded from, the key of the resident list.
+        model_path: String,
+        /// Why it was unloaded.
+        reason: ModelUnloadReason,
+    },
     /// Loading an LLM backend failed: backend skipped, runtime continues.
     LlmModelFailed {
         /// Logical backend name.
@@ -201,6 +222,26 @@ pub enum RuntimeEvent {
         /// Run this call belongs to, when emitted within a correlated run.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<RunId>,
+        /// Conversation the call was made in (`None` outside a conversation).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Turn of that conversation: the identifier of the assistant message
+        /// that answers it (`None` outside a conversation).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        /// Time to first token in milliseconds; `None` when not measured, as
+        /// for a call answered in one piece.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttft_ms: Option<u64>,
+        /// Why the call ended: `stop`, `tool_calls`, `length`, `error` or
+        /// `cancelled`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<String>,
+        /// Time spent generating in milliseconds: the engine's decode time
+        /// when it reports one, otherwise latency minus time to first token;
+        /// `None` when neither is known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation_ms: Option<u64>,
     },
 
     /// A full LLM response captured for deterministic replay.
@@ -448,9 +489,10 @@ pub enum RuntimeEvent {
     /// Emitted by ORIA once the suspension is detected.
     /// - **Direct mode**: emitted by `ORIAEngine::execute_direct()` when the
     ///   agent returns `AIPResult::input_required()`. `step_id` is `None`.
-    /// - **Orchestrated mode**: emitted by `ActorLoop::suspend_for_approval()`
-    ///   before executing a step whose tool is in `tools_requiring_approval`.
-    ///   `step_id` is `Some(step.step_id)`.
+    ///
+    /// A step of a plan raises no such event: its tool calls are decided by
+    /// governance where they are made, and one that asks raises
+    /// `ChatApprovalRequired`.
     TaskInputRequired {
         /// Identifier of the suspended task.
         task_id: TaskId,
@@ -461,6 +503,47 @@ pub enum RuntimeEvent {
         /// `None` for direct-mode suspensions (the whole task is suspended).
         /// `Some(step_id)` for orchestrated-mode suspensions (a specific step).
         step_id: Option<String>,
+    },
+
+    /// An item of a batch waits for a decision on an access nobody granted.
+    ///
+    /// Its agent reached for that access during the run, which stopped.
+    /// Emitted by the batch engine. The item waits for a decision rather than
+    /// failing, and the batch goes on with its other items; once the access is
+    /// granted, the item is run again from its input.
+    BatchItemAwaitingApproval {
+        /// The batch.
+        batch_id: String,
+        /// Position of the item in its source, from 0.
+        rank: u64,
+        /// Agent the batch runs.
+        agent_id: AgentId,
+        /// Access the agent reached for.
+        access: String,
+    },
+
+    /// A batch ended, with its successes and failures.
+    ///
+    /// Every item ran, the batch was interrupted past its failure threshold,
+    /// or it was stopped. Emitted by the batch engine once no item of the batch is running any
+    /// more, with the counters as they stand then.
+    BatchEnded {
+        /// The batch.
+        batch_id: String,
+        /// Agent the batch runs.
+        agent_id: AgentId,
+        /// `completed`, `interrupted` or `stopped`.
+        state: String,
+        /// Items of the batch.
+        total: u64,
+        /// Items that succeeded.
+        completed: u64,
+        /// Items that failed.
+        failed: u64,
+        /// Items canceled, or never run because the batch was stopped.
+        canceled: u64,
+        /// Items waiting for an access to be granted.
+        awaiting: u64,
     },
 
     /// A task resumed after a HITL suspension.
@@ -599,6 +682,21 @@ pub enum RuntimeEvent {
         reason: String,
     },
 
+    /// The model assigned to an agent is not available, so the call runs on the default model.
+    ///
+    /// Emitted by `LlmRouter::resolve_agent_model` at call time: the agent keeps
+    /// working, and its sheet can say which model it asked for and which one
+    /// answered.
+    LlmAgentModelFallback {
+        /// Agent whose call fell back.
+        agent: String,
+        /// Model the agent asked for: the user's assignment, or the backend its
+        /// manifest declares.
+        requested: String,
+        /// Model that served the call instead.
+        used: String,
+    },
+
     /// A human approval is required for a tool call in the chat.
     ChatApprovalRequired {
         /// Session identifier.
@@ -612,8 +710,24 @@ pub enum RuntimeEvent {
         tool_call_id: String,
         /// Name of the tool requiring approval.
         tool_name: String,
-        /// Prompt shown to the user.
+        /// Prompt shown to the user: a short preview of the call, or the
+        /// whole command or source for a tool that runs code.
         prompt: String,
+        /// The answers offered, among `"once"`, `"always"` and `"refuse"`.
+        /// Empty in a request that predates them.
+        #[serde(default)]
+        answers: Vec<String>,
+        /// The full arguments of the call, as JSON, for the detail a short
+        /// preview leaves out.
+        #[serde(default)]
+        detail: String,
+        /// For a tool that runs code, the whole command or source, never
+        /// truncated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        /// For a tool that runs code, the folder it runs in.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
     },
     /// A tool-call approval was resolved by the user.
     ChatApprovalResolved {
@@ -872,8 +986,6 @@ pub enum RuntimeEvent {
     /// The frontend uses this event to permanently hide the resume banner and
     /// enable all application features.
     OnboardingCompleted {
-        /// Profile chosen by the user (`"operator"` or `"builder"`).
-        profile: String,
         /// Total onboarding duration in seconds.
         duration_sec: u64,
         /// Total number of actions completed during the flow.
@@ -1178,6 +1290,22 @@ pub enum RuntimeEvent {
         request_id: String,
     },
 
+    /// Governance started or stopped failing closed.
+    ///
+    /// Emitted by the governance actor when what it decides from can no longer
+    /// be read (`governance.db` unreadable, a deposited policy refused, or
+    /// the journal the policy requires not open) and again when it can. While it fails closed, every sensitive tool call and
+    /// every new connection is refused; reading continues.
+    GovernanceFailClosed {
+        /// `true` while governance fails closed, `false` once it recovered.
+        active: bool,
+        /// `store_unreadable`, `policy_invalid` or `journal_unavailable` while
+        /// active, `None` once recovered.
+        cause: Option<String>,
+        /// What could not be read, `None` once recovered.
+        detail: Option<String>,
+    },
+
     // ── File Timestamp Cache events ──────────────────
     /// A previously read file was modified between two accesses.
     ///
@@ -1215,27 +1343,6 @@ pub enum RuntimeEvent {
     DecisionPointRecorded {
         /// The decision point, chosen plus alternatives (<= 3).
         point: crate::decision_point::DecisionPoint,
-    },
-
-    // ── HITL filesystem events ───────────────────────────────────────────
-    /// A filesystem operation by an agent requires a human approval.
-    ///
-    /// Emitted by `NativeChatToolInvoker` when `RiskClassifier::classify_filesystem`
-    /// returns `RiskLevel::Medium` or higher. The frontend intercepts this event
-    /// via the dedicated Tauri bridge to show `HitlFilesystemModal`.
-    HitlFilesystemRequired {
-        /// Unique identifier of this request (UUID v4).
-        request_id: String,
-        /// Chat session that triggered the operation.
-        session_id: String,
-        /// Risk level: `"medium"` | `"high"` | `"critical"`.
-        level: String,
-        /// Operation type: `"write"` | `"delete"` | `"chmod"`.
-        op: String,
-        /// Canonicalized path of the target.
-        path: String,
-        /// Before/after content preview for display in the modal.
-        preview: FilesystemPreview,
     },
 
     // ── Memory namespaces ─────────────────────
@@ -1291,6 +1398,24 @@ pub enum RuntimeEvent {
         /// the agent provided no structured fields.
         #[serde(default)]
         extra_fields_json: Option<String>,
+    },
+
+    /// An agent read the user profile through `ctx.profile`.
+    ///
+    /// Emitted by `apollia-aip::profile` on each read (`get`, `has`, `all`),
+    /// only reachable when the profile source is checked for the agent.
+    /// Persisted to `runtime_events.db` when the read belongs to a task, so it
+    /// shows in that execution's trace.
+    ProfileRead {
+        /// Task the read belongs to; `None` outside a task.
+        #[serde(default)]
+        task_id: Option<TaskId>,
+        /// Agent that read the profile.
+        agent_id: AgentId,
+        /// Identifier of the profile served.
+        profile_id: String,
+        /// When the read happened, RFC 3339 UTC.
+        read_at: String,
     },
 
     // ── Observability - ReAct loop & enriched tools ───────────
@@ -1371,6 +1496,20 @@ pub enum RuntimeEvent {
         /// Run this call belongs to, when emitted within a correlated run.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<RunId>,
+        /// Identifier of the call within its run: the identifier the model gave
+        /// the call when there is one, the `event_id` otherwise. It is what
+        /// joins this record to the captured arguments and output of the call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        /// Action family of the tool, under its wire name (`read`,
+        /// `write_or_delete`, ...). `None` when the emitter does not know it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<String>,
+        /// What the call acts on: the value of the one argument the tool
+        /// designates as its target, an address reduced to its host. Never a
+        /// content. `None` for a tool that designates none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
     /// The tool finished its execution.
     ///
@@ -1398,6 +1537,16 @@ pub enum RuntimeEvent {
         /// Run this call belongs to, when emitted within a correlated run.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<RunId>,
+        /// Identifier of the call within its run, the one its
+        /// `ToolCallStarted` carries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        /// Action family of the tool, as on the `ToolCallStarted`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        family: Option<String>,
+        /// What the call acted on, as on the `ToolCallStarted`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
     /// The tool was denied (manifest, permission rule, HITL).
     ///
@@ -1489,6 +1638,36 @@ pub enum RuntimeEvent {
         /// `true` if a heuristic repair was attempted.
         repair_attempted: bool,
     },
+
+    /// A declared step of a workflow run opened.
+    WorkflowStepStarted {
+        /// The run.
+        run_id: String,
+        /// The workflow, `<package>/<workflow>`.
+        workflow_id: String,
+        /// The step, as the workflow declares it.
+        step: String,
+    },
+    /// A step of a workflow run ended without error.
+    WorkflowStepCompleted {
+        /// The run.
+        run_id: String,
+        /// The workflow, `<package>/<workflow>`.
+        workflow_id: String,
+        /// The step.
+        step: String,
+    },
+    /// A step of a workflow run raised, or was stopped with its run.
+    WorkflowStepFailed {
+        /// The run.
+        run_id: String,
+        /// The workflow, `<package>/<workflow>`.
+        workflow_id: String,
+        /// The step.
+        step: String,
+        /// What went wrong.
+        error: String,
+    },
 }
 
 impl RuntimeEvent {
@@ -1503,7 +1682,6 @@ impl RuntimeEvent {
                 | RuntimeEvent::StepCompleted { .. }
                 | RuntimeEvent::LlmCallCompleted { .. }
                 | RuntimeEvent::PermissionRequired { .. }
-                | RuntimeEvent::HitlFilesystemRequired { .. }
         )
     }
 }

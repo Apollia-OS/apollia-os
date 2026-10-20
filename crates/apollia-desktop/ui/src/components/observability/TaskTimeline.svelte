@@ -154,7 +154,8 @@
             value: String(event.exit_code),
           });
         }
-        const failed = event.exit_code !== null && event.exit_code !== 0;
+        const failed =
+          event.success === false || (event.exit_code !== null && event.exit_code !== 0);
         return {
           tone: "tool",
           titleKey: failed
@@ -407,7 +408,7 @@
 
           <div class="flex flex-shrink-0 items-center gap-1.5">
             {#if row.truncated}
-              <Badge variant="outline" size="sm">{$t("tasks.truncated")}</Badge>
+              <Badge variant="outline" size="sm">{$t("observability.task_timeline_truncated")}</Badge>
             {/if}
             {#if row.failed}
               <Badge variant="danger" size="sm">

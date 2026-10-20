@@ -12,10 +12,10 @@ deterministically-seeded** data profile, so read commands assert KNOWN content
 bash tests/cli/cli-e2e.sh
 
 # Tracks 1 + 2, spawns the daemon, no model (Track 3 records a justified skip):
-just cli-e2e-runtime
+just test-cli-runtime
 
 # All three tracks; Track 3 loads the given GGUF read-only:
-just cli-e2e-model ~/.apollia/models/Qwen3-30B-A3B-Q4_K_M.gguf
+just test-cli-model /path/to/model.gguf
 
 # The raw form behind both recipes (~90 s on a debug build):
 APOLLIA_REQUIRE_RUNTIME=1 bash tests/cli/cli-e2e.sh
@@ -40,6 +40,7 @@ tests/cli/
   tracks/
     track1_offline.sh   OFFLINE deterministic (seeded content + exit contract)
     track2_runtime.sh   RUNTIME deterministic (daemon on seeded HOME + CRUD)
+    track2_packaged.sh  RUNTIME deterministic (a packaged agent and its workflow)
     track3_llm.sh       LLM capture (non-deterministic: structure only + capture)
   report/               report.json + report.md (git-ignored output)
 ```
@@ -50,10 +51,11 @@ The suite does not build state from scratch; it loads the shared, committed seed
 builder at `tests/cli/seed/` (one source of truth with the desktop
 automation suite, never a fork). `lib/seed.sh` rebuilds a throwaway `HOME` per
 phase, so the reference fixtures a later assertion depends on are never mutated,
-and the real `~/.apollia` is never written to; when `APOLLIA_TEST_MODEL_GGUF` is
-unset, Track 3 reads one file from it (the default model GGUF), read-only.
-Isolation is a `HOME` swap: the CLI resolves everything from `$HOME/.apollia`
-and `$HOME/.config/apollia`.
+and the real `~/.apollia` is never written to. Track 3 reads one file, the GGUF
+`APOLLIA_TEST_MODEL_GGUF` names, read-only; with the variable unset it is
+skipped.
+Isolation is a `HOME` swap: the CLI resolves everything from `$HOME/.apollia`,
+`apollia.toml` included.
 
 The builder also accepts a narrative overlay (`APOLLIA_SEED_OVERLAY`), used to
 give the documentation screenshots a coherent usage history. This suite never
@@ -62,8 +64,9 @@ below is the committed fixture and nothing else. See
 `tests/cli/seed/README.md`, section Overlay.
 
 Seeded content asserted by the tracks (fixed ids, fixed `2026-07-01` data):
-2 projects, 4 permission rules, 5 memory namespaces, 4 chat sessions, 4 agents
-(+ 1 package), 3 LLM backends (`local-llama-server` default), 4 triggers,
+2 former projects (migrated into sources at boot), 4 permission rules, 5 memory namespaces, 4 chat sessions, 4 agents
+(+ 1 package), 3 LLM backends (`local-llama-server` default, `gpu-server` and a
+disabled vLLM server, two OpenAI-compatible servers, none on a cloud API), 4 triggers,
 2 notify channels, 2 live MCP servers named `filesystem` and `notes` (via a
 bundled stdio stub).
 
@@ -71,9 +74,18 @@ bundled stdio stub).
 
 | Track | Gate | What it does |
 |---|---|---|
-| 1 OFFLINE | always | Every command runnable without the daemon, against the seeded HOME. Content assertions (`project list` shows the 2 seeded projects, `permissions list` the 4 rules, `memory search` a known hit, …) plus the exit-code contract (daemon-off → 2, validation → 1, clap → 2). |
+| 1 OFFLINE | always | Every command runnable without the daemon, against the seeded HOME. Content assertions (`permissions list` the 4 rules, `memory search` a known hit, …) plus the exit-code contract (daemon-off → 2, validation → 1, clap → 2). |
 | 2 RUNTIME | `APOLLIA_REQUIRE_RUNTIME=1` | Daemon booted on the seeded HOME, so `agent/trigger/notify/mcp/llm-backends list` return seeded state; full CRUD lifecycle; the runtime-only leaves (`a2a`, `audit verify/anchor`, `tools config`, `stt config`, `mcp show/test/restart`, `trigger fire`, `notify events set`, …). |
 | 3 LLM CAPTURE | `APOLLIA_REQUIRE_RUNTIME=1` + a real model | Non-deterministic commands (`run --stream`, `chat` REPL via pty, `llm chat`, `do`, `explain`). Asserts STRUCTURE ONLY (exit code, streaming happened, terminated in time); the full input/output is captured into `report.md` for human review. The content is never asserted, matching the "prove the stream, not the answer" intent. |
+
+Track 2 ends with a phase of its own, `track2_packaged.sh`: a package holding
+an agent declared in `apollia.toml` and a Python workflow is built, installed,
+run to its end, reached through A2A and uninstalled. It runs on a second
+seeded `HOME` and a daemon of its own, started once the first has stopped, so
+the row counts asserted above never see it. That daemon is started twice: the
+runtime hands the workflows of the installed packages to its engine when it
+starts, so the package is installed under the first start and run under the
+second. No model is involved; the workflow counts the words of its input.
 
 Track 3 gracefully skips when no model is wired or the `apollia-runner` sidecar
 is unreachable; the skip and its reason are recorded in the report.
@@ -84,7 +96,7 @@ is unreachable; the skip and its reason are recorded in the report.
 |---|---|---|
 | `APOLLIA_BIN` | `target/release/apollia-os` (fallback `target/debug`) | binary under test. On Windows the `.exe` suffix is added where it is missing, because git-bash appends it for its own file tests while the Python controls of the suite do not. A relative path is resolved against the calling directory; a path that is not executable, or one this working tree did not produce, makes the suite exit 2 without running an assertion |
 | `APOLLIA_REQUIRE_RUNTIME` | `0` | `1` runs Tracks 2 and 3 |
-| `APOLLIA_TEST_MODEL_GGUF` | `~/.apollia/models/Qwen3-30B-A3B-Q4_K_M.gguf` | real model for Track 3; absent → Track 3 SKIP, never FAIL |
+| `APOLLIA_TEST_MODEL_GGUF` | *(unset)* | real model for Track 3; unset or absent → Track 3 SKIP, never FAIL |
 | `APOLLIA_TEST_REVIEW` | `0` | `1` captures `review .` in Track 3 (slow) |
 | `APOLLIA_TEST_VERBOSE` | `0` | `1` dumps stdout/stderr on FAIL |
 | `APOLLIA_E2E_REPORT_DIR` | `tests/cli/report` | report output directory |
@@ -135,10 +147,10 @@ interactive `chat` REPL is driven under a pty in Track 3.
 The offline track runs on every PR (`cli-e2e` job in `.github/workflows/ci.yml`),
 which builds `apollia-cli`, installs `sqlite3`, verifies the command-coverage
 floor, runs `bash tests/cli/cli-e2e.sh`, and uploads `report/` as an artifact.
-Track 2 runs on the nightly schedule (`cli-e2e-runtime` job in
-`.github/workflows/nightly.yml`: daemon on a throwaway seeded HOME, no model)
-and locally through `just cli-e2e-runtime`. Track 3 needs a real GGUF and stays
-local: `just cli-e2e-model <model.gguf>`, run before releases.
+Track 2 runs on the weekly schedule (`cli-e2e-runtime` job in
+`.github/workflows/weekly.yml`: daemon on a throwaway seeded HOME, no model)
+and locally through `just test-cli-runtime`. Track 3 needs a real GGUF and stays
+local: `just test-cli-model <model.gguf>`, run before releases.
 
 ## The smoke sweep beside it
 

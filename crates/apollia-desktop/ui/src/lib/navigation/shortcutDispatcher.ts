@@ -124,16 +124,21 @@ function altMatches(alt: string, event: KeyboardEvent): boolean {
   return keyEquals(key, event);
 }
 
-/** Whether the event matches a catalog combo string (handles "X / Y" forms). */
+/**
+ * Whether the event matches a catalog combo string (handles "X / Y" forms).
+ * Alternatives are separated by a slash between spaces, so the slash of a
+ * chord such as "⌘+/" stays its key.
+ */
 function comboMatchesEvent(combo: string, event: KeyboardEvent): boolean {
   return combo
-    .split("/")
+    .split(/\s+\/\s+/)
     .map((part) => part.trim())
     .filter(Boolean)
     .some((alt) => altMatches(alt, event));
 }
 
-function onKeydown(event: KeyboardEvent): void {
+/** Match one keydown against the registered handlers and run the first that fits. */
+export function dispatchShortcutEvent(event: KeyboardEvent): void {
   const editable = isEditableTarget(event);
   for (const registered of handlers.values()) {
     const entry = CATALOG.get(registered.id);
@@ -153,6 +158,6 @@ function onKeydown(event: KeyboardEvent): void {
  */
 export function mountShortcutDispatcher(): () => void {
   if (typeof window === "undefined") return () => {};
-  window.addEventListener("keydown", onKeydown);
-  return () => window.removeEventListener("keydown", onKeydown);
+  window.addEventListener("keydown", dispatchShortcutEvent);
+  return () => window.removeEventListener("keydown", dispatchShortcutEvent);
 }

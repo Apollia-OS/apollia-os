@@ -1,20 +1,20 @@
 //! Tauri IPC commands for MCP server management.
 //!
-//! Delegates to the runtime REST API (via TCP) for CRUD operations on connected
-//! servers, and directly to [`McpRegistryClient`] and [`SecretStore`] for
-//! registry discovery and secret management.
+//! Delegates to the runtime REST API for the servers, their secrets and the
+//! registry, through [`RuntimeLink`], so both the embedded and the attached
+//! modes are served.
 
+use crate::attached::{segment, RuntimeLink};
 use apollia_mcp::config::McpServerConfig;
 use apollia_mcp::manager::{
     McpConnectionTestResult, McpResourceSummary, McpServerDetail, McpServerStatus, ProbeSpec,
 };
-use apollia_runtime::embedded::RuntimeHandle;
+use apollia_runtime::governance::{ConnectionEvent, ConnectionGovernance};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::mcp::secret_store::SecretStore;
-
-use super::{http_delete_json, http_get_json, http_patch_json, http_post_json, http_put_json};
+use crate::mcp::npm_server::{self, NpmServerInstaller};
+use crate::mcp::python_server::{self, PythonServerInstaller};
 
 /// The catalogue shapes live in `catalog`, the two registry fetches in
 /// `discovery`, and the HTTP OAuth path in `oauth`.
@@ -28,9 +28,9 @@ pub mod oauth;
 /// Returns an empty list when no MCP servers are configured.
 #[tauri::command]
 pub async fn list_mcp_servers(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
 ) -> Result<Vec<McpServerStatus>, String> {
-    let json = http_get_json(state.api_port, "/api/v1/mcp/servers").await?;
+    let json = state.get_json("/api/v1/mcp/servers").await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse server list: {e}"))
 }
 
@@ -41,9 +41,9 @@ pub async fn list_mcp_servers(
 /// MCP server is connected.
 #[tauri::command]
 pub async fn list_mcp_resources(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
 ) -> Result<Vec<McpResourceSummary>, String> {
-    let json = http_get_json(state.api_port, "/api/v1/mcp/resources").await?;
+    let json = state.get_json("/api/v1/mcp/resources").await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse resource list: {e}"))
 }
 
@@ -53,11 +53,11 @@ pub async fn list_mcp_resources(
 /// Returns an error when the server is not found or MCP is not configured.
 #[tauri::command]
 pub async fn get_mcp_server_detail(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     name: String,
 ) -> Result<McpServerDetail, String> {
     let path = format!("/api/v1/mcp/servers/{name}");
-    let json = http_get_json(state.api_port, &path).await?;
+    let json = state.get_json(&path).await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse server detail: {e}"))
 }
 
@@ -65,14 +65,29 @@ pub async fn get_mcp_server_detail(
 ///
 /// Delegates to `POST /api/v1/mcp/servers` on the embedded runtime. The server
 /// process is spawned and the MCP handshake is performed before returning.
+///
+/// A Python server declared as `uvx <package>` is installed first, into its
+/// own virtualenv, and the persisted command names that venv's entry point;
+/// an npm server declared as `npx <package>` is installed into its own
+/// directory, and the persisted command runs its entry point on Node.js.
+///
+/// `warning_accepted` says the person accepted the warning shown before the
+/// addition; it is journaled first, whatever the addition answers after.
 #[tauri::command]
 pub async fn add_mcp_server(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     config: McpServerConfig,
+    warning_accepted: Option<bool>,
 ) -> Result<McpServerStatus, String> {
+    if warning_accepted == Some(true) {
+        if let RuntimeLink::Embedded(runtime) = state.inner() {
+            record_warning_accepted(&runtime.connection_governance, &config.name);
+        }
+    }
+    let config = install_local_server(&state, config).await?;
     let body =
         serde_json::to_value(&config).map_err(|e| format!("failed to serialize config: {e}"))?;
-    let json = http_post_json(state.api_port, "/api/v1/mcp/servers", &body).await?;
+    let json = state.post_json("/api/v1/mcp/servers", &body).await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse server status: {e}"))
 }
 
@@ -88,12 +103,20 @@ pub async fn add_mcp_server(
 /// orphan keychain entry is preferable to blocking the user from removing
 /// a server they no longer want.
 #[tauri::command]
-pub async fn remove_mcp_server(
-    state: State<'_, RuntimeHandle>,
-    name: String,
-) -> Result<(), String> {
+pub async fn remove_mcp_server(state: State<'_, RuntimeLink>, name: String) -> Result<(), String> {
     let path = format!("/api/v1/mcp/servers/{name}");
-    http_delete_json(state.api_port, &path).await.map(|_| ())?;
+    state.delete_json(&path).await.map(|_| ())?;
+
+    // The connection's own directory (a Python server's venv, an npm
+    // server's packages) goes with it.
+    if let Err(e) = python_server::remove_connection_dir(&python_server::connections_dir(), &name) {
+        tracing::warn!(
+            server = %name,
+            error = %e,
+            detail = "the connection directory may be orphaned",
+            "mcp.connection_dir.purge.failed"
+        );
+    }
 
     // Best-effort OAuth token cleanup. We don't know at this layer whether
     // the server used OAuth, so we always attempt the delete - it's a no-op
@@ -118,11 +141,11 @@ pub async fn remove_mcp_server(
 /// the current command/args/env (placeholders, never resolved secrets).
 #[tauri::command]
 pub async fn get_mcp_server_raw_config(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     name: String,
 ) -> Result<McpServerConfig, String> {
     let path = format!("/api/v1/mcp/servers/{name}/raw_config");
-    let json = http_get_json(state.api_port, &path).await?;
+    let json = state.get_json(&path).await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse server config: {e}"))
 }
 
@@ -139,14 +162,15 @@ pub async fn get_mcp_server_raw_config(
 /// The `config.name` field must equal `name`; the runtime rejects mismatches.
 #[tauri::command]
 pub async fn update_mcp_server_config(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     name: String,
     config: McpServerConfig,
 ) -> Result<McpServerStatus, String> {
+    let config = install_local_server(&state, config).await?;
     let body =
         serde_json::to_value(&config).map_err(|e| format!("failed to serialize config: {e}"))?;
     let path = format!("/api/v1/mcp/servers/{name}/config");
-    let json = http_put_json(state.api_port, &path, &body).await?;
+    let json = state.put_json(&path, &body).await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse server status: {e}"))
 }
 
@@ -181,13 +205,109 @@ pub enum McpConnectionTestResponse {
 /// MCP HTTP OAuth flow should be driven via [`mcp_oauth_login`].
 #[tauri::command]
 pub async fn test_mcp_connection(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     config: McpServerConfig,
 ) -> Result<McpConnectionTestResponse, String> {
+    let config = install_local_server(&state, config).await?;
     let body =
         serde_json::to_value(&config).map_err(|e| format!("failed to serialize config: {e}"))?;
-    let json = http_post_json(state.api_port, "/api/v1/mcp/servers/test", &body).await?;
+    let json = state.post_json("/api/v1/mcp/servers/test", &body).await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse test result: {e}"))
+}
+
+/// Give a configuration the tool classification of the curated entry it was
+/// made from and the origin it is added under, then install a `uvx` server on
+/// the bundled interpreter or an `npx` server on the engine store's Node.js,
+/// and rewrite its command; any other configuration is otherwise unchanged.
+///
+/// The classification is read before the install, which rewrites the command
+/// into the path of an installed entry point. The test before adding goes
+/// through here too: it is the first launch, so what it installs is what the
+/// addition then finds and reuses.
+async fn install_local_server(
+    link: &RuntimeLink,
+    config: McpServerConfig,
+) -> Result<McpServerConfig, String> {
+    let enrichments = crate::mcp::load_builtin_enrichments();
+    let config = crate::mcp::enrichments::with_selection_classification(config, &enrichments);
+    let config = crate::mcp::origin::with_origin(config, &enrichments);
+    if npm_server::needs_install(&config) {
+        ensure_node(link).await?;
+        let installer = NpmServerInstaller::new(python_server::connections_dir());
+        return npm_server::prepare(config, &enrichments, &installer)
+            .await
+            .map_err(|e| e.to_string());
+    }
+    let installer = PythonServerInstaller::new(python_server::connections_dir());
+    python_server::prepare(config, &enrichments, &installer)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Who the connection journal names for a change made from this window.
+const DESKTOP_ACTOR: &str = "desktop";
+
+/// Journal that the warning shown before adding the server `name` was
+/// accepted. The connection is named as the connection list names it.
+fn record_warning_accepted(governance: &ConnectionGovernance, name: &str) {
+    governance.record_or_warn(&ConnectionEvent::WarningAccepted {
+        connection_id: format!("mcp:{name}"),
+        actor: DESKTOP_ACTOR.to_owned(),
+    });
+}
+
+/// Where Node.js stands in the engine store: absent, downloading with the
+/// bytes received, ready, or failed with its reason.
+///
+/// Delegates to `GET /api/v1/engines/nodejs`. The window reads it while an
+/// addition that needs Node.js waits for its download, to show the progress.
+#[tauri::command]
+pub async fn node_runtime_state(
+    state: State<'_, RuntimeLink>,
+) -> Result<serde_json::Value, String> {
+    state.get_json("/api/v1/engines/nodejs").await
+}
+
+/// Longest wait for the engine store to download Node.js.
+const NODE_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Make sure the engine store holds Node.js, asking the runtime to download it
+/// when it does not and waiting for the outcome.
+async fn ensure_node(link: &RuntimeLink) -> Result<(), String> {
+    let installed = || {
+        apollia_mcp::transport::node::default_engines_root()
+            .as_deref()
+            .and_then(apollia_mcp::transport::node::installed_node)
+            .is_some()
+    };
+    if installed() {
+        return Ok(());
+    }
+    let started = std::time::Instant::now();
+    let mut state = link
+        .post_json("/api/v1/engines/nodejs", &serde_json::json!({}))
+        .await?;
+    loop {
+        match state.get("state").and_then(serde_json::Value::as_str) {
+            Some("ready") => return Ok(()),
+            Some("failed") => {
+                let error = state
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown error");
+                return Err(format!("Node.js could not be installed: {error}"));
+            }
+            Some("absent") | None => {
+                return Err("Node.js is required and its download did not start".into());
+            }
+            _ => {}
+        }
+        if started.elapsed() > NODE_INSTALL_TIMEOUT {
+            return Err("Node.js is still downloading; try again once it is installed".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        state = link.get_json("/api/v1/engines/nodejs").await?;
+    }
 }
 
 /// Resolve the connector's declared read-only probe for an installed server.
@@ -197,9 +317,9 @@ pub async fn test_mcp_connection(
 /// grant/workspace issues only surface on a real call). Returns `None` when the
 /// server has no matching enrichment or no declared `health_probe`, in which
 /// case the Test reports reachability only.
-async fn resolve_health_probe(api_port: u16, name: &str) -> Option<ProbeSpec> {
+async fn resolve_health_probe(link: &RuntimeLink, name: &str) -> Option<ProbeSpec> {
     let path = format!("/api/v1/mcp/servers/{name}/raw_config");
-    let json = http_get_json(api_port, &path).await.ok()?;
+    let json = link.get_json(&path).await.ok()?;
     let config: McpServerConfig = serde_json::from_value(json).ok()?;
     let enrichments = crate::mcp::enrichments::load_builtin_enrichments();
     let enrichment = enrichments
@@ -221,13 +341,13 @@ async fn resolve_health_probe(api_port: u16, name: &str) -> Option<ProbeSpec> {
 /// "reachable" apart from "actually working".
 #[tauri::command]
 pub async fn test_mcp_live_server(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     name: String,
 ) -> Result<McpConnectionTestResponse, String> {
-    let probe = resolve_health_probe(state.api_port, &name).await;
+    let probe = resolve_health_probe(&state, &name).await;
     let path = format!("/api/v1/mcp/servers/{name}/test");
     let body = serde_json::json!({ "probe": probe });
-    let json = http_post_json(state.api_port, &path, &body).await?;
+    let json = state.post_json(&path, &body).await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse test result: {e}"))
 }
 
@@ -238,81 +358,109 @@ pub async fn test_mcp_live_server(
 /// configuration.
 #[tauri::command]
 pub async fn restart_mcp_server(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     name: String,
 ) -> Result<McpServerStatus, String> {
     let path = format!("/api/v1/mcp/servers/{name}/restart");
-    let json = http_post_json(state.api_port, &path, &serde_json::json!({})).await?;
+    let json = state.post_json(&path, &serde_json::json!({})).await?;
     serde_json::from_value(json).map_err(|e| format!("failed to parse server status: {e}"))
 }
 
-/// Store a secret in the OS keychain for an MCP server environment variable.
+/// Store a secret for an MCP server environment variable.
 ///
-/// The secret is stored under the composite key `"{server_name}:{env_var}"`.
+/// Delegates to `PUT /api/v1/mcp/servers/{name}/secrets/{key}` on the runtime
+/// this application drives. The runtime writes it to the configured
+/// [`apollia_auth::SecretStore`] (OS keychain by default, encrypted files when
+/// `APOLLIA_TOKEN_STORAGE=file`), the store it resolves
+/// `${APOLLIA_SECRET:KEY}` placeholders from, and journals that it was set.
 #[tauri::command]
 pub async fn store_mcp_secret(
-    secret_store: State<'_, SecretStore>,
+    state: State<'_, RuntimeLink>,
     server_name: String,
     env_var: String,
     value: String,
 ) -> Result<(), String> {
-    let key = SecretStore::key_for(&server_name, &env_var);
-    secret_store.store(&key, &value).map_err(|e| e.to_string())
+    put_mcp_secret(&state, &server_name, &env_var, &value).await
 }
 
-/// Update the `requires_approval` flag for a running MCP server.
+/// Delete the secret of an MCP server environment variable. Idempotent.
 ///
-/// Applies the change in-memory immediately and persists it to `mcp.toml`.
-/// The server session is not restarted; the flag takes effect on the next tool call.
-/// Returns the updated server status.
-#[tauri::command]
-pub async fn set_mcp_server_approval(
-    state: State<'_, RuntimeHandle>,
-    name: String,
-    requires_approval: bool,
-) -> Result<McpServerStatus, String> {
-    let body = serde_json::json!({ "requires_approval": requires_approval });
-    let path = format!("/api/v1/mcp/servers/{name}/approval");
-    let json = http_patch_json(state.api_port, &path, &body).await?;
-    serde_json::from_value(json).map_err(|e| format!("failed to parse server status: {e}"))
-}
-
-/// Delete a secret from the OS keychain for an MCP server environment variable.
-///
-/// The secret is looked up under the composite key `"{server_name}:{env_var}"`.
+/// Delegates to `DELETE /api/v1/mcp/servers/{name}/secrets/{key}`.
 #[tauri::command]
 pub async fn delete_mcp_secret(
-    secret_store: State<'_, SecretStore>,
+    state: State<'_, RuntimeLink>,
     server_name: String,
     env_var: String,
 ) -> Result<(), String> {
-    let key = SecretStore::key_for(&server_name, &env_var);
-    secret_store.delete(&key).map_err(|e| e.to_string())
+    remove_mcp_secret(&state, &server_name, &env_var).await
+}
+
+/// The route of the secret `env_var` of server `server_name`, each segment
+/// encoded.
+fn mcp_secret_path(server_name: &str, env_var: &str) -> String {
+    format!(
+        "/api/v1/mcp/servers/{}/secrets/{}",
+        segment(server_name),
+        segment(env_var)
+    )
+}
+
+/// Puts the secret through the runtime's route.
+pub(crate) async fn put_mcp_secret(
+    link: &RuntimeLink,
+    server_name: &str,
+    env_var: &str,
+    value: &str,
+) -> Result<(), String> {
+    let body = serde_json::json!({ "value": value });
+    link.put_json(&mcp_secret_path(server_name, env_var), &body)
+        .await
+        .map(|_| ())
+}
+
+/// Removes the secret through the runtime's route.
+pub(crate) async fn remove_mcp_secret(
+    link: &RuntimeLink,
+    server_name: &str,
+    env_var: &str,
+) -> Result<(), String> {
+    link.delete_json(&mcp_secret_path(server_name, env_var))
+        .await
+        .map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::mcp::secret_store::SecretStore;
+    use super::*;
 
-    // ── store_mcp_secret uses the correct composite key ───────────────
+    // Accepting the warning before an addition is journaled on the connection.
+    #[tokio::test]
+    async fn test_accepted_warning_is_journaled_on_the_connection() {
+        // GIVEN governance over a journal
+        let dir = tempfile::TempDir::new().unwrap();
+        let journal = apollia_runtime::audit_journal::AuditJournalHandle::open(
+            &dir.path().join("journal.db"),
+        )
+        .await
+        .unwrap();
+        let governance = ConnectionGovernance::without_policy(Some(journal.clone()));
 
-    #[test]
-    fn test_store_secret_delegates_to_secret_store() {
-        // GIVEN a server name and env var name
-        // WHEN the composite key is generated (as done inside store_mcp_secret)
-        let key = SecretStore::key_for("notion", "NOTION_API_KEY");
-        // THEN the key follows the "{server}:{env_var}" convention
-        assert_eq!(key, "notion:NOTION_API_KEY");
-    }
+        // WHEN the warning shown before adding the server `notion` is accepted
+        record_warning_accepted(&governance, "notion");
 
-    // ── delete_mcp_secret uses the correct composite key ──────────────
-
-    #[test]
-    fn test_delete_secret_delegates_to_secret_store() {
-        // GIVEN a server name and env var name
-        // WHEN the composite key is generated (as done inside delete_mcp_secret)
-        let key = SecretStore::key_for("slack", "SLACK_BOT_TOKEN");
-        // THEN the key follows the "{server}:{env_var}" convention
-        assert_eq!(key, "slack:SLACK_BOT_TOKEN");
+        // THEN the connection's run holds one acceptance, by the desktop
+        let entries = journal
+            .query_run(&apollia_runtime::governance::connection_run_id(
+                "mcp:notion",
+            ))
+            .await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].kind,
+            apollia_runtime::audit_journal::JournalEntryKind::ConnectionWarningAccepted
+        );
+        assert_eq!(entries[0].payload["event"], "warning_accepted");
+        assert_eq!(entries[0].payload["actor"], "desktop");
+        journal.shutdown().await;
     }
 }

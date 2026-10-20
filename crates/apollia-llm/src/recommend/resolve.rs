@@ -1,10 +1,10 @@
-//! Turn the curated table plus the live Hub into a ranked list for one machine.
+//! Turn the registry plus the live Hub into a ranked list for one machine.
 //!
 //! The division of labour, once more, because it drives every choice here: the
-//! table says which generations exist and how they order; the Hub says which
-//! repositories carry them, what their files weigh, and which are gated. The
-//! table is compiled in and never stale about ordering. The Hub is authoritative
-//! and never compiled in.
+//! registry says which models are suggested and how they order; the Hub says
+//! what the files of their repositories weigh, and which are gated. The
+//! registry is read without a request. The Hub is authoritative and never
+//! compiled in.
 //!
 //! # Why this runs in three stages
 //!
@@ -39,11 +39,12 @@ use crate::gguf_probe::{probe_url, ProbeDepth};
 use crate::hardware::HardwareProfile;
 use crate::hf_registry::{HfError, HfModelTypeCache, HfRegistryClient};
 
+use super::fit::assess_fit;
 use super::fit::RuntimeShape;
 use super::manifest::{Family, FamilyManifest, Variant};
 use super::offload::MemoryArchitecture;
 use super::quant::{self, Quant};
-use super::rank::{rank, FileCandidate, Matched, Recommendation};
+use super::rank::{rank, speed_bonus, FileCandidate, Matched, Recommendation, COMFORT_BONUS};
 
 /// Failure to produce a recommendation.
 #[derive(Debug, Error)]
@@ -58,10 +59,6 @@ pub enum ResolveError {
     /// model already on disk, or configuring a cloud backend.
     #[error("the HuggingFace Hub is unreachable: {0}")]
     HubUnreachable(String),
-
-    /// The embedded generation table is malformed.
-    #[error("the model family table could not be loaded: {0}")]
-    Manifest(#[from] super::manifest::ManifestError),
 }
 
 /// How the resolver is allowed to spend requests and what it optimises for.
@@ -77,6 +74,9 @@ pub struct ResolveOptions {
     pub hf_token: Option<String>,
     /// The launch settings the footprint is computed against.
     pub shape: RuntimeShape,
+    /// Root of the Hub to ask, `None` for HuggingFace itself. Set for a mirror
+    /// or a test server.
+    pub hub_base: Option<String>,
 }
 
 impl Default for ResolveOptions {
@@ -87,6 +87,7 @@ impl Default for ResolveOptions {
             concurrency: 4,
             hf_token: None,
             shape: RuntimeShape::default(),
+            hub_base: None,
         }
     }
 }
@@ -144,17 +145,8 @@ fn plan<'m>(
     let mut planned: Vec<Planned<'m>> = Vec::new();
 
     for family in manifest.families() {
-        // A generation that some other generation in the table replaces is not
-        // worth a request: even if it resolved, the ranking would demote it
-        // below its successor. Spending the request would only slow onboarding.
-        if manifest.is_superseded(&family.id) {
-            continue;
-        }
-
         for variant in &family.variants {
-            let Some(base) = manifest.weighted_agentic(family, variant) else {
-                continue;
-            };
+            let base = variant.score;
 
             // From the sweet spot downwards, so the first that fits is the
             // one to plan. Starting above it would spend memory on a percent of
@@ -169,7 +161,8 @@ fn plan<'m>(
                     family,
                     variant,
                     quant,
-                    score: base * quant.quality,
+                    score: base * quant.quality
+                        + machine_terms(quant.estimated_bytes(variant.params_b), profile, options),
                 });
             }
         }
@@ -187,8 +180,46 @@ fn plan<'m>(
             })
             .then_with(|| a.family.id.cmp(&b.family.id))
     });
+    let mut per_family: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    planned.retain(|p| {
+        let kept = per_family.entry(p.family.id.as_str()).or_insert(0);
+        *kept += 1;
+        *kept <= MAX_PLANNED_PER_FAMILY
+    });
     planned.truncate(options.max_planned);
     planned
+}
+
+/// How many sizes of one generation are worth a request.
+///
+/// The registry holds several sizes and several forms of most generations, and
+/// the few requests a plan may spend go further across generations than down
+/// one of them.
+const MAX_PLANNED_PER_FAMILY: usize = 2;
+
+/// What the ranking will add or take away for this machine, estimated from the
+/// weights alone.
+///
+/// The ranking adds a bonus for a comfortable fit and a term for the speed the
+/// placement gives. Leaving both out of the plan was harmless while the table
+/// held a few sizes; with every model of the registry as a candidate, the best
+/// eight by score alone are eight models of the largest size the machine can
+/// hold across all its memory, and on a machine with a small card every one of
+/// them would run split and slow. Counting the two terms here keeps the sizes
+/// that run well on the machine among those the Hub is asked about.
+fn machine_terms(weights_bytes: u64, profile: &HardwareProfile, options: &ResolveOptions) -> f64 {
+    let fit = assess_fit(
+        weights_bytes,
+        &crate::gguf_probe::GgufHeaderFacts::default(),
+        profile,
+        &options.shape,
+    );
+    let comfort = if fit.badge == crate::hardware::CompatibilityBadge::Fits {
+        COMFORT_BONUS
+    } else {
+        0.0
+    };
+    comfort + speed_bonus(fit.plan.tokens_per_second)
 }
 
 /// File name prefixes that belong to something other than the model.
@@ -225,9 +256,10 @@ fn is_auxiliary(path: &str) -> bool {
 /// falls back to the most faithful one it does publish that still fits, so a
 /// publisher shipping only `Q5_K_M` is still usable.
 ///
-/// Shards are skipped rather than rejected later, because the same repository
-/// usually also publishes an unsplit file at a smaller quantisation, and
-/// offering that is better than offering nothing.
+/// A split file is one candidate, named by its first part and weighing the sum
+/// of its parts: the variant download fetches every part, so a model published
+/// only split is offered like any other. A split with a part missing from the
+/// repository is left out.
 fn choose_file(
     files: &[crate::hf_registry::HfFile],
     capacity_gb: f64,
@@ -235,21 +267,18 @@ fn choose_file(
     params_b: f64,
     gated: bool,
 ) -> Option<FileCandidate> {
-    let mut best: Option<(f64, &crate::hf_registry::HfFile)> = None;
+    let mut best: Option<(f64, &crate::hf_registry::HfFile, u64)> = None;
     let floor_bytes = (params_b * 1e9 * MIN_PLAUSIBLE_BITS_PER_WEIGHT / 8.0) as u64;
 
-    for file in files {
-        if super::verdict::shard_count_of(&file.filename).is_some() {
-            continue;
-        }
-        if is_auxiliary(&file.filename) || file.size_bytes < floor_bytes {
+    for (file, size_bytes) in whole_files(files) {
+        if is_auxiliary(&file.filename) || size_bytes < floor_bytes {
             continue;
         }
         let Some(found) = quant::from_filename(&file.filename) else {
             continue;
         };
         // Leave room for the cache; the real check comes once the header is read.
-        let weights_gb = file.size_bytes as f64 / 1_073_741_824.0;
+        let weights_gb = size_bytes as f64 / 1_073_741_824.0;
         if weights_gb * (1.0 + PLANNING_CACHE_SHARE) + 0.25 > capacity_gb * PLANNING_SLACK {
             continue;
         }
@@ -263,18 +292,60 @@ fn choose_file(
         } else {
             -quant::distance(found, planned)
         };
-        if best.is_none_or(|(best_rank, _)| rank > best_rank) {
-            best = Some((rank, file));
+        if best.is_none_or(|(best_rank, _, _)| rank > best_rank) {
+            best = Some((rank, file, size_bytes));
         }
     }
 
-    best.map(|(_, file)| FileCandidate {
+    best.map(|(_, file, size_bytes)| FileCandidate {
         repo_id: String::new(), // filled by the caller, which knows the repo
         filename: file.filename.clone(),
         download_url: file.download_url.clone(),
-        size_bytes: file.size_bytes,
+        size_bytes,
         gated,
     })
+}
+
+/// Every file a download yields whole, with its size: a plain file as it is,
+/// a split file as its first part and the sum of its parts. A split whose
+/// parts are not all published is dropped.
+fn whole_files(files: &[crate::hf_registry::HfFile]) -> Vec<(&crate::hf_registry::HfFile, u64)> {
+    let mut out = Vec::new();
+    let mut splits: std::collections::BTreeMap<
+        (String, String),
+        Vec<(u32, &crate::hf_registry::HfFile)>,
+    > = std::collections::BTreeMap::new();
+    for file in files {
+        match crate::model_index::split_part(std::path::Path::new(&file.filename)) {
+            Some((base, index)) => {
+                let folder = file
+                    .filename
+                    .rsplit_once('/')
+                    .map_or(String::new(), |(d, _)| d.to_owned());
+                splits
+                    .entry((folder, base))
+                    .or_default()
+                    .push((index, file));
+            }
+            None => out.push((file, file.size_bytes)),
+        }
+    }
+    for mut parts in splits.into_values() {
+        parts.sort_by_key(|(index, _)| *index);
+        let Some((_, first)) = parts.first().copied() else {
+            continue;
+        };
+        let name = first.filename.rsplit('/').next().unwrap_or(&first.filename);
+        let expected = super::verdict::shard_count_of(name).unwrap_or(1) as usize;
+        let contiguous = parts
+            .iter()
+            .enumerate()
+            .all(|(i, (index, _))| *index as usize == i + 1);
+        if parts.len() == expected && contiguous {
+            out.push((first, parts.iter().map(|(_, f)| f.size_bytes).sum()));
+        }
+    }
+    out
 }
 
 /// What one lookup is looking for.
@@ -450,7 +521,10 @@ async fn resolve_unbounded(
         return Ok(Vec::new());
     }
 
-    let client = HfRegistryClient::new(options.hf_token.clone());
+    let client = match options.hub_base.as_deref() {
+        Some(base) => HfRegistryClient::with_hub_base(options.hf_token.clone(), base),
+        None => HfRegistryClient::new(options.hf_token.clone()),
+    };
     let type_cache = HfModelTypeCache::new();
     let hub = Hub {
         client: &client,
@@ -471,7 +545,7 @@ async fn resolve_unbounded(
                 index,
                 Target {
                     label: p.variant.hf_name.clone(),
-                    repos: p.family.candidate_repos(p.variant),
+                    repos: p.variant.gguf_repos.clone(),
                     planned: p.quant,
                     params_b: p.variant.params_b,
                 },
@@ -534,7 +608,7 @@ async fn resolve_unbounded(
         })
         .collect();
 
-    let ranked = rank(matched, manifest, profile, &options.shape);
+    let ranked = rank(matched, profile, &options.shape);
     event!(
         Level::INFO,
         recommended = ranked.len(),
@@ -560,6 +634,7 @@ mod tests {
             cpu_cores: 8,
             accelerator: AcceleratorProfile::None,
             memory_budget_gb: budget_gb,
+            devices: Vec::new(),
         }
     }
 
@@ -575,6 +650,7 @@ mod tests {
                 compute_capability: (8, 9),
             },
             memory_budget_gb: vram_gb,
+            devices: Vec::new(),
         }
     }
 
@@ -585,7 +661,15 @@ mod tests {
             size_human: format!("{gb} GB"),
             compatibility: None,
             download_url: format!("https://example.invalid/{name}"),
+            sha256: None,
+            quantization: None,
         }
+    }
+
+    /// The suggested cards of the shipped registry, as the resolver gets them.
+    fn registry() -> FamilyManifest {
+        let index = crate::model_cards::shipped_index().expect("the shipped index loads");
+        crate::recommend::manifest_from_cards(&index.cards).expect("the cards group")
     }
 
     fn q(name: &str) -> &'static Quant {
@@ -594,8 +678,9 @@ mod tests {
 
     #[test]
     fn planning_drops_what_a_small_machine_cannot_hold() {
-        // GIVEN the shipped table and a machine with a 6 GB budget
-        let manifest = FamilyManifest::embedded().expect("the shipped table loads");
+        // GIVEN the suggested cards of the registry and a machine with a 6 GB
+        // budget
+        let manifest = registry();
 
         // WHEN the plan is built
         let planned = plan(&manifest, &profile(6.0), &ResolveOptions::default());
@@ -612,7 +697,7 @@ mod tests {
     #[test]
     fn a_tight_machine_is_planned_a_harder_quantisation() {
         // GIVEN one generous machine and one tight one
-        let manifest = FamilyManifest::embedded().expect("the shipped table loads");
+        let manifest = registry();
         let options = ResolveOptions::default();
 
         // WHEN both are planned
@@ -636,7 +721,7 @@ mod tests {
     #[test]
     fn a_card_smaller_than_the_model_still_gets_a_plan() {
         // GIVEN a 12 GB card beside 64 GB of system memory
-        let manifest = FamilyManifest::embedded().expect("the shipped table loads");
+        let manifest = registry();
 
         // WHEN the plan is built
         let planned = plan(&manifest, &cuda(12.0, 64.0), &ResolveOptions::default());
@@ -650,24 +735,28 @@ mod tests {
     }
 
     #[test]
-    fn planning_skips_a_generation_the_table_already_replaces() {
-        // GIVEN the shipped table, whose Qwen chain runs 2.5, then 3, then 3.5
-        let manifest = FamilyManifest::embedded().expect("the shipped table loads");
+    fn planning_spends_at_most_two_requests_on_one_generation() {
+        // GIVEN the suggested cards of the registry, where a generation comes
+        // in several sizes and forms
+        let manifest = registry();
+        assert!(manifest.families().iter().any(|f| f.variants.len() > 2));
 
         // WHEN a plan is built for a machine with room for any of them
         let planned = plan(&manifest, &profile(64.0), &ResolveOptions::default());
 
-        // THEN no request is planned for a generation something replaces, only
-        // for the head of the chain
-        assert!(planned.iter().all(|p| p.family.id != "qwen2.5"));
-        assert!(planned.iter().all(|p| p.family.id != "qwen3"));
-        assert!(planned.iter().any(|p| p.family.id == "qwen3.5"));
+        // THEN no generation takes more than two of the planned requests
+        let mut per_family = std::collections::BTreeMap::new();
+        for p in &planned {
+            *per_family.entry(p.family.id.as_str()).or_insert(0usize) += 1;
+        }
+        assert!(!planned.is_empty());
+        assert!(per_family.values().all(|n| *n <= MAX_PLANNED_PER_FAMILY));
     }
 
     #[test]
     fn planning_orders_by_score_and_respects_the_request_budget() {
         // GIVEN a generous machine and a plan limited to three candidates
-        let manifest = FamilyManifest::embedded().expect("the shipped table loads");
+        let manifest = registry();
         let options = ResolveOptions {
             max_planned: 3,
             ..ResolveOptions::default()
@@ -685,8 +774,8 @@ mod tests {
 
     #[test]
     fn a_larger_machine_is_planned_larger_models() {
-        // GIVEN the shipped table
-        let manifest = FamilyManifest::embedded().expect("the shipped table loads");
+        // GIVEN the suggested cards of the registry
+        let manifest = registry();
         let options = ResolveOptions::default();
 
         // WHEN plans are built for a small and a large machine
@@ -736,13 +825,30 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_of_shards_alone_yields_nothing_to_download() {
-        // GIVEN a repository publishing only a split model
+    fn a_split_model_is_chosen_whole_at_the_sum_of_its_parts() {
+        // GIVEN a repository publishing a model only as two parts
+        let files = vec![
+            hf_file("Qwen3-30B-A3B-Q4_K_M-00002-of-00002.gguf", 8.0),
+            hf_file("Qwen3-30B-A3B-Q4_K_M-00001-of-00002.gguf", 9.0),
+        ];
+
+        // WHEN a machine with ample memory chooses
+        let chosen =
+            choose_file(&files, 128.0, q("Q4_K_M"), 30.0, false).expect("the split is offered");
+
+        // THEN the first part names the model, which the variant download
+        // fetches whole, and its size is the sum of both parts
+        assert_eq!(chosen.filename, "Qwen3-30B-A3B-Q4_K_M-00001-of-00002.gguf");
+        assert_eq!(chosen.size_bytes, files[0].size_bytes + files[1].size_bytes);
+    }
+
+    #[test]
+    fn a_split_model_with_a_part_missing_is_not_chosen() {
+        // GIVEN a repository whose split model lacks its second part
         let files = vec![hf_file("Qwen3-30B-A3B-Q4_K_M-00001-of-00002.gguf", 9.0)];
 
         // WHEN a machine with ample memory chooses
-        // THEN nothing is chosen, because the downloader fetches one URL and
-        // would leave the set incomplete
+        // THEN nothing is chosen: the set could not be completed on disk
         assert!(choose_file(&files, 128.0, q("Q4_K_M"), 30.0, false).is_none());
     }
 

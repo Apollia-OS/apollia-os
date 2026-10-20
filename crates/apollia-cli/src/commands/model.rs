@@ -42,6 +42,12 @@ pub enum ModelCommand {
         #[arg(long)]
         n_ctx: Option<u32>,
     },
+    /// The embeddings model search by meaning uses.
+    Embeddings {
+        /// Embeddings subcommand.
+        #[command(subcommand)]
+        command: crate::commands::model_embeddings::EmbeddingsCommand,
+    },
     /// Remove a local model file from `~/.apollia/models/`.
     Delete {
         /// File name relative to the models directory.
@@ -162,6 +168,9 @@ pub async fn run(cmd: &ModelCommand, socket: Option<PathBuf>, json: bool) -> i32
             run_recommend(socket, *limit, *n_ctx, json).await
         }
         ModelCommand::Delete { name, confirm } => run_delete(name, *confirm, json),
+        ModelCommand::Embeddings { command } => {
+            crate::commands::model_embeddings::run(command, socket, json).await
+        }
     }
 }
 
@@ -238,7 +247,7 @@ async fn run_hardware(socket: Option<PathBuf>, json: bool) -> i32 {
         Err(crate::client::ClientError::ConnectionRefused) => {
             // Daemon-off is exit 2 (RUNTIME_ERROR), distinct from generic CLI
             // errors (exit 1). Aligns with tools describe / llm status /
-            // audit list / etc.
+            // audit journal / etc.
             crate::output::emit_error(
                 json,
                 exit_codes::RUNTIME_ERROR,
@@ -273,13 +282,9 @@ fn recommend_lines(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     for (index, model) in models.iter().enumerate() {
         let label = model
-            .get("family_label")
+            .get("model_label")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        let params = model
-            .get("params_b")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or_default();
         let needs = model
             .get("estimate")
             .and_then(|e| e.get("total_gb"))
@@ -300,7 +305,7 @@ fn recommend_lines(body: &str) -> Vec<String> {
         // marked here too rather than leaving the reader to infer it.
         let marker = if index == 0 { "*" } else { " " };
         out.push(format!(
-            "{marker} {label} {params:.0}B {quant}  {needs:.1} GB  {badge}  {repo}"
+            "{marker} {label} {quant}  {needs:.1} GB  {badge}  {repo}"
         ));
 
         // Where the layers land decides the speed far more than the size does,
@@ -609,12 +614,13 @@ fn print_listing_row(m: &ModelListing) {
 // Filesystem helpers
 // ─────────────────────────────────────────────
 
-/// Return the default models directory: `~/.apollia/models/`.
+/// Return the models directory in force: `[models] dir` of `apollia.toml`,
+/// else `~/.apollia/models/`.
 ///
 /// Falls back to `/tmp/apollia/models` if `$HOME` is not set.
 fn default_models_dir() -> PathBuf {
     home_dir()
-        .map(|h| apollia_core::paths::data_dir_under(h).join("models"))
+        .map(|h| apollia_core::config::models_dir(&apollia_core::paths::data_dir_under(h)))
         .unwrap_or_else(|| PathBuf::from("/tmp/apollia/models"))
 }
 
@@ -1140,6 +1146,7 @@ mod tests {
                 vram_gb: 64.0,
             },
             memory_budget_gb: 48.0,
+            devices: Vec::new(),
         };
         let body = serde_json::to_string(
             &apollia_runtime::api::routes_model_hub::HardwareResponse::from(profile),
@@ -1191,7 +1198,7 @@ mod tests {
         let body = serde_json::json!({
             "models": [
                 {
-                    "family_label": "Qwen3",
+                    "model_label": "Qwen3 14B",
                     "params_b": 14.0,
                     "badge": "might_fit",
                     "estimate": { "total_gb": 13.82 },
@@ -1199,7 +1206,7 @@ mod tests {
                     "verdict": { "status": "supported" }
                 },
                 {
-                    "family_label": "Qwen3",
+                    "model_label": "Qwen3 8B",
                     "params_b": 8.0,
                     "badge": "fits",
                     "estimate": { "total_gb": 7.1 },
@@ -1226,7 +1233,7 @@ mod tests {
         // GIVEN a model that carries a caveat
         let body = serde_json::json!({
             "models": [{
-                "family_label": "Qwen3",
+                "model_label": "Qwen3 4B",
                 "params_b": 4.0,
                 "badge": "fits",
                 "estimate": { "total_gb": 3.2 },

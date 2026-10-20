@@ -1,17 +1,20 @@
 ---
-title: Installer Apollia sur Linux
+title: Installer Apollia Desktop sur Linux
 slug: /operator-help/installation/install-on-linux
 sidebar_position: 3
 ---
 
-# Installer Apollia sur Linux
+# Installer Apollia Desktop sur Linux
+
+L'application s'appelle Apollia Desktop. Ses installeurs et les fichiers qu'ils
+déposent sur le disque portent encore le nom du moteur qu'elle embarque,
+Apollia OS : c'est le nom que vous lirez ci-dessous.
 
 Chacun des fichiers ci-dessous est attaché à chaque publication sur la page de
 publication, `https://github.com/Apollia-OS/apollia-os/releases`.
 
 - **`.AppImage`** (recommandé, x86_64) : application desktop portable, aucune installation requise.
 - **`.deb`** (x86_64) : paquet Debian/Ubuntu (`sudo apt install ./Apollia-OS_<version>_amd64.deb`).
-- **`Apollia-OS_<version>_amd64-cuda.deb`** : le même paquet avec une compilation CUDA du moteur d'inférence, pour une carte NVIDIA. Aucune AppImage CUDA n'est publiée.
 - **`apollia-os-linux-x86-cpu.tar.gz`** et **`apollia-os-linux-x86-vulkan.tar.gz`** : les deux bundles en ligne de commande pour x86_64, un par moteur, CPU ou Vulkan.
 - **`apollia-os-linux-arm-cpu.tar.gz`** : le bundle en ligne de commande pour aarch64. Aucun installeur de bureau n'est publié pour cette architecture.
 
@@ -34,8 +37,8 @@ L'app démarre le daemon en arrière-plan. Le daemon sert l'inférence LLM local
 
 Un point à connaître avant de choisir ce format : une AppImage est un montage en
 lecture seule qui n'existe que pendant l'exécution de l'app. La ligne de commande
-vit dans ce montage, et le lien `/usr/local/bin` proposé par **Réglages >
-Système** y pointe, donc il pend dès que vous quittez. Pour une ligne de commande
+vit dans ce montage, et le lien `/usr/local/bin` proposé par **Système >
+Matériel** dans les réglages, mode développeur allumé, y pointe, donc il pend dès que vous quittez. Pour une ligne de commande
 qui survit, installez le `.deb` ou décompressez une des archives
 `apollia-os-linux-*`.
 
@@ -45,11 +48,14 @@ qui survit, installez le `.deb` ou décompressez une des archives
 sudo apt install ./Apollia-OS_<version>_amd64.deb
 ```
 
-Lancez ensuite **Apollia OS** depuis le menu des applications de votre bureau :
+Lancez ensuite l'application depuis le menu des applications de votre bureau,
+sous l'entrée **Apollia OS** :
 l'app démarre le daemon elle-même. La ligne de commande `apollia-os` est livrée
 dans le paquet (`/usr/lib/Apollia OS/`) mais n'est pas sur votre `PATH` tant que
-vous ne l'activez pas depuis **Réglages > Système** dans l'app, qui crée le lien
-`/usr/local/bin`. Les commandes de vérification ci-dessous supposent ce lien.
+vous ne l'activez pas dans l'app : allumez le mode développeur dans **Réglages >
+Développeur**, puis cliquez sur **Installer la CLI** dans **Système >
+Matériel**, ce qui crée le lien `/usr/local/bin`. Les commandes de vérification
+ci-dessous supposent ce lien.
 
 ## Vérification
 
@@ -86,12 +92,18 @@ Deux accélérations, et Linux y répond différemment.
 
 **L'inférence LLM locale tourne déjà sur le GPU.** Les bundles de bureau,
 AppImage comme `.deb`, embarquent une compilation Vulkan du moteur
-`llama-server`, le `-cuda.deb` une compilation CUDA pour les cartes NVIDIA, et le
-bundle en ligne de commande `apollia-os-linux-x86-vulkan.tar.gz` la version
-Vulkan. Vulkan pilote indifféremment les
-cartes NVIDIA, AMD et Intel. Rien à installer et rien à régler : avec un pilote
-qui fonctionne, le moteur utilise la carte. Le bundle `-cpu` est celui à prendre
-sur une machine sans pilote graphique.
+`llama-server`, et le bundle en ligne de commande
+`apollia-os-linux-x86-vulkan.tar.gz` la version Vulkan. Vulkan pilote
+indifféremment les cartes NVIDIA, AMD et Intel. Rien à installer et rien à
+régler : avec un pilote qui fonctionne, le moteur utilise la carte. Le bundle
+`-cpu` est celui à prendre sur une machine sans pilote graphique.
+
+**Une carte NVIDIA peut aller plus loin.** Il y a un installeur par système, et
+aucun installeur à part pour les cartes NVIDIA. Quand l'application détecte une
+telle carte, son écran IA propose le moteur accéléré, **Accélérer avec votre
+carte NVIDIA** : un clic le télécharge, une fois sa signature vérifiée, et le
+prochain chargement d'un modèle l'utilise. Sous Linux, ce moteur s'appuie sur
+les bibliothèques CUDA de la machine.
 
 **La dictée tourne sur le processeur dans les paquets de bureau.** La
 reconnaissance vocale tourne dans le sidecar `apollia-runner`, bâti sur

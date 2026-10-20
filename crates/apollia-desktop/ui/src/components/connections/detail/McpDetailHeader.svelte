@@ -6,9 +6,10 @@
    * the Test / Reconnect actions. Presentation only; the parent owns the flows.
    */
   import { t } from "svelte-i18n";
-  import { RefreshCw, Link as LinkIcon } from "lucide-svelte";
+  import { Play, RefreshCw, Link as LinkIcon } from "lucide-svelte";
   import { DetailHeader } from "$lib/components/operator";
   import type { ConnectionStatus } from "$lib/connections/status";
+  import { Badge } from "$lib/components/ui/badge";
   import { Button } from "$lib/components/ui/button";
   import { Spinner } from "$lib/components/ui/progress";
   import ConnectorTile from "../shared/ConnectorTile.svelte";
@@ -19,15 +20,19 @@
   interface Props {
     label: string;
     meta: string;
+    /** Sends data off this machine: the "Remote" badge. */
+    remote?: boolean;
     status: ConnectionStatus;
     sync: I18nDescriptor | null;
     testing: boolean;
     reconnecting: boolean;
     ontest: () => void;
     onreconnect: () => void;
+    /** "Try": a conversation limited to the tools of this connection. */
+    ontry?: () => void;
   }
 
-  let { label, meta, status, sync, testing, reconnecting, ontest, onreconnect }: Props = $props();
+  let { label, meta, remote = false, status, sync, testing, reconnecting, ontest, onreconnect, ontry }: Props = $props();
 </script>
 
 <DetailHeader title={label} titleTestid="mcp-detail-title" {meta}>
@@ -38,6 +43,9 @@
   {/snippet}
   {#snippet badges()}
     <StatusBadge {status} />
+    {#if remote}
+      <Badge size="sm" variant="info" data-testid="mcp-detail-remote">{$t("connections.remote")}</Badge>
+    {/if}
     {#if sync}
       <span class="text-caption text-muted-foreground">
         {$t(sync.key, sync.values ? { values: sync.values } : undefined)}
@@ -52,7 +60,7 @@
       {testing ? $t("connections.testing") : $t("connections.test")}
     </Button>
     <Button
-      variant="primary-solid"
+      variant={ontry ? "outline" : "primary-solid"}
       size="sm"
       onclick={onreconnect}
       disabled={reconnecting}
@@ -63,5 +71,11 @@
       {/snippet}
       {$t("connections.reconnect")}
     </Button>
+    {#if ontry}
+      <Button variant="primary-solid" size="sm" onclick={ontry} data-testid="mcp-try-btn">
+        {#snippet icon()}<Play size={12} />{/snippet}
+        {$t("connections.try.action")}
+      </Button>
+    {/if}
   {/snippet}
 </DetailHeader>

@@ -9,6 +9,9 @@
  */
 import { locale, waitLocale } from "svelte-i18n";
 import { LOCALE_STORAGE_KEY } from "$lib/i18n";
+import { NOTICE_SEEN_KEY } from "$lib/projectMigration/notice";
+import { CHAT_TRASH_DEFAULT, chatTrashEnabled } from "$lib/stores/chatTrash";
+import { CHAT_TOKEN_COUNT_DEFAULT, chatTokenCount } from "$lib/stores/chatTokenCount";
 
 /**
  * Pins the interface language for the run.
@@ -37,15 +40,13 @@ export function resetDeterministicUiState(): void {
   const keys = [
     "apollia.quickpicker.expanded",
     "apollia.delete_automation.skip",
-    "apollia.next_steps.dismissed",
+    // reminders/storage.ts: the dismissed next-step cards.
+    "apollia.reminders.next_steps",
     "apollia.next_steps.feedback",
     "apollia.ui.sidebar",
     // layout.ts persists the drawer state whenever the viewport is sm, which
     // a resizeWindow block reaches.
     "apollia.ui.sidebarState_sm",
-    // McpDisclaimerDialog.svelte / WizardStepDisclaimer.svelte.
-    "apollia-mcp-disclaimer-accepted",
-    "apollia-mcp-disclaimer-version",
     // companion.ts: a keyboard nudge of the panel would leak its position.
     "companionGeometry",
     // agentInstallPrefs.ts: settings-det toggles it, the install deps step reads it.
@@ -57,5 +58,21 @@ export function resetDeterministicUiState(): void {
     } catch {
       // Private mode / quota - ignore.
     }
+  }
+  // chatTrash.ts: settings-det turns the trash off then on, and chat-det
+  // restores from it. The store read its value when the module loaded, so it
+  // is set back rather than only forgotten (its subscriber rewrites the key).
+  chatTrashEnabled.set(CHAT_TRASH_DEFAULT);
+  // chatTokenCount.ts: the count under each conversation is off by default,
+  // and the books read the rows of the list without it.
+  chatTokenCount.set(CHAT_TOKEN_COUNT_DEFAULT);
+  // The seeded home still holds the former projects, so every boot migrates
+  // them and the notice of that migration would cover the first page a book
+  // opens. It is marked as shown for both outcomes: the notice itself is a
+  // gesture played by hand.
+  try {
+    localStorage.setItem(NOTICE_SEEN_KEY, JSON.stringify(["partial", "complete"]));
+  } catch {
+    // Private mode / quota - ignore.
   }
 }

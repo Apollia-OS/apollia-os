@@ -26,12 +26,11 @@ use apollia_notifications::{
     NotificationConfig, NotificationConfigRepository, NotificationEngineHandle,
 };
 use apollia_oria::plan_cache::PlanCacheRepository;
-use apollia_tools::{AuditTrailHandle, TaskRepository, ToolRegistryHandle};
+use apollia_tools::{TaskRepository, ToolRegistryHandle};
 use apollia_triggers::{TriggerDefinitionRepository, TriggerEngineHandle};
 
 use crate::mailbox::AgentMailboxHandle;
 
-use crate::api::routes_agents::{AgentBackendFactory, AgentLoader};
 use crate::chat::ChatSessionManagerHandle;
 use crate::coordinator::{DynBackend, ExecutionBackend};
 use crate::eventbus::EventBusSender;
@@ -131,8 +130,6 @@ pub struct AppState<B: ExecutionBackend + Clone> {
     pub registry_handle: AgentRegistryHandle,
     /// Sender side of the runtime event bus.
     pub event_sender: EventBusSender,
-    /// Agent loader for Python module loading.
-    pub agent_loader: Arc<dyn AgentLoader>,
     /// Execution backend, cloned per coordinator on agent start.
     pub backend: B,
     /// Shared, hot-reloadable handle to the active [`LlmRouter`].
@@ -174,31 +171,44 @@ pub struct AppState<B: ExecutionBackend + Clone> {
     /// `POST /api/v1/notifications/test`.
     /// `None` when no `[notifications]` section is present in the config.
     pub notification_config: Option<NotificationConfig>,
-    /// Factory for creating per-agent execution backends.
-    ///
-    /// `Some` in production, creates real `AIPBridge` backends with tool access.
-    /// `None` in tests, falls back to `state.backend.clone()` (MockBackend/NoopBackend).
-    pub backend_factory: Option<Arc<dyn AgentBackendFactory>>,
     /// Handle to the ToolRegistry actor, exposes the tool catalogue via REST.
     ///
     /// `Some` in production, populated by the Supervisor at startup.
     /// `None` in tests, the `/api/v1/tools` routes return 503 when `None`.
     pub tool_registry_handle: Option<ToolRegistryHandle>,
-    /// Handle to the AuditTrail actor, exposes tool invocations via REST.
-    ///
-    /// `Some` in production, opened by the Supervisor from `~/.apollia/audit.db`.
-    /// `None` in tests, the `/api/v1/audit` routes return 503 when `None`.
-    pub audit_trail: Option<AuditTrailHandle>,
     /// Handle to the hash-chained audit journal actor, exposes `audit verify`.
     ///
     /// `Some` in production, opened by the Supervisor from
     /// `~/.apollia/audit_journal.db`. `None` in tests, the
     /// `/api/v1/audit/verify/:run_id` route returns 503 when `None`.
     pub audit_journal: Option<crate::audit_journal::AuditJournalHandle>,
+    /// Admission policy and journal of the connection routes: an MCP server
+    /// is admitted before it is added, and every addition, change, removal,
+    /// secret and account is journaled.
+    ///
+    /// Production journals into [`Self::audit_journal`] with no policy
+    /// deposited; the default admits everything and journals nothing.
+    pub connection_governance: crate::governance::ConnectionGovernance,
+    /// The governance the runtime runs on: the decision on every tool call,
+    /// the signature question of an installation, and the records of changes
+    /// of access. `None` in tests that mount no governance.
+    pub governance: Option<crate::governance::GovernanceHandle>,
+    /// The `[inference]` section and the fixed settings of the organisation
+    /// policy: an inference server is checked before it is added and before a
+    /// request reaches it, and the model registry follows the fixed settings.
+    ///
+    /// The default is no policy: every server is allowed, nothing is fixed.
+    pub inference_governance: crate::governance::InferenceGovernance,
     /// Truncation configuration for task observability.
     ///
     /// Passed to the `ExecutionCoordinator` for persisting input/output/transitions.
     pub obs_config: apollia_core::ObservabilityConfig,
+    /// The configuration reloader: the save route hands it the text it wrote,
+    /// the read route asks it the keys waiting for a restart, and the live
+    /// sections are read from its feed.
+    ///
+    /// `None` when the runtime was started without a configuration file.
+    pub config_reload: Option<crate::config_reload::ConfigReloadHandle>,
     /// LLM call repository, aggregates cost and token usage.
     ///
     /// `Some` when an `LlmRouter` is configured and `llm_calls.db` is open.
@@ -310,6 +320,49 @@ pub struct AppState<B: ExecutionBackend + Clone> {
     /// binary is absent or in unit tests. The reload path rebuilds the router
     /// with local `LlamaCpp` backends wired through this supervisor.
     pub llama_server_supervisor: Option<Arc<crate::llama_server::LlamaServerSupervisor>>,
+    /// The `vllm-mlx` processes serving MLX models, when this machine runs them.
+    pub mlx_engine: Option<Arc<crate::mlx_engine::MlxEngineSupervisor>>,
+
+    /// Opens the secret store the LLM routes seal backend and server keys
+    /// into. [`crate::inference_servers::default_store_opener`] in production.
+    pub secret_store: crate::inference_servers::SecretStoreOpener,
+
+    /// Handle to the batch actor, which runs an agent on every item of a
+    /// source. `None` in unit tests and when the runtime has no task store or
+    /// no agent executor; the batch routes return 503.
+    pub batches: Option<crate::batch::BatchHandle>,
+
+    /// Handle to the workflow actor. `None` in unit tests and when the
+    /// runtime has no task store; the workflow routes return 503.
+    pub workflows: Option<crate::workflows::WorkflowHandle>,
+
+    /// Handle to the compatible server, the second listener the
+    /// `/api/v1/server` routes start and stop. `None` in unit tests; those
+    /// routes return 503.
+    pub compat_server: Option<crate::compat_server::CompatServerHandle>,
+    /// Handle to the actor that owns the registry of sources in `system.db`.
+    /// `None` in unit tests; the `/api/v1/sources` routes return 503, and so
+    /// does a write of an agent's `sources` override, which is checked against it.
+    pub source_registry: Option<apollia_sources::SourceRegistryHandle>,
+}
+
+impl<B: ExecutionBackend + Clone> AppState<B> {
+    /// The `[observability]` section in force: the live one when the runtime
+    /// follows its file, the one it started with otherwise.
+    pub fn observability(&self) -> apollia_core::ObservabilityConfig {
+        self.observability_live().get()
+    }
+
+    /// The `[observability]` section as a consumer that outlives the request
+    /// holds it, such as the coordinator of a loaded agent.
+    pub fn observability_live(
+        &self,
+    ) -> crate::config_reload::Live<apollia_core::ObservabilityConfig> {
+        self.config_reload.as_ref().map_or_else(
+            || self.obs_config.clone().into(),
+            |reload| reload.feed().observability,
+        )
+    }
 }
 
 impl<B: ExecutionBackend + Clone> Clone for AppState<B> {
@@ -318,7 +371,6 @@ impl<B: ExecutionBackend + Clone> Clone for AppState<B> {
             router_handle: self.router_handle.clone(),
             registry_handle: self.registry_handle.clone(),
             event_sender: self.event_sender.clone(),
-            agent_loader: Arc::clone(&self.agent_loader),
             backend: self.backend.clone(),
             llm_router: self.llm_router.clone(),
             trigger_engine: self.trigger_engine.clone(),
@@ -327,11 +379,13 @@ impl<B: ExecutionBackend + Clone> Clone for AppState<B> {
             pending_approvals: self.pending_approvals.clone(),
             plan_gates: self.plan_gates.clone(),
             notification_config: self.notification_config.clone(),
-            backend_factory: self.backend_factory.clone(),
             tool_registry_handle: self.tool_registry_handle.clone(),
-            audit_trail: self.audit_trail.clone(),
             audit_journal: self.audit_journal.clone(),
+            connection_governance: self.connection_governance.clone(),
+            governance: self.governance.clone(),
+            inference_governance: self.inference_governance.clone(),
             obs_config: self.obs_config.clone(),
+            config_reload: self.config_reload.clone(),
             llm_call_repository: self.llm_call_repository.clone(),
             trigger_def_repo: self.trigger_def_repo.clone(),
             notification_repo: self.notification_repo.clone(),
@@ -351,9 +405,21 @@ impl<B: ExecutionBackend + Clone> Clone for AppState<B> {
             resilience_layer: self.resilience_layer.clone(),
             runner_proxy: self.runner_proxy.clone(),
             llama_server_supervisor: self.llama_server_supervisor.clone(),
+            mlx_engine: self.mlx_engine.clone(),
+            secret_store: Arc::clone(&self.secret_store),
+            batches: self.batches.clone(),
+            workflows: self.workflows.clone(),
+            compat_server: self.compat_server.clone(),
+            source_registry: self.source_registry.clone(),
         }
     }
 }
+
+/// The product marker `GET /api/v1/health` carries.
+///
+/// A host that finds the TCP port taken asks that route what holds it; this
+/// value, and only this value, says the holder is an Apollia runtime.
+pub const PRODUCT_MARKER: &str = "apollia-os";
 
 /// Permission bits applied to the Unix socket right after `bind`: owner read
 /// and write, nothing for the group and nothing for the rest of the machine.
@@ -378,6 +444,15 @@ pub struct APIServerConfig {
     /// `Some(port)`. Binding a non-loopback address without an `api_token` is
     /// refused at startup; a loopback bind without a token is allowed.
     pub tcp_port: Option<u16>,
+    /// A TCP listener the host has already bound, served in place of binding
+    /// `tcp_port`.
+    ///
+    /// A host that decides whether to start a runtime by claiming the port
+    /// hands the claimed listener over here, so the port is never released
+    /// between that decision and the serve: a release followed by a rebind is
+    /// a window another process can take. Read only when `tcp_port` is `Some`,
+    /// which must then name the port this listener holds.
+    pub tcp_listener: Option<std::net::TcpListener>,
     /// Bearer token required on TCP connections.
     ///
     /// `Some(token)`, every incoming TCP request must supply
@@ -409,6 +484,7 @@ impl Default for APIServerConfig {
             socket_path: apollia_core::paths::socket_path_or_temp(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: None,
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -598,13 +674,20 @@ impl APIServer {
                 _ => None,
             };
 
-            let tcp_addr = format!("{}:{}", config.bind_addr, tcp_port);
-            let tcp_listener = TcpListener::bind(&tcp_addr).await.map_err(|source| {
-                APIServerError::BindFailed {
-                    port: tcp_port,
-                    source,
+            let bind_failed = |source| APIServerError::BindFailed {
+                port: tcp_port,
+                source,
+            };
+            let tcp_listener = match config.tcp_listener {
+                Some(claimed) => {
+                    claimed.set_nonblocking(true).map_err(bind_failed)?;
+                    TcpListener::from_std(claimed).map_err(bind_failed)?
                 }
-            })?;
+                None => {
+                    let tcp_addr = format!("{}:{}", config.bind_addr, tcp_port);
+                    TcpListener::bind(&tcp_addr).await.map_err(bind_failed)?
+                }
+            };
 
             // Apply token authentication to the TCP-facing router only.
             let tcp_router = match &config.api_token {
@@ -735,7 +818,6 @@ mod tests {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend,
             llm_router: empty_shared_llm_router(),
             trigger_engine: None,
@@ -744,11 +826,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -768,6 +852,12 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         }
     }
 
@@ -852,6 +942,66 @@ mod tests {
         assert_eq!(json["status"], "ok");
     }
 
+    /// The exact body `GET /api/v1/health` answers with.
+    fn health_body() -> String {
+        format!(
+            r#"{{"status":"ok","product":"{PRODUCT_MARKER}","version":"{}"}}"#,
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+
+    #[tokio::test]
+    async fn test_health_names_the_product_and_its_version() {
+        // GIVEN the router of a runtime
+        let router = build_router(test_app_state());
+
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // WHEN GET /api/v1/health
+        let req = Request::builder()
+            .uri("/api/v1/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+
+        // THEN the body says what answers and in which version, which is what
+        // tells an Apollia runtime from a foreign listener on the same port
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["product"], PRODUCT_MARKER);
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn test_a_listener_bound_by_the_host_is_served_without_a_rebind() {
+        // GIVEN a TCP listener the host already holds, never released
+        let claimed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = claimed.local_addr().unwrap().port();
+        let socket_path = temp_socket_path();
+        let config = APIServerConfig {
+            socket_path: socket_path.clone(),
+            tcp_port: Some(port),
+            tcp_listener: Some(claimed),
+            ..APIServerConfig::default()
+        };
+
+        // WHEN the server starts with it
+        let handle = APIServer::new(config, test_app_state())
+            .start()
+            .await
+            .unwrap();
+
+        // THEN that very listener answers: a second bind of the port would
+        // have failed with the port still held, so a 200 proves no rebind
+        let resp = http_get_via_tcp(port).await;
+        assert_eq!(resp, health_body());
+
+        handle.shutdown();
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
     #[tokio::test]
     async fn test_tcp_listener_binds_successfully() {
         // GIVEN a free port
@@ -863,6 +1013,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -876,7 +1027,7 @@ mod tests {
 
         // THEN the server responds over TCP
         let resp = http_get_via_tcp(port).await;
-        assert_eq!(resp, r#"{"status":"ok"}"#);
+        assert_eq!(resp, health_body());
 
         // Cleanup
         handle.shutdown();
@@ -896,6 +1047,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: None,
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -909,7 +1061,7 @@ mod tests {
 
         // THEN the Unix socket serves requests
         let resp = http_get_via_unix(&socket_path).await;
-        assert_eq!(resp, r#"{"status":"ok"}"#);
+        assert_eq!(resp, health_body());
 
         // AND no TCP listener was bound: the port can be freshly bound. This is
         // the inverse requirement of every other port in this module, the number
@@ -927,9 +1079,15 @@ mod tests {
         let _ = std::fs::remove_file(&socket_path);
     }
 
+    /// GIVEN a server bound on TCP with a bearer token
+    /// WHEN  health and another route are requested with and without the token
+    /// THEN  health answers without it, and every other route still needs it
+    ///
+    /// Health is the single `/api/v1` exemption: a process that finds the port
+    /// taken has no token and must still learn what holds it.
     #[tokio::test]
-    async fn test_tcp_token_required_when_configured() {
-        // GIVEN a server bound on TCP with a bearer token
+    async fn test_tcp_token_required_on_every_route_but_health() {
+        // GIVEN
         let socket_path = temp_socket_path();
         let reserved_port = reserve_port();
         let port = reserved_port.port();
@@ -939,6 +1097,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: Some(token.to_owned()),
             tls_cert_path: None,
             tls_key_path: None,
@@ -948,14 +1107,18 @@ mod tests {
         reserved_port.release();
         let handle = server.start().await.unwrap();
 
-        // WHEN a request omits the token THEN it is rejected with 401
-        let (status_no, _) = http_get_health_status_via_tcp(port, None).await;
-        assert_eq!(status_no, 401, "TCP without token must be rejected");
+        // WHEN health is requested without the token
+        let (health_status, health) = http_get_status_via_tcp(port, "/api/v1/health", None).await;
+        // WHEN another route is requested without, then with, the token
+        let (tasks_no, _) = http_get_status_via_tcp(port, "/api/v1/tasks", None).await;
+        let (tasks_ok, _) = http_get_status_via_tcp(port, "/api/v1/tasks", Some(token)).await;
 
-        // WHEN a request carries the token THEN it succeeds
-        let (status_ok, body) = http_get_health_status_via_tcp(port, Some(token)).await;
-        assert_eq!(status_ok, 200, "TCP with token must be accepted");
-        assert_eq!(body, r#"{"status":"ok"}"#);
+        // THEN health answers 200 with the product marker and the version only
+        assert_eq!(health_status, 200, "health must answer without a token");
+        assert_eq!(health, health_body());
+        // THEN the other route is refused without the token, served with it
+        assert_eq!(tasks_no, 401, "every other route stays behind the token");
+        assert_eq!(tasks_ok, 200, "the token still opens the other route");
 
         // Cleanup
         handle.shutdown();
@@ -1039,6 +1202,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: Some(cert_path),
             tls_key_path: Some(key_path),
@@ -1082,7 +1246,7 @@ mod tests {
             (Some(s), Some(e)) => &raw_body[s..=e],
             _ => raw_body,
         };
-        assert_eq!(body, r#"{"status":"ok"}"#);
+        assert_eq!(body, health_body());
 
         // Cleanup
         handle.shutdown();
@@ -1101,6 +1265,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "0.0.0.0".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -1134,6 +1299,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -1161,6 +1327,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "0.0.0.0".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned()),
             tls_cert_path: None,
             tls_key_path: None,
@@ -1190,6 +1357,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -1203,7 +1371,7 @@ mod tests {
 
         // THEN the server responds over the Unix socket
         let resp = http_get_via_unix(&socket_path).await;
-        assert_eq!(resp, r#"{"status":"ok"}"#);
+        assert_eq!(resp, health_body());
 
         // Cleanup
         handle.shutdown();
@@ -1224,6 +1392,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -1264,6 +1433,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -1277,7 +1447,7 @@ mod tests {
 
         // THEN the stale file is removed and the bind succeeds
         let resp = http_get_via_unix(&socket_path).await;
-        assert_eq!(resp, r#"{"status":"ok"}"#);
+        assert_eq!(resp, health_body());
 
         // Cleanup
         handle.shutdown();
@@ -1295,6 +1465,7 @@ mod tests {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: Some(port),
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -1306,7 +1477,7 @@ mod tests {
 
         // Verify it's serving
         let resp = http_get_via_tcp(port).await;
-        assert_eq!(resp, r#"{"status":"ok"}"#);
+        assert_eq!(resp, health_body());
 
         // WHEN shutdown() is called
         handle.shutdown();
@@ -1353,9 +1524,9 @@ mod tests {
         raw_http_get_health(stream).await
     }
 
-    /// GET `/api/v1/health` over TCP with an optional `Bearer` token, returning
-    /// the HTTP status code and trimmed body.
-    async fn http_get_health_status_via_tcp(port: u16, auth: Option<&str>) -> (u16, String) {
+    /// GET `path` over TCP with an optional `Bearer` token, returning the HTTP
+    /// status code and trimmed body.
+    async fn http_get_status_via_tcp(port: u16, path: &str, auth: Option<&str>) -> (u16, String) {
         let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
             .expect("failed to connect to TCP");
@@ -1364,7 +1535,7 @@ mod tests {
             None => String::new(),
         };
         let request = format!(
-            "GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n{auth_line}Connection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\n{auth_line}Connection: close\r\n\r\n"
         );
         stream.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();

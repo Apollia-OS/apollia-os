@@ -1,8 +1,10 @@
 # AGENTS.md
 
-Apollia OS is a sovereign Rust runtime for autonomous AI agents. It runs any
-Python agent (LangGraph, CrewAI, custom) in isolation, locally, with tools, and
-without a cloud dependency.
+Apollia OS is a sovereign Rust runtime for autonomous AI agents. An agent is a
+record declared in the `apollia.toml` of a package (mission, model, accesses,
+sources, autonomy, planning), and the runtime runs every agent with the same
+engine, locally, with tools, and without a cloud dependency. The Python of a
+package brings `@tool` and `@workflow` functions, and nothing else.
 
 This file is the standard entry point for LLM coding assistants (Codex, Claude
 Code, Cursor, Gemini CLI, Aider, Continue, Windsurf, GitHub Copilot, and
@@ -27,12 +29,12 @@ bottom of this file.
 | Async runtime | Rust 1.89+ , Tokio 1.x |
 | Python bridge | PyO3 0.24 , pyo3-async-runtimes |
 | Local LLM | embedded llama-server (upstream llama.cpp; GGUF, Metal, CUDA, OpenAI-compatible HTTP, `--jinja`) |
-| Local STT | whisper-rs (GGML) |
+| Local STT | whisper-rs (whisper.cpp, GGML models) |
 | Persistence | SQLite + rusqlite + FTS5 (WAL mode) |
 | HTTP API | axum on Unix socket + TCP 7771 |
 | CLI | clap v4 derive |
 | Desktop | Tauri v2 + Svelte 5 + Tailwind 3.4 |
-| SDK | `apollia` package (AgentKit). Source floor Python 3.10 (`sdk/pyproject.toml` `requires-python`); the runtime embeds a 3.12+ interpreter, which is the supported configuration |
+| SDK | `apollia` package (AgentKit). Source floor Python 3.10 (`sdk/pyproject.toml` `requires-python`); the runtime embeds CPython 3.13.13 (`.python-version`, `packaging/fetch-python-standalone.sh`), which is the supported configuration |
 
 ---
 
@@ -59,8 +61,8 @@ bash tests/cli/cli-e2e.sh
 
 The CLI end-to-end suite runs against a deterministically seeded, throwaway
 `HOME` built by `tests/cli/seed/build-seed.sh`, so a run never writes to
-the real `~/.apollia`; when `APOLLIA_TEST_MODEL_GGUF` is unset, Track 3 reads
-one file from it (the default model GGUF), read-only. Track 1 is offline and
+the real `~/.apollia`; Track 3 reads one file, the model GGUF that
+`APOLLIA_TEST_MODEL_GGUF` names, read-only. Track 1 is offline and
 always runs; Tracks 2 and 3 are
 gated by `APOLLIA_REQUIRE_RUNTIME` and `APOLLIA_TEST_MODEL_GGUF`. Read
 `tests/cli/README.md` before changing a track or the fixture: the suite asserts
@@ -70,7 +72,7 @@ the seed's exact row counts, so a fixture change is a suite change.
 `apollia-runner` exposes `local-cuda`, `local-metal` and `local-rocm`, which
 turn on three mutually exclusive `whisper-rs` backends at once. CI omits it for
 the same reason (`ci.yml`), and the feature matrix is exercised in
-`nightly.yml`.
+`weekly.yml`.
 
 The desktop UI is covered by Vitest unit tests and by Playwright suites under
 `crates/apollia-desktop/ui/tests/`. There is no WebDriver for WKWebView on
@@ -96,19 +98,20 @@ run elsewhere, `clippy` on push and the commit-message convention at
 1. **Local-first** : zero user data leaves the machine without an explicit action.
 2. **Zero external dependency** : the binary runs on any clean Linux without
    prior install.
-3. **Minimal contract** : a class decorated with `@agent`, one `@skill` or one
-   `@on_message` async method, and nothing else. The legacy `manifest()` plus
-   `run()` escape hatch is gone: the bridge refuses an object without
-   `__apollia_dispatch__`.
+3. **Minimal contract** : an agent is a record (mission, model, tools, sources,
+   rights) declared in the `apollia.toml` of a package. Code is optional: a
+   package brings `@tool` and `@workflow` functions, and nothing else. The
+   runtime refuses a package whose manifest does not validate.
 4. **Fail fast** : any startup-detectable error is detected at startup.
 5. **One actor, one responsibility** : Tokio actor pattern, no shared state
    between actors.
 6. **Memory at agent initiative** : never inject memory context into an agent's
    prompt. Three exceptions, all unreachable from an agent execution path: two
-   inside the built-in conversational assistant (a user-persona brief at the
-   `long_autonomous` tier, past session summaries on the first message of a
-   free chat), and one in the desktop prompt-rewrite command (the user profile
-   work context). See `docs/site/docs/explanation/the-8-principles.md`.
+   inside the built-in conversational assistant (the profile of the
+   conversation at every tier, under the profile switch of that conversation;
+   past session summaries on the first message of a free chat), and one in the
+   desktop prompt-rewrite command (the role, function and tools of that
+   profile). See `docs/site/docs/explanation/the-8-principles.md`.
 7. **Non-negotiable safeguards** : `StepBudget` enforced by the runtime, never
    bypassable.
 8. **Human CLI, machine API** : `--json` global, TTY auto-detected.
@@ -163,8 +166,8 @@ Always cross-check against `docs/agents/FORBIDDEN.md` before committing.
   `docs/site/docs/architecture/08-decisions.md` before it lands.
 - Changing a decision recorded in the architecture chapter of `docs/site/`.
 - Modifying a public API in `apollia-core` (used by every other crate).
-- Touching anything in `docs/internal/` (gitignored, source of truth for
-  release planning).
+- Touching anything in `docs/internal/` (gitignored working notes, absent from
+  a public checkout).
 - Force-pushing, rewriting history, deleting branches, or anything that
   rewrites shared state.
 
@@ -194,9 +197,13 @@ conflict. The nearest one wins.
 |---|---|
 | `crates/apollia-cli/AGENTS.md` | CLI binary, noun-verb taxonomy, exit codes 0-5 |
 | `crates/apollia-aip/AGENTS.md` | PyO3 bridge, `Bound<'py, T>`, `pyo3-async-runtimes` |
+| `crates/apollia-core/AGENTS.md` | Shared types every crate depends on, public API stability |
+| `crates/apollia-desktop/AGENTS.md` | Rust half of the desktop application: Tauri commands, event bridge, tray, bundled packages |
+| `crates/apollia-llm/AGENTS.md` | LLM clients, backend router, retry policy, schema sanitizer, meta routines |
 | `crates/apollia-mcp/AGENTS.md` | MCP client transports, untrusted-response byte cap |
 | `crates/apollia-oria/AGENTS.md` | ORIA engine, StepBudget, ResilienceLayer, plan cache |
 | `crates/apollia-runtime/AGENTS.md` | EventBus, actor supervisor, axum API |
+| `crates/apollia-tools/AGENTS.md` | Native tools, tool registry, audit trail, agent and package repositories |
 | `crates/apollia-desktop/ui/AGENTS.md` | Tauri v2 + Svelte 5, design system, i18n |
 | `sdk/AGENTS.md` | Apollia AgentKit decorators, schemas, minimal contract |
 
@@ -230,4 +237,4 @@ Precedence (highest first) : chat prompt > `AGENTS.override.md` > nearest
 ---
 
 Before writing code, read the sub-`AGENTS.md` for the area you touch. The cost
-of reading is 2 minutes. The cost of an unaligned commit is one PR cycle.
+of reading is 2 minutes. The cost of an unaligned commit is redoing it.

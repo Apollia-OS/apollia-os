@@ -15,11 +15,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use apollia_core::{
-    HitlConfig, LlmBackendRepository, PendingApprovals, ProcessState, RuntimeConfig, RuntimeEvent,
+    HitlConfig, LlmBackendRepository, PendingApprovals, RuntimeConfig, RuntimeEvent,
     SttConfigRepository, SttConfigRow,
 };
 use apollia_llm::{LlmCallRepository, LlmConfig, LlmRouter};
@@ -30,13 +29,12 @@ use apollia_notifications::{
     build_channels, NotificationConfig, NotificationConfigRepository, NotificationEngine,
     NotificationEngineHandle,
 };
-use apollia_tools::{AgentRepository, AuditTrailHandle, TaskRepository, ToolRegistryHandle};
+use apollia_tools::{AgentRepository, TaskRepository, ToolRegistryHandle};
 use apollia_triggers::{TriggerDefinitionRepository, TriggerEngineHandle, TriggerPersistence};
 
-use crate::api::routes_agents::AgentLoader;
 use crate::api::{APIServer, APIServerConfig, APIServerError, APIServerHandle, AppState};
 use crate::audit_journal::{AuditJournalHandle, AuditJournalSubscriber};
-use crate::coordinator::{ExecutionBackend, ExecutionCoordinator};
+use crate::coordinator::ExecutionBackend;
 use crate::eventbus::{EventBus, EventBusSender};
 use crate::registry::{AgentRegistry, AgentRegistryHandle};
 use crate::router::TaskRouterHandle;
@@ -45,9 +43,12 @@ use crate::timeout_watcher::{TimeoutWatcher, TimeoutWatcherConfig};
 mod boot;
 mod bootstrap;
 mod bundled;
+mod legacy_secrets;
 mod lifecycle;
 mod persistence;
 
+#[cfg(test)]
+pub(crate) use bundled::register_builtin_tools;
 pub(crate) use persistence::resolve_home;
 
 pub use bootstrap::watch;
@@ -95,8 +96,8 @@ pub struct SupervisorConfig {
     pub obs_config: apollia_core::ObservabilityConfig,
     /// Repository of installed agents.
     ///
-    /// `Some` enables auto-load at boot: `enabled` agents are loaded via
-    /// `AgentLoader`, validated, and registered in `AgentRegistry`.
+    /// `Some` enables auto-load at boot: every enabled stored agent is
+    /// registered in `AgentRegistry`.
     /// `None` disables auto-load (compatibility with existing tests).
     pub agent_repository: Option<AgentRepository>,
     /// Repository of installed packages.
@@ -104,13 +105,6 @@ pub struct SupervisorConfig {
     /// `Some` runs package integrity validation at boot.
     /// `None` disables that validation (backward compatibility).
     pub package_repository: Option<apollia_tools::PackageRepository>,
-    /// Bundled agents directory (e.g. `agents/bundled/`).
-    ///
-    /// When `Some`, `auto_load_bundled_agents` runs at boot to register the
-    /// agents declared in `manifest.json`. When `None`, or when `manifest.json`
-    /// is absent, auto-install is silently skipped.
-    pub bundled_agents_path: Option<std::path::PathBuf>,
-
     /// Native tools configuration (the `[tools]` section of `apollia.toml`).
     ///
     /// Propagated by `EmbeddedConfig::apply_toml` into `SupervisorConfig` then
@@ -147,24 +141,6 @@ pub struct SupervisorConfig {
     /// `false`.
     pub plan_mode_default: bool,
 
-    /// Default working directory for free-chat sessions (the
-    /// `[chat] default_workspace` key of `apollia.toml`).
-    ///
-    /// When set to an existing directory, free-chat file tools anchor there and
-    /// the agent is told its working directory. `None` falls back to
-    /// `~/.apollia`. Read once at boot.
-    pub chat_default_workspace: Option<String>,
-
-    /// Paths an agent may read and write without an approval prompt, from the
-    /// `[filesystem] trusted_paths` key of `apollia.toml`, `~` already
-    /// resolved. Read once at boot.
-    ///
-    /// It is a friction boundary, not a wall: a path outside every entry is
-    /// classified one level higher, which asks the user rather than refusing.
-    /// An empty list therefore means every write outside the working directory
-    /// is asked about. Default: the user's home directory.
-    pub filesystem_trusted_paths: Vec<std::path::PathBuf>,
-
     /// Temperature applied to a chat turn that advertises tools (the
     /// `[chat] tool_turn_temperature` key of `apollia.toml`).
     ///
@@ -172,35 +148,16 @@ pub struct SupervisorConfig {
     /// more reliable on small local models. `None` resolves to the agent
     /// default. Read once at boot.
     pub chat_tool_turn_temperature: Option<f32>,
-}
 
-impl SupervisorConfig {
-    /// Returns the bundled agents directory, or `None` when it is not configured.
-    pub fn bundled_agents_dir(&self) -> Option<&std::path::Path> {
-        self.bundled_agents_path.as_deref()
-    }
-}
+    /// The `[workflows]` section of `apollia.toml`: the budget a workflow run
+    /// starts with, shared by everything it runs. Read once at boot.
+    pub workflows_config: apollia_core::WorkflowsConfig,
 
-/// Manifest of the bundled agents shipped with the runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BundledManifest {
-    /// Manifest format version (e.g. `"1.0.0"`).
-    pub version: String,
-    /// List of bundled agents.
-    pub bundled_agents: Vec<BundledAgentEntry>,
-}
-
-/// Entry for a single agent in the bundled manifest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BundledAgentEntry {
-    /// Unique agent name (must match `manifest().name` in the Python file).
-    pub name: String,
-    /// Source filename relative to the bundled directory (e.g. `"excel-worker.py"`).
-    pub file: String,
-    /// When `true`, the agent is installed automatically on first boot.
-    pub auto_install: bool,
-    /// Short description of the agent.
-    pub description: String,
+    /// The section channels of the configuration, when the caller built
+    /// consumers before the runtime that follow them (the agent runners of the
+    /// daemon). `None`: the supervisor builds them from this configuration.
+    /// Given to the configuration reloader when `config_path` is set.
+    pub config_channels: Option<crate::config_reload::ConfigChannels>,
 }
 
 /// Handles returned after successful startup.
@@ -227,11 +184,17 @@ pub struct SupervisorHandles<B: ExecutionBackend> {
     /// Always `Some` after successful startup, even when `config.triggers` is empty.
     /// Injected into `AppState` so webhook routes and CLI commands can reach it.
     pub trigger_engine: TriggerEngineHandle,
-    /// Handle to the AuditTrail actor.
-    ///
-    /// `None` when the data directory is unavailable or the SQLite open fails
-    /// (warning logged, runtime continues without audit). `Some` in production.
-    pub audit_trail: Option<AuditTrailHandle>,
+    /// Admission policy and journal of connection events, shared with
+    /// `AppState` so the desktop journals what it changes outside the HTTP
+    /// routes (a native account connected or disconnected).
+    pub connection_governance: crate::governance::ConnectionGovernance,
+    /// The governance actor every tool call is decided by, shared with
+    /// `AppState` and the chat.
+    pub governance: crate::governance::GovernanceHandle,
+    /// The hash-chained audit journal, shared with `AppState`, so the host
+    /// records what it installs outside the HTTP routes (the packages its
+    /// binary ships). `None` when the journal could not be opened.
+    pub audit_journal: Option<AuditJournalHandle>,
     /// HITL task repository, persists `input_required` prompts/contexts.
     ///
     /// Shared between `AppState` (resume handler) and `TimeoutWatcher`.
@@ -260,6 +223,9 @@ pub struct SupervisorHandles<B: ExecutionBackend> {
     /// `Some` after Phase 13 of the Supervisor startup sequence.
     /// `None` when the chat subsystem failed to start (warning logged).
     pub chat_manager: Option<crate::chat::ChatSessionManagerHandle>,
+    /// Handle to the workflow actor, to which the package host is attached
+    /// once the runtime is up. `None` without a task store.
+    pub workflows: Option<crate::workflows::WorkflowHandle>,
     /// ORIA plan cache repository, stores cached execution plans.
     ///
     /// `Some` when `plan_cache.db` opened successfully.
@@ -292,11 +258,6 @@ pub struct SupervisorHandles<B: ExecutionBackend> {
     /// `Some` when `~/.apollia/mcp.toml` exists and at least one server connected.
     /// `None` when the config file is absent, empty, or all servers failed to start.
     pub mcp_handle: Option<McpClientManagerHandle>,
-    /// Projects repository (SQLite).
-    ///
-    /// `Some` when `projects.db` opened successfully.
-    /// `None` when the open failed (warning logged).
-    pub project_repository: Option<std::sync::Arc<apollia_tools::ProjectRepository>>,
     /// Supervisor of the local sidecar runner.
     ///
     /// `Some` when a runner started successfully (GPU detected, binary present,
@@ -304,9 +265,16 @@ pub struct SupervisorHandles<B: ExecutionBackend> {
     /// process alive: the supervisor owns the child `Child` with
     /// `kill_on_drop(true)`. Propagated to `RuntimeHandle` on the embedded path.
     pub runner_supervisor: Option<Arc<crate::runner_supervisor::RunnerSupervisor>>,
+    /// The live sections of the configuration, for the consumers the host
+    /// builds once the runtime is up.
+    pub config_feed: crate::config_reload::ConfigFeed,
     /// Managed embedded `llama-server` (local LLM engine), or `None` when the
     /// binary is absent. Whisper STT stays on `runner_supervisor`.
     pub llama_server_supervisor: Option<Arc<crate::llama_server::LlamaServerSupervisor>>,
+    /// The `vllm-mlx` processes serving MLX models, when this machine runs them.
+    pub mlx_engine: Option<Arc<crate::mlx_engine::MlxEngineSupervisor>>,
+    /// The organisation policy verdict, read once at startup.
+    pub org_policy: Arc<apollia_permissions::PolicyVerdict>,
 }
 
 /// Supervisor errors.
@@ -364,8 +332,6 @@ pub struct Supervisor {
 /// (`api_config` is consumed by value), which would forbid a later `&self`
 /// borrow; threading the needed config fields here keeps the helpers callable.
 struct AutoLoadCtx<'a, B: ExecutionBackend> {
-    agent_loader: &'a Arc<dyn AgentLoader>,
-    backend_factory: &'a Option<Arc<dyn crate::api::routes_agents::AgentBackendFactory>>,
     base_backend: &'a B,
     registry_handle: &'a AgentRegistryHandle,
     router_handle: &'a TaskRouterHandle<B>,
@@ -373,8 +339,7 @@ struct AutoLoadCtx<'a, B: ExecutionBackend> {
     task_repository: Option<&'a Arc<TaskRepository>>,
     /// Repository of installed agents (`None` disables auto-load).
     agent_repository: Option<&'a AgentRepository>,
-    /// Data directory, used to locate per-agent venvs.
-    data_dir: &'a std::path::Path,
-    /// Observability config wired into each agent's coordinator.
-    obs_config: &'a apollia_core::ObservabilityConfig,
+    /// Observability config wired into each agent's coordinator, read at
+    /// each submission.
+    obs_config: &'a crate::config_reload::Live<apollia_core::ObservabilityConfig>,
 }

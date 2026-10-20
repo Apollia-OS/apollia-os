@@ -140,39 +140,60 @@ budget and all approval gates.";
 // ── ORIA planner / replanner (placeholders interpolated by the caller) ──────
 
 /// Initial-planning system prompt. Placeholders `{max_steps}`, `{tool_names}`,
-/// `{llm_backend_names}`, `{memory_summary}`, `{recent_history}` are substituted
-/// by the ORIA reasoner.
+/// `{memory_summary}`, `{recent_history}` are substituted by the ORIA reasoner.
+/// Every step runs on the model of the agent, so the plan names none.
 pub const PLANNER_SYSTEM_PROMPT: &str = r#"You are an execution planner for an autonomous AI agent.
 From the context and the agent's system_prompt, generate a structured execution plan.
 
 STRICT CONSTRAINTS:
 - Maximum {max_steps} steps
 - Available tools: {tool_names}
-- Available LLM models: {llm_backend_names}
 - Each step_id must be unique (s1, s2, s3...)
+- Write each description in the language of the request: the user reads it
 - depends_on may only reference step_ids that exist in this plan
+- When the place of a file is not certain, list or search the folder (file_list, file_glob) before reading it, rather than guessing its path
+- A step that only reasons, compares or writes uses tool_hint "llm"
+- Keep the reasoning to as few "llm" steps as the task needs: extracting and comparing the facts of one document is one step, not several
+- The answer to the request is written once the plan has run: do not plan a step that only formats or writes the final answer
 - No circular dependencies
-- Optionally, specify model_hint to pick an LLM backend per step. Omit the field to use the default backend.
 - For a step that calls a tool, optionally provide args: a JSON object of the tool's arguments. Omit it when the tool needs no input or when unsure; the runtime resolves the arguments from the description.
 
 REPLY ONLY WITH VALID JSON, with no text before or after:
-{"steps": [{"step_id": "s1", "description": "Clear description of the action", "tool_hint": "tool_or_llm_name", "model_hint": "fast-7b", "args": {}, "depends_on": []}]}
+{"steps": [{"step_id": "s1", "description": "Clear description of the action", "tool_hint": "tool_or_llm_name", "args": {}, "depends_on": []}]}
 
 Available memory context: {memory_summary}
 Recent history: {recent_history}"#;
 
 /// Partial-replanning system prompt after a step failure. Placeholders
 /// `{original_plan_json}`, `{completed_steps_json}`, `{failed_step_id}`,
-/// `{error_message}` are substituted by the ORIA reasoner.
+/// `{error_message}`, `{max_steps}` and `{tool_names}` are substituted by the
+/// ORIA reasoner. It states the same output contract as the planner: without
+/// it, a model wrote a plan of its own shape and the replan failed on
+/// "missing field `step_id`".
 pub const REPLANNER_SYSTEM_PROMPT: &str = r#"The execution plan hit an error. Generate an alternative plan.
 
 Original plan: {original_plan_json}
 Successfully completed steps: {completed_steps_json}
 Failed step: {failed_step_id} - error: {error_message}
 
-Generate a new plan for the remaining steps only.
-Reuse the outputs of already-completed steps when relevant.
-REPLY ONLY WITH VALID JSON."#;
+Generate a new plan that completes the whole request from where it stopped: the failed step, done another way, and every step that was to follow it, up to the answer the request asks for.
+Do not plan again the steps already completed; reuse their outputs.
+Do not repeat the action that failed in the same way: change the tool, the arguments or the approach.
+
+STRICT CONSTRAINTS:
+- Maximum {max_steps} steps
+- Available tools: {tool_names}
+- Each step_id must be unique (s1, s2, s3...)
+- Write each description in the language of the request: the user reads it
+- depends_on may only reference step_ids that exist in this plan
+- When the place of a file is not certain, list or search the folder (file_list, file_glob) before reading it, rather than guessing its path
+- A step that only reasons, compares or writes uses tool_hint "llm"
+- Keep the reasoning to as few "llm" steps as the task needs: extracting and comparing the facts of one document is one step, not several
+- The answer to the request is written once the plan has run: do not plan a step that only formats or writes the final answer
+- No circular dependencies
+
+REPLY ONLY WITH VALID JSON, with no text before or after:
+{"steps": [{"step_id": "s1", "description": "Clear description of the action", "tool_hint": "tool_or_llm_name", "args": {}, "depends_on": []}]}"#;
 
 // ── Critic (verification) ───────────────────────────────────────────────────
 
@@ -188,25 +209,38 @@ Do not add any prose before or after the JSON.";
 
 // ── Dynamic-block helpers (caller supplies the data) ────────────────────────
 
-/// Working-directory anchor note. `path` is the session's default workspace.
+/// Working-directory anchor note. `path` is the first folder granted to the
+/// agent, where a relative path lands.
 ///
-/// Frames the directory as the default for relative paths, not a jail: chat
-/// sessions can read and write anywhere on the machine (sensitive paths go
-/// through user approval).
+/// The file tools reach the folders granted to the agent and nothing else, so
+/// the note says so, and says what the user does to grant a folder: a refusal
+/// from a tool then reads as expected rather than as a fault.
 pub fn working_directory_note(path: Option<&str>) -> String {
     match path {
         Some(path) => format!(
-            "Your default working directory is `{path}`: relative file paths resolve there. You \
-             are NOT limited to this folder, you can read and write elsewhere on the machine \
-             using absolute paths (sensitive operations may ask the user for approval). Never \
-             refuse a path on the grounds that it is outside this directory."
+            "Your file tools reach the folders the user granted you, and nothing else. The \
+             first is `{path}`: relative file paths resolve there. Writing may ask the user \
+             for approval. When a path is outside every granted folder, the tool refuses: tell \
+             the user to add that folder as a connection and grant it to you on your sheet."
         ),
-        None => "You have no default working directory: give file tools an absolute path. You \
-                 can read and write anywhere on the machine (sensitive operations may ask the \
-                 user for approval). Never refuse a path on the grounds that it is outside some \
-                 directory."
+        None => "No folder is granted to you, so your file tools refuse every path. When the \
+                 user asks you to work on a file, tell them to add its folder as a connection \
+                 and grant it to you on your sheet."
             .to_string(),
     }
+}
+
+/// Heading of the block that carries the instructions of a conversation.
+pub const SESSION_INSTRUCTIONS_HEADING: &str = "## Instructions for this conversation";
+
+/// Wraps the instructions a user typed for one conversation under a stable
+/// heading. They add to the mission above them and hold for this conversation
+/// only.
+pub fn session_instructions_block(instructions: &str) -> String {
+    format!(
+        "{SESSION_INSTRUCTIONS_HEADING}\nThe user added these instructions for this \
+         conversation only. Follow them together with everything above.\n\n{instructions}"
+    )
 }
 
 /// Wraps a user-persona memory brief under a stable header.

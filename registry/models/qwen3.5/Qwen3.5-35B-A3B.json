@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "id": "qwen3.5/Qwen3.5-35B-A3B",
+  "kind": "language",
+  "label": "Qwen3.5 35B A3B",
+  "publisher": "Qwen",
+  "license": {
+    "id": "apache-2.0",
+    "source": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B"
+  },
+  "source_url": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B",
+  "released": "2026-02-24",
+  "params_b": 35.95,
+  "usage": "general",
+  "description": {
+    "fr": "Génération Qwen3.5 d'Alibaba : chaque taille lit les images, appelle des outils et peut réfléchir avant de répondre, avec une architecture qui réduit le coût en mémoire des longs contextes. Modèle à experts, rapide pour sa taille car une partie seulement travaille à chaque mot, mais il lui faut la mémoire de l'ensemble ; compter une machine d'au moins 32 Go de mémoire en quantification Q4.",
+    "en": "The Qwen3.5 generation from Alibaba: every size reads images, calls tools and can think before answering, with an architecture that lowers the memory cost of long contexts. A mixture-of-experts model, fast for its size since only part of it works on each token, but it needs the memory of the whole; plan for a machine with at least 32 GB of memory at Q4 quantization."
+  },
+  "capabilities": {
+    "tools": true,
+    "reasoning": true,
+    "vision": true,
+    "source": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B/tree/main"
+  },
+  "memory": {
+    "min_gb": 22.1,
+    "source": "https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF/blob/main/Qwen3.5-35B-A3B-Q4_K_M.gguf"
+  },
+  "defaults": {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "source": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/main/generation_config.json"
+  },
+  "author_fields": [
+    {
+      "name": "enable_thinking",
+      "type": "booleen",
+      "default": true,
+      "explanation": {
+        "fr": "Active ou coupe la réflexion visible avant la réponse. Coupée, le modèle répond plus vite ; active, il pose mieux les problèmes en plusieurs étapes.",
+        "en": "Turns the visible thinking before the answer on or off. Off, the model answers faster; on, it handles multi-step problems better."
+      },
+      "source": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/main/chat_template.jinja"
+    }
+  ],
+  "repos": [
+    "Qwen/Qwen3.5-35B-A3B",
+    "unsloth/Qwen3.5-35B-A3B-GGUF",
+    "mlx-community/Qwen3.5-35B-A3B-4bit",
+    "bartowski/Qwen_Qwen3.5-35B-A3B-GGUF",
+    "lmstudio-community/Qwen3.5-35B-A3B-GGUF",
+    "ggml-org/Qwen3.5-35B-A3B-GGUF",
+    "mlx-community/Qwen3.5-35B-A3B-5bit",
+    "mlx-community/Qwen3.5-35B-A3B-6bit",
+    "mlx-community/Qwen3.5-35B-A3B-8bit"
+  ],
+  "template": "registry/models/templates/qwen3.5.jinja"
+}

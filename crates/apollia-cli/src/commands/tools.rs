@@ -71,15 +71,6 @@ pub enum ToolsCommand {
 pub enum ToolsApprovalsCmd {
     /// List approvals pending decision (tasks in `input_required`).
     Pending,
-    /// List approvals resolved within the `--days` window.
-    Resolved {
-        /// Days of history to include (default: 7).
-        #[arg(long, default_value_t = 7)]
-        days: u32,
-        /// Maximum number of entries to return (default: 50).
-        #[arg(long, default_value_t = 50)]
-        limit: u32,
-    },
 }
 
 /// Subcommands of `apollia-os tools config`.
@@ -138,7 +129,16 @@ pub async fn run(cmd: &ToolsCommand, socket: Option<PathBuf>, json: bool) -> i32
         ToolsCommand::List => run_list(json),
         ToolsCommand::Enable { name } => run_set_enabled(name, true, json),
         ToolsCommand::Disable { name } => run_set_enabled(name, false, json),
-        ToolsCommand::Config { command } => run_config(command, json),
+        ToolsCommand::Config { command } => {
+            let code = run_config(command, json);
+            if code == crate::exit_codes::SUCCESS && matches!(command, ToolsConfigCmd::Set { .. }) {
+                // The runtime journals the change as made by the command line.
+                if let Some(path) = apollia_core::paths::config_file() {
+                    crate::commands::config::show_to_runtime(&path, socket).await;
+                }
+            }
+            code
+        }
         ToolsCommand::Reload => run_reload(json),
         ToolsCommand::Credentials { command } => run_credentials(command, json).await,
         ToolsCommand::Show { tool_name } => run_describe(socket, tool_name, json).await,
@@ -147,9 +147,9 @@ pub async fn run(cmd: &ToolsCommand, socket: Option<PathBuf>, json: bool) -> i32
 }
 #[cfg(test)]
 mod tests {
-    use super::config::{parse_value_for, set_nested_value};
+    use super::config::{parse_value_for, write_tool_setting};
     use super::listing::backend_label;
-    use super::support::{db_path, is_known_tool, is_valid_credential_target, keyfile_path};
+    use super::support::{db_path, is_known_tool, is_valid_credential_target};
     use super::*;
     use apollia_core::ToolsConfig;
     use apollia_tools::{
@@ -157,7 +157,14 @@ mod tests {
         AGENT_CREDENTIALS_NAMESPACE, NATIVE_TOOL_NAMES,
     };
     use tempfile::TempDir;
-    use toml_edit::DocumentMut;
+
+    /// The encrypted-file secret store under `dir`, never the OS keychain.
+    fn file_secrets(dir: &TempDir) -> Box<dyn apollia_auth::SecretStore> {
+        Box::new(
+            apollia_auth::AgeFileSecretStore::new(dir.path().join("secrets"), "test".into())
+                .expect("secret store"),
+        )
+    }
 
     fn write_toml(dir: &TempDir, content: &str) -> PathBuf {
         let p = dir.path().join("apollia.toml");
@@ -170,8 +177,8 @@ mod tests {
         // GIVEN an accepted backend value.
         // WHEN parse_value_for is called.
         let v = parse_value_for("web_search", &["backend"], "duckduckgo").expect("parse");
-        // THEN the TOML value is the expected string.
-        assert_eq!(v.as_str(), Some("duckduckgo"));
+        // THEN the TOML value is the name the section reads.
+        assert_eq!(v.as_str(), Some("duck_duck_go"));
     }
 
     #[test]
@@ -198,16 +205,22 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = write_toml(&dir, "");
 
-        // WHEN we inject tools.web_search.backend = "duckduckgo".
-        let mut doc: DocumentMut = "".parse().expect("empty parse");
+        // WHEN we inject tools.web_search.backend = "duckduckgo" through the
+        // writer the command uses.
         let value = parse_value_for("web_search", &["backend"], "duckduckgo").expect("parse");
-        set_nested_value(&mut doc, &["tools", "web_search"], &["backend"], value);
-        std::fs::write(&path, doc.to_string()).expect("write");
+        write_tool_setting(
+            &path,
+            "web_search",
+            &["backend"],
+            &value,
+            &apollia_core::config::PolicySettings::none(),
+        )
+        .expect("written");
 
         // THEN the file contains the expected section.
         let read = std::fs::read_to_string(&path).expect("read");
         assert!(read.contains("[tools.web_search]"));
-        assert!(read.contains("backend = \"duckduckgo\""));
+        assert!(read.contains("backend = \"duck_duck_go\""));
     }
 
     #[test]
@@ -237,8 +250,8 @@ mod tests {
         // GIVEN a fresh credential store (same path the CLI resolves).
         let dir = TempDir::new().expect("tempdir");
         apollia_tools::GovernanceDb::open(dir.path()).expect("init governance");
-        let mut store = ToolCredentialStore::new(&db_path(dir.path()), &keyfile_path(dir.path()))
-            .expect("open store");
+        let mut store =
+            ToolCredentialStore::new(&db_path(dir.path()), file_secrets(&dir)).expect("open store");
         // WHEN a secret is stored under the agent namespace and read back.
         store
             .set(AGENT_CREDENTIALS_NAMESPACE, "hubspot_api_token", "sk-demo")
@@ -288,11 +301,9 @@ mod tests {
         // GIVEN a fresh store with one credential.
         let dir = TempDir::new().expect("tempdir");
         apollia_tools::GovernanceDb::open(dir.path()).expect("init governance");
-        let mut store = ToolCredentialStore::new(
-            &dir.path().join(GOVERNANCE_DB_FILENAME),
-            &dir.path().join(".keyfile"),
-        )
-        .expect("store");
+        let mut store =
+            ToolCredentialStore::new(&dir.path().join(GOVERNANCE_DB_FILENAME), file_secrets(&dir))
+                .expect("store");
         store
             .set("web_search", "brave.api_key", "BSA-test")
             .expect("set");

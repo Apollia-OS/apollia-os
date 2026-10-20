@@ -1,6 +1,6 @@
 //! MCP configuration: parsing, validation, and env-var interpolation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -9,9 +9,9 @@ use thiserror::Error;
 /// Abstracts secret retrieval so that `apollia-mcp` does not depend on any
 /// Default service slot for MCP static secrets in the OS keychain.
 ///
-/// Kept in sync with the desktop-side `apollia_desktop::mcp::SecretStore`
-/// which writes under the same service when the wizard calls
-/// `store_mcp_secret`. The constant lives here so the
+/// The desktop `store_mcp_secret` command, the runtime secrets route and the
+/// CLI write under this service through `apollia_auth::SecretStore`. The
+/// constant lives here so the
 /// [`DefaultMcpSecretResolver`] can read from the same slot without
 /// duplicating the literal.
 pub const MCP_STATIC_SECRET_SERVICE: &str = "apollia-mcp";
@@ -48,6 +48,19 @@ impl SecretResolver for DefaultMcpSecretResolver {
             .await
             .map_err(|e| format!("{e}"))
     }
+}
+
+/// Whether `name` is an acceptable MCP server name: lowercase ASCII letters,
+/// digits, `_` and `-`, at least one of them.
+///
+/// The name keys the server in `mcp.db` and prefixes each of its static
+/// secrets in the keychain (`"{name}:{KEY}"`), so the same rule holds for a
+/// configuration and for a secret written ahead of it.
+pub fn is_valid_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
 }
 
 /// Trait for resolving secrets referenced by `${APOLLIA_SECRET:KEY}` placeholders
@@ -139,10 +152,6 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
-    /// When `true`, every tool call to this server requires HITL approval before execution.
-    #[serde(default)]
-    pub requires_approval: bool,
-
     /// Timeout for the MCP `initialize` handshake, in seconds.
     #[serde(default = "default_init_timeout")]
     pub init_timeout_secs: u64,
@@ -176,6 +185,24 @@ pub struct McpServerConfig {
     /// Additional tags applied to every tool advertised by this server.
     #[serde(default)]
     pub tags: Vec<String>,
+
+    /// Action family of each tool, as the curated selection classifies it,
+    /// keyed by the tool's name on this server.
+    ///
+    /// Written by the desktop when the connection is added from a curated
+    /// entry, empty otherwise. A tool listed here takes this family whatever
+    /// its server declares; a tool absent from it is classified from its
+    /// declared hints, or left unclassified. Bounds: at most 8192 entries,
+    /// each key a well-formed tool name, no `unclassified` value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_families: BTreeMap<String, apollia_tools::ActionFamily>,
+
+    /// Where the connection comes from, written by the caller that adds it.
+    ///
+    /// `None` keeps the origin already stored for this name, and a connection
+    /// never given one reads as custom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::origin::ConnectionOrigin>,
 }
 
 fn default_transport() -> String {
@@ -275,6 +302,16 @@ pub enum McpConfigError {
         server: String,
         /// The out-of-range value.
         value: u64,
+    },
+
+    /// `tool_families` holds too many entries, a malformed tool name, or an
+    /// `unclassified` family.
+    #[error("server '{server}': invalid tool_families: {reason}")]
+    InvalidToolFamilies {
+        /// Server name.
+        server: String,
+        /// What is wrong with the map.
+        reason: String,
     },
 
     /// `max_tools` is outside the valid range `[1, 8192]`.
@@ -382,16 +419,13 @@ impl McpServerConfig {
     /// - `call_timeout_secs` is in `[1, 600]`
     /// - `max_response_bytes` is in `[1024, 1_073_741_824]`
     /// - `max_tools` is in `[1, 8192]`
+    /// - `tool_families` has at most 8192 well-formed keys, none unclassified
     pub fn validate(&self) -> Result<(), McpConfigError> {
         if self.name.is_empty() {
             return Err(McpConfigError::EmptyServerName);
         }
 
-        if !self
-            .name
-            .chars()
-            .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
-        {
+        if !is_valid_server_name(&self.name) {
             return Err(McpConfigError::InvalidServerName(self.name.clone()));
         }
 
@@ -422,6 +456,8 @@ impl McpServerConfig {
                 value: self.max_tools,
             });
         }
+
+        self.validate_tool_families()?;
 
         match self.transport.as_str() {
             "stdio" => {
@@ -463,6 +499,37 @@ impl McpServerConfig {
         }
 
         Ok(())
+    }
+
+    /// Check the bounds of [`Self::tool_families`].
+    fn validate_tool_families(&self) -> Result<(), McpConfigError> {
+        let invalid = |reason: &str| McpConfigError::InvalidToolFamilies {
+            server: self.name.clone(),
+            reason: reason.to_string(),
+        };
+        if self.tool_families.len() > MAX_MAX_TOOLS as usize {
+            return Err(invalid("more entries than any server may publish"));
+        }
+        for (tool, family) in &self.tool_families {
+            if !crate::sanitize::is_valid_tool_name(tool) {
+                return Err(invalid("a key is not a well-formed tool name"));
+            }
+            if *family == apollia_tools::ActionFamily::Unclassified {
+                return Err(invalid("a classification cannot be `unclassified`"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the connection carries an account: an MCP OAuth token or a
+    /// static secret from the keychain, referenced by one of its env values.
+    ///
+    /// What a tool reads through such a connection is the user's personal data.
+    #[must_use]
+    pub fn has_account(&self) -> bool {
+        self.env
+            .values()
+            .any(|v| v.contains("${APOLLIA_OAUTH}") || v.contains("${APOLLIA_SECRET:"))
     }
 
     /// Resolve `${VAR}` placeholders in every env value.
@@ -650,6 +717,28 @@ mod tests {
     }
 
     #[test]
+    fn test_a_file_written_with_the_retired_approval_key_still_loads() {
+        // GIVEN an mcp.toml written when a server carried an approval flag
+        let toml_content = r#"
+            [[servers]]
+            name = "crm"
+            command = "uvx"
+            args = ["crm-mcp"]
+            transport = "stdio"
+            requires_approval = true
+        "#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(toml_content.as_bytes()).unwrap();
+        // WHEN
+        let config = McpConfig::load(file.path()).unwrap();
+        // THEN the server loads, the key is read past and written back nowhere
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].name, "crm");
+        let written = toml::to_string(&config.servers[0]).unwrap();
+        assert!(!written.contains("approval"), "{written}");
+    }
+
+    #[test]
     fn test_missing_file_returns_empty_config() {
         // GIVEN a path pointing to a non-existent file
         let path = Path::new("/tmp/nonexistent-mcp-toml-12345.toml");
@@ -690,12 +779,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -718,12 +808,13 @@ mod tests {
             env: HashMap::from([("API_KEY".to_string(), "${TEST_MCP_KEY_327}".to_string())]),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN
         let resolved = config.resolve_env(None).await.unwrap();
@@ -748,12 +839,13 @@ mod tests {
             env: HashMap::from([("KEY".to_string(), "${TOTALLY_MISSING_VAR_327}".to_string())]),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -773,12 +865,13 @@ mod tests {
             env: HashMap::new(),
             transport: "http".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -804,12 +897,13 @@ mod tests {
             )]),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN
         let resolved = config.resolve_env(None).await.unwrap();
@@ -832,12 +926,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -857,12 +952,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -883,12 +979,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN validation rejects with a guidance-bearing error.
         match config.validate() {
@@ -910,12 +1007,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -943,12 +1041,13 @@ mod tests {
                 env: HashMap::new(),
                 transport: "stdio".to_string(),
                 url: None,
-                requires_approval: false,
                 init_timeout_secs: 30,
                 call_timeout_secs: 60,
                 max_response_bytes: default_max_response_bytes(),
                 max_tools: 256,
                 tags: vec![],
+                tool_families: Default::default(),
+                origin: None,
             };
             // WHEN / THEN: must accept all of these.
             assert!(
@@ -1005,12 +1104,13 @@ mod tests {
             env,
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         }
     }
 
@@ -1176,12 +1276,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 0,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -1201,12 +1302,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 301,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -1226,12 +1328,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 0,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -1251,12 +1354,13 @@ mod tests {
             env: HashMap::new(),
             transport: "streamable-http".to_string(),
             url: Some("localhost:8080".to_string()),
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -1276,12 +1380,13 @@ mod tests {
             env: HashMap::new(),
             transport: "streamable-http".to_string(),
             url: Some("http://localhost:8080/mcp".to_string()),
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(config.validate().is_ok());
@@ -1298,12 +1403,13 @@ mod tests {
             env: HashMap::new(),
             transport: "streamable-http".to_string(),
             url: Some("https://mcp.notion.ai/mcp".to_string()),
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(config.validate().is_ok());
@@ -1320,12 +1426,13 @@ mod tests {
             env: HashMap::new(),
             transport: "streamable-http".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(matches!(
@@ -1345,12 +1452,13 @@ mod tests {
             env: HashMap::new(),
             transport: "sse".to_string(),
             url: Some("https://mcp.brave.com/sse".to_string()),
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: default_max_response_bytes(),
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         };
         // WHEN / THEN
         assert!(config.validate().is_ok());
@@ -1498,5 +1606,89 @@ mod tests {
         let config = McpConfig::load(file.path()).unwrap();
         // THEN the serde default (256) is applied
         assert_eq!(config.servers[0].max_tools, 256);
+    }
+
+    #[test]
+    fn test_has_account_follows_the_credential_placeholders() {
+        // GIVEN a connection with an OAuth placeholder, one with a stored
+        //       secret, and one whose env carries neither
+        let oauth = server_with_env(
+            "a",
+            HashMap::from([("Authorization".to_string(), "${APOLLIA_OAUTH}".to_string())]),
+        );
+        let secret = server_with_env(
+            "b",
+            HashMap::from([("KEY".to_string(), "${APOLLIA_SECRET:KEY}".to_string())]),
+        );
+        let plain = server_with_env(
+            "c",
+            HashMap::from([("HOME_DIR".to_string(), "${HOME}".to_string())]),
+        );
+        // WHEN each is asked whether it carries an account
+        // THEN only the first two do
+        assert!(oauth.has_account());
+        assert!(secret.has_account());
+        assert!(!plain.has_account());
+    }
+
+    #[test]
+    fn test_tool_families_round_trip_and_validate() {
+        // GIVEN a server whose selection classifies two tools
+        let raw = r#"
+            name = "notion"
+            command = "npx"
+            [tool_families]
+            notion-search = "read_personal"
+            notion-create-pages = "write_or_delete"
+        "#;
+        // WHEN it is parsed and validated
+        let config: McpServerConfig = toml::from_str(raw).unwrap();
+        // THEN both classifications are read and accepted
+        assert_eq!(config.tool_families.len(), 2);
+        assert_eq!(
+            config.tool_families["notion-search"],
+            apollia_tools::ActionFamily::ReadPersonal
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_tool_families_reject_a_bad_key_or_an_unclassified_value() {
+        // GIVEN a classification keyed by a malformed tool name, and one that
+        //       classifies a tool as unclassified
+        let mut bad_key = server_with_env("a", HashMap::new());
+        bad_key
+            .tool_families
+            .insert("a/b".to_string(), apollia_tools::ActionFamily::Read);
+        let mut unclassified = server_with_env("b", HashMap::new());
+        unclassified.tool_families.insert(
+            "echo".to_string(),
+            apollia_tools::ActionFamily::Unclassified,
+        );
+        // WHEN each is validated
+        // THEN both are refused with the dedicated error
+        assert!(matches!(
+            bad_key.validate(),
+            Err(McpConfigError::InvalidToolFamilies { .. })
+        ));
+        assert!(matches!(
+            unclassified.validate(),
+            Err(McpConfigError::InvalidToolFamilies { .. })
+        ));
+    }
+
+    #[test]
+    fn test_an_unknown_family_fails_the_parse() {
+        // GIVEN a classification naming a family no build knows
+        let raw = r#"
+            name = "notion"
+            command = "npx"
+            [tool_families]
+            notion-search = "teleport"
+        "#;
+        // WHEN it is parsed
+        let parsed: Result<McpServerConfig, _> = toml::from_str(raw);
+        // THEN the parse fails rather than guessing a family
+        assert!(parsed.is_err());
     }
 }

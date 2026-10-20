@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "whisper-large-v3-french",
+  "kind": "dictation",
+  "label": "Whisper Large-v3 French",
+  "publisher": "bofenghuang",
+  "license": {
+    "id": "mit",
+    "source": "https://huggingface.co/bofenghuang/whisper-large-v3-french"
+  },
+  "source_url": "https://huggingface.co/bofenghuang/whisper-large-v3-french",
+  "description": {
+    "fr": "Whisper Large-v3 affiné sur le français par Bofeng Huang : meilleure ponctuation, meilleurs noms propres et moins d'erreurs sur le français parlé. Il ne sert que pour le français et pèse autant que Large-v3. Compter de 1,1 à 3,1 Go de mémoire selon la quantification.",
+    "en": "Whisper Large-v3 fine-tuned on French by Bofeng Huang: better punctuation, better proper nouns and fewer errors on spoken French. It serves French only and weighs as much as Large-v3. Plan for 1.1 to 3.1 GB of memory depending on the quantization."
+  },
+  "capabilities": {
+    "tools": false,
+    "reasoning": false,
+    "vision": false,
+    "source": "https://huggingface.co/bofenghuang/whisper-large-v3-french"
+  },
+  "memory": {
+    "min_gb": 1.1,
+    "source": "https://huggingface.co/bofenghuang/whisper-large-v3-french/blob/main/ggml-model-q5_0.bin"
+  },
+  "defaults": {
+    "source": ""
+  },
+  "author_fields": [],
+  "repos": [
+    "bofenghuang/whisper-large-v3-french"
+  ],
+  "selection_files": [
+    "https://huggingface.co/bofenghuang/whisper-large-v3-french/resolve/main/ggml-model-q5_0.bin",
+    "https://huggingface.co/bofenghuang/whisper-large-v3-french/resolve/main/ggml-model.bin"
+  ]
+}

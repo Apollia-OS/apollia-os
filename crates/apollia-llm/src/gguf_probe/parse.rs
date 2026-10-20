@@ -112,6 +112,9 @@ pub struct GgufHeaderFacts {
     pub architecture: Option<String>,
     /// `general.name`, the publisher's label for the weights.
     pub name: Option<String>,
+    /// `general.size_label`, the publisher's parameter count label, for
+    /// example `"8B"` or `"30B-A3B"`.
+    pub size_label: Option<String>,
     /// `general.file_type`, the quantisation scheme as a `LLAMA_FTYPE` value.
     pub file_type: Option<u32>,
     /// `general.quantization_version`.
@@ -124,6 +127,11 @@ pub struct GgufHeaderFacts {
     /// file at all. A value the server's build does not know aborts the load
     /// with `unknown pre-tokenizer type`, after the download has completed.
     pub tokenizer_pre: Option<String>,
+    /// Length of `tokenizer.ggml.tokens`, the number of tokens of the
+    /// vocabulary. Read from the head of the array, so it is known even when
+    /// the read stops inside the vocabulary.
+    #[serde(default)]
+    pub tokenizer_token_count: Option<u64>,
     /// Whether `tokenizer.chat_template` is present.
     ///
     /// Apollia launches the server with `--jinja`, so a file without a template
@@ -131,6 +139,14 @@ pub struct GgufHeaderFacts {
     pub has_chat_template: bool,
     /// The first bytes of `tokenizer.chat_template`, kept for diagnostics.
     pub chat_template_excerpt: Option<String>,
+    /// Whether the whole chat template renders tools, read before it is cut
+    /// to [`Self::chat_template_excerpt`].
+    pub chat_template_tools: bool,
+    /// Whether the whole chat template opens a reasoning block.
+    pub chat_template_reasoning: bool,
+    /// The reasoning variables the whole chat template reads.
+    #[serde(default)]
+    pub chat_template_reasoning_variables: crate::capabilities::TemplateReasoningVariables,
     /// `{arch}.block_count`, the number of transformer layers.
     pub block_count: Option<u64>,
     /// `{arch}.context_length`, the training context window.
@@ -185,6 +201,10 @@ pub struct GgufHeaderFacts {
     /// Non-zero marks a layer that attends to the short window. Empty when the
     /// file carries a period, or nothing at all.
     pub sliding_window_per_layer: Vec<u64>,
+    /// `{arch}.pooling_type`, how the engine reduces a text to one vector:
+    /// 1 mean, 2 first token, 3 last token, 4 rank. Only an embeddings or a
+    /// reranking model carries it; a chat model has no use for it.
+    pub pooling_type: Option<u64>,
     /// `true` when the buffer ended before every declared pair was walked.
     pub truncated: bool,
 }
@@ -246,6 +266,16 @@ impl<'a> Cursor<'a> {
     fn u64(&mut self) -> Result<u64, Exhausted> {
         let b = self.take(8)?;
         Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    }
+
+    /// The length of the array whose head sits at the cursor (a four-byte
+    /// element tag, then the count), without moving.
+    fn peek_array_len(&self) -> Option<u64> {
+        let start = self.pos.checked_add(4)?;
+        let b = self.bytes.get(start..start.checked_add(8)?)?;
+        Some(u64::from_le_bytes([
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
         ]))
     }
@@ -502,6 +532,7 @@ fn skip_array(cur: &mut Cursor<'_>, depth: u32) -> Step<()> {
 const GENERAL_KEYS: &[&str] = &[
     "general.architecture",
     "general.name",
+    "general.size_label",
     "general.file_type",
     "general.quantization_version",
     "tokenizer.ggml.model",
@@ -526,6 +557,7 @@ const ARCH_SUFFIXES: &[&str] = &[
     "expert_count",
     "expert_used_count",
     "full_attention_interval",
+    "pooling_type",
 ];
 
 fn is_wanted(key: &str) -> bool {
@@ -605,6 +637,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<GgufHeaderFacts, GgufParseError> {
     facts.full_attention_interval = by_suffix.get("full_attention_interval").copied();
     facts.key_length_swa = by_suffix.get("attention.key_length_swa").copied();
     facts.value_length_swa = by_suffix.get("attention.value_length_swa").copied();
+    facts.pooling_type = by_suffix.get("pooling_type").copied();
 
     Ok(facts)
 }
@@ -618,6 +651,9 @@ fn read_pair(
     let tag_offset = cur.pos;
     let ty = ValueType::from_tag(cur.u32()?, tag_offset)?;
     let wanted = is_wanted(&key);
+    if ty == ValueType::Array && key == "tokenizer.ggml.tokens" {
+        facts.tokenizer_token_count = cur.peek_array_len();
+    }
     let value = read_value(cur, ty, wanted)?;
 
     if !wanted {
@@ -627,6 +663,7 @@ fn read_pair(
     match (key.as_str(), value) {
         ("general.architecture", Scalar::Text(s)) => facts.architecture = Some(s),
         ("general.name", Scalar::Text(s)) => facts.name = Some(s),
+        ("general.size_label", Scalar::Text(s)) => facts.size_label = Some(s),
         ("general.file_type", Scalar::Unsigned(n)) => facts.file_type = u32::try_from(n).ok(),
         ("general.quantization_version", Scalar::Unsigned(n)) => {
             facts.quantization_version = u32::try_from(n).ok();
@@ -635,6 +672,10 @@ fn read_pair(
         ("tokenizer.ggml.pre", Scalar::Text(s)) => facts.tokenizer_pre = Some(s),
         ("tokenizer.chat_template", Scalar::Text(s)) => {
             facts.has_chat_template = true;
+            facts.chat_template_tools = crate::capabilities::template_handles_tools(&s);
+            facts.chat_template_reasoning = crate::capabilities::template_handles_reasoning(&s);
+            facts.chat_template_reasoning_variables =
+                crate::capabilities::TemplateReasoningVariables::of(&s);
             facts.chat_template_excerpt = Some(excerpt(&s, CHAT_TEMPLATE_EXCERPT_BYTES));
         }
         (other, Scalar::Unsigned(n)) => {

@@ -92,13 +92,14 @@ impl RuntimeClient {
 
     /// One-shot completion via `POST /api/v1/llm/complete`.
     ///
-    /// Optional `system` prompt + `user` message; `grammar` constrains local
-    /// decoding with GBNF. Returns the parsed response (`content`, `usage`, ...).
+    /// Optional `system` prompt + `user` message; `schema` is a JSON Schema the
+    /// answer has to satisfy, on every backend. Returns the parsed response
+    /// (`content`, `usage`, ...).
     pub async fn llm_complete(
         &self,
         system: Option<&str>,
         user: &str,
-        grammar: Option<&str>,
+        schema: Option<&serde_json::Value>,
     ) -> Result<serde_json::Value, ClientError> {
         let mut messages = Vec::new();
         if let Some(s) = system {
@@ -106,8 +107,8 @@ impl RuntimeClient {
         }
         messages.push(serde_json::json!({ "role": "user", "content": user }));
         let mut body = serde_json::json!({ "messages": messages });
-        if let Some(g) = grammar {
-            body["grammar"] = serde_json::Value::String(g.to_string());
+        if let Some(schema) = schema {
+            body["schema"] = schema.clone();
         }
         let resp = self.post("/api/v1/llm/complete", Some(&body)).await?;
         if resp.status >= 400 {
@@ -132,6 +133,98 @@ impl RuntimeClient {
             });
         }
         Ok(serde_json::from_str(&resp.body)?)
+    }
+
+    /// What the model of a session can do, via
+    /// `GET /api/v1/sessions/:id/model-capabilities`.
+    pub async fn get_session_model_capabilities(
+        &self,
+        session_id: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .get(&format!("/api/v1/sessions/{session_id}/model-capabilities"))
+            .await?;
+        if resp.status >= 400 {
+            return Err(ClientError::ServerError {
+                status: resp.status,
+                body: extract_error(&resp.body, resp.status),
+            });
+        }
+        Ok(serde_json::from_str(&resp.body)?)
+    }
+
+    /// The prompt template the model of a session receives, via
+    /// `GET /api/v1/sessions/:id/prompt-template`.
+    pub async fn get_session_prompt_template(
+        &self,
+        session_id: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .get(&format!("/api/v1/sessions/{session_id}/prompt-template"))
+            .await?;
+        if resp.status >= 400 {
+            return Err(ClientError::ServerError {
+                status: resp.status,
+                body: extract_error(&resp.body, resp.status),
+            });
+        }
+        Ok(serde_json::from_str(&resp.body)?)
+    }
+
+    /// What a conversation changes from its agent, via
+    /// `GET /api/v1/sessions/:id/settings`.
+    pub async fn get_session_settings(
+        &self,
+        session_id: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .get(&format!("/api/v1/sessions/{session_id}/settings"))
+            .await?;
+        answer_of(resp)
+    }
+
+    /// Replace the settings of a conversation via
+    /// `PUT /api/v1/sessions/:id/settings`; answers them as stored.
+    pub async fn put_session_settings(
+        &self,
+        session_id: &str,
+        settings: &serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .put(
+                &format!("/api/v1/sessions/{session_id}/settings"),
+                Some(settings),
+            )
+            .await?;
+        answer_of(resp)
+    }
+
+    /// The notes kept beside a conversation, via
+    /// `GET /api/v1/sessions/:id/notes`.
+    pub async fn get_session_notes(
+        &self,
+        session_id: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .get(&format!("/api/v1/sessions/{session_id}/notes"))
+            .await?;
+        answer_of(resp)
+    }
+
+    /// Replace the notes of a conversation via
+    /// `PUT /api/v1/sessions/:id/notes`; answers them as stored.
+    pub async fn put_session_notes(
+        &self,
+        session_id: &str,
+        notes: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .put(
+                &format!("/api/v1/sessions/{session_id}/notes"),
+                Some(&serde_json::json!({ "notes": notes })),
+            )
+            .await?;
+        answer_of(resp)
     }
 
     /// List recent sessions via `GET /api/v1/sessions/recent?limit=N`.
@@ -299,4 +392,15 @@ impl RuntimeClient {
 
         Ok(rx)
     }
+}
+
+/// The JSON answer of `resp`, or the error its status stands for.
+fn answer_of(resp: super::RawResponse) -> Result<serde_json::Value, ClientError> {
+    if resp.status >= 400 {
+        return Err(ClientError::ServerError {
+            status: resp.status,
+            body: extract_error(&resp.body, resp.status),
+        });
+    }
+    Ok(serde_json::from_str(&resp.body)?)
 }

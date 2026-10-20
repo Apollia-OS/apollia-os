@@ -29,12 +29,13 @@ fn mock_server_config(name: &str) -> McpServerConfig {
         env: HashMap::new(),
         transport: "stdio".to_string(),
         url: None,
-        requires_approval: false,
         init_timeout_secs: 10,
         call_timeout_secs: 10,
         max_response_bytes: 8 * 1024 * 1024,
         max_tools: 256,
         tags: vec![],
+        tool_families: Default::default(),
+        origin: None,
     }
 }
 
@@ -47,7 +48,6 @@ async fn mcp_tool_executes_through_dispatcher_eager() {
     let manager = McpClientManagerHandle::start(
         vec![mock_server_config("calc")],
         &registry,
-        None,
         None,
         LoadingMode::Eager,
     )
@@ -87,7 +87,6 @@ async fn mcp_tool_executes_through_dispatcher_deferred() {
     let manager = McpClientManagerHandle::start(
         vec![mock_server_config("calc")],
         &registry,
-        None,
         None,
         LoadingMode::Deferred,
     )

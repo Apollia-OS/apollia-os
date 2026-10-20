@@ -73,7 +73,7 @@ docs(help): operator article for OAuth setup
 **SDK scope** :
 
 ```
-feat(sdk): add @on_message decorator
+feat(sdk): add the steps argument to @workflow
 fix(sdk): TypedDict required_keys handling
 ```
 
@@ -120,7 +120,7 @@ The previous mpsc::channel size of 64 was hitting backpressure under
 sustained CLI batch invocations (apollia agent list --json piped through
 jq). 256 absorbs the burst without measurable memory cost.
 
-Reproduced with `tests/cli/cli-e2e.sh --stress`.
+Reproduced with `bash tests/cli/cli-e2e.sh`.
 ```
 
 ---
@@ -202,21 +202,28 @@ not happen. Fix the issue and re-stage. Never `--no-verify`.
 Branch body : kebab-case (`feat/agents-md-spec`, `fix/oauth-refresh-leak`).
 One topic per branch.
 
-Branch from `main`. Rebase onto `main` before opening the PR. Never merge
-`main` into a feature branch (creates merge noise).
+Branch from `develop`, where work lands before a release merges it into
+`main`. Rebase onto `develop` before opening the PR. Never merge `develop`
+into a feature branch (creates merge noise).
 
 ---
 
 ## 11. Tags and versioning
 
-Strict SemVer : `vMAJOR.MINOR.PATCH`. Pre-release suffix when needed :
-`v0.1.0-preview`, `v0.1.0-rc1`.
+Strict SemVer : `vMAJOR.MINOR.PATCH`. A release carries no suffix. A trial
+version, published on the preview update channel only, is tagged
+`vMAJOR.MINOR.PATCH-rc.N` (`v0.3.1-rc.1`). No tag carries `-preview`: the word
+names the update channel, never a version.
 
 Tag on the commit that ships the version. Push the tag explicitly :
-`git push origin v0.1.0`.
+`git push origin v0.3.0`.
 
-Workspace versions are aligned : every `Cargo.toml` in `crates/` uses
-`version.workspace = true`. Bump once in the root `Cargo.toml`.
+One version covers the whole tree, and each manifest states it: every
+`Cargo.toml` under `crates/` and `tests/`, `sdk/pyproject.toml` with
+`apollia.__version__`, the `package.json` files, `tauri.conf.json`,
+`clients/openapi.json` and the built-in agents. A release bumps them together,
+with `Cargo.lock` and the npm locks; `docs/agents/NAMING.md` lists the two
+exceptions.
 
 ---
 

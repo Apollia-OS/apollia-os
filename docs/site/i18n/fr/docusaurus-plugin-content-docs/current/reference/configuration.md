@@ -7,66 +7,130 @@ title: Configuration (apollia.toml)
 
 Référence de la surface de configuration `apollia.toml`.
 
-Le fichier a trois emplacements, et les deux runtimes ne cherchent pas aux
-mêmes.
+Le fichier a un seul emplacement, `~/.apollia/apollia.toml`, et toutes les
+surfaces lisent et écrivent celui-là : le démon lancé par `apollia-os start`,
+l'application desktop, et chaque commande qui touche la configuration
+(`apollia-os config`, `apollia-os tools config`, `apollia-os doctor`). Une clé réglée par l'une est la clé que lisent les autres.
 
-| Lecteur | Ordre de recherche, le premier trouvé gagne |
+Seul un chemin donné explicitement le remplace :
+
+| Commande | Option |
 | --- | --- |
-| Le démon, lancé par `apollia-os start` | `./apollia.toml`, puis `$XDG_CONFIG_HOME/apollia/apollia.toml`, à défaut `~/.config/apollia/apollia.toml` |
-| L'application desktop | `~/.apollia/apollia.toml`, puis `./apollia.toml`. L'emplacement `~/.config` n'est jamais lu, délibérément : une copie oubliée là ressusciterait des backends sur un profil neuf |
+| `apollia-os start` | `--config <CHEMIN>`. Le fichier doit exister, sinon le démarrage échoue |
+| `apollia-os config get`, `set`, `show`, `validate`, `edit` | `--file <CHEMIN>` |
 
-La ligne de commande écrit dans les deux, selon la sous-commande. `apollia-os config set` écrit le fichier du démon ;
-`apollia-os llm costs --threshold 25` écrit `~/.apollia/apollia.toml`, que seule
-l'application desktop lit. Vérifiez quel fichier vous avez modifié avant de
-conclure qu'une clé n'a eu aucun effet.
+Le dossier courant n'est pas consulté : un paquet d'agent range son manifeste
+sous le même nom, `apollia.toml`, et lancer le démon dans le dossier d'un paquet
+ne le lit pas. Un fichier laissé à un ancien emplacement (`./apollia.toml`,
+`$XDG_CONFIG_HOME/apollia/apollia.toml`, `~/.config/apollia/apollia.toml`) n'est
+jamais lu ni importé. Le démon émet pour lui un avertissement
+`config.legacy_location.ignored` au démarrage, et `apollia-os doctor` le nomme
+avec la commande qui le déplace vers `~/.apollia/apollia.toml`.
 
 Chaque section est optionnelle : une section absente retombe sur ses valeurs par
 défaut. Les données d'exécution (bases de données, jeton API, modèles) vivent
 séparément sous `~/.apollia/`.
 
+## Le fichier par défaut
+
+Quand `~/.apollia/apollia.toml` est absent, la première surface qui démarre
+l'écrit : l'application de bureau, le démon lancé par `apollia-os start` (sans
+`--config`), ou toute commande `apollia-os config` autre que `reset`. Un fichier
+qui existe n'est jamais réécrit.
+
+Le fichier par défaut liste chaque clé des tableaux ci-dessous, section par
+section, chacune sous une ligne qui dit ce qu'elle fait, en ligne commentée qui
+porte sa valeur par défaut :
+
+```toml
+[api]
+
+# Address the daemon's TCP listener binds to.
+# bind = "127.0.0.1"
+```
+
+Une ligne commentée vaut sa valeur par défaut, et suit les valeurs par défaut
+des versions suivantes. Pour changer un réglage, décommentez sa ligne et
+modifiez la valeur ; pour revenir à la valeur par défaut, commentez-la de
+nouveau. Chaque ligne peut être décommentée seule sans que le fichier cesse
+d'être valide. Une clé sans valeur par défaut est écrite en commentaire qui le
+dit. `[llm]` est écrite en une phrase, sans clé : les modèles de langage se
+gèrent dans les réglages IA de l'application, qui les gardent dans la base du
+moteur. Le fichier est écrit en anglais, comme ses clés.
+
+`apollia-os config keys` affiche la même liste, et `--json` donne pour chaque clé
+son chemin, son type, sa valeur par défaut, sa documentation, sa classe de
+rechargement, si la politique de l'organisation peut l'imposer, et si elle est
+retirée.
+
+## Changements pendant que le moteur tourne
+
+Le moteur suit son fichier. Un texte enregistré par `PUT /api/v1/config`, ou le
+fichier modifié sur le disque par tout autre moyen, est relu une fois qu'il est
+resté inchangé un instant. Un texte valide est appliqué : une clé de classe de
+rechargement `Reloadable` prend effet sans redémarrage, au prochain usage du
+réglage (la prochaine conversation, le prochain échange, la prochaine exécution
+d'un agent, le prochain passage sur les tâches en attente). Une clé de classe
+`Restart` garde son ancienne valeur jusqu'au prochain démarrage du moteur ;
+`GET /api/v1/config` la liste sous `pendingRestart`, avec sa ligne, et la liste
+est vide après un démarrage. Un texte invalide ne change rien : la dernière
+configuration valide reste en vigueur, la route de lecture rend les fautes à
+leur ligne, et un événement `ConfigInvalid` est publié. Chaque application publie
+un événement `ConfigReloaded` avec les sections appliquées et les clés en attente
+de redémarrage.
+
 ## Sections
 
-Neuf sections sont lues. Une section en dehors de cette liste est ignorée, et
-`apollia-os config set` la rejette plutôt que d'accepter une valeur que rien ne
-consultera jamais.
+Le fichier est lu strictement, par la même validation partout. Une clé
+qu'aucune section ne déclare, ou une valeur du mauvais type, est une faute
+nommée à sa ligne : `apollia-os config validate` liste chaque faute,
+`apollia-os config set` refuse de l'écrire, et `apollia-os start` refuse de
+démarrer, avec le code de sortie 1. L'application de bureau démarre alors sur
+les valeurs par défaut, journalise chaque faute et inscrit le refus au journal
+d'audit, au lieu d'écarter le fichier en silence. Une section retirée (voir plus bas) reste acceptée, avec un
+avertissement `config.key.retired`.
 
 | Section | Objet |
 |---|---|
 | `[llm]` | Configuration du backend LLM. |
 | `[api]` | Écouteur TCP et authentification (`bind`, `require_token`, `tls_cert`, `tls_key`). |
-| `[runtime]` | Capacités de l'EventBus et des mailbox. |
+| `[runtime]` | Capacités de l'EventBus et des mailbox, et le temps accordé au démarrage du runtime. |
 | `[hitl]` | Délai d'expiration et intervalle de scan du human-in-the-loop. |
 | `[tools]` | Outils natifs : limites, désactivation statique, et configuration par outil `[tools.web_search]` / `[tools.web_read]`. |
 | `[mcp]` | Configuration du module MCP, y compris `[[mcp.servers]]` (voir plus bas). |
 | `[hooks]` | Gestionnaires de hooks de cycle de vie (commande ou HTTP). |
 | `[chat]` | Valeurs par défaut au niveau session du sous-système de chat (par exemple `plan_mode_default`). |
-| `[filesystem]` | Le journal réversible, et les chemins où un agent travaille sans demander (`trusted_paths`, voir plus bas). |
+| `[workflows]` | Le budget avec lequel démarre l'exécution d'un workflow, partagé par chaque agent et chaque workflow qu'elle lance. |
+| `[models]` | L'index signé des fiches de modèles, le dossier des modèles (`dir`), la présence de réglages de chargement dans un preset (`preset_load_settings`), et la règle appliquée à un fichier importé (`[models.import]`). |
+| `[observability]` | Capture et rétention des traces, documentées plus bas. |
+| `[desktop]` | Réglages de l'application de bureau : `developer_mode`, `update_channel` (`stable` ou `preview`), `background_service_allowed`, `chat_auto_naming` (`never`, `auto` ou `always`), `chat_debug_blocks`, `resource_widget`, les comportements du chat `chat_single_empty`, `chat_double_click_edit`, `chat_double_click_rename` et `chat_regenerate_shortcut`, les comportements généraux `model_load_window` et `preset_save_confirm`, et `link_preview_enabled`, qui récupère l'aperçu d'un lien affiché dans une conversation. Désactivé par défaut, puisque la récupération sort de la machine. |
+| `[server]` | Le serveur compatible : `enabled`, `port`, `require_auth`, `cors`, `serve_on_lan`, `allow_request_mcp`, et le chargement à la demande : `jit_loading`, `jit_auto_unload`, `jit_idle_ttl_minutes`, `jit_keep_last_only`, et `separate_reasoning_content`. |
+| `[engines]` | Réglages des moteurs d'inférence locaux (`log_level`, `gguf`, `mlx`, `auto_update`, `auto_purge`). |
+| `[author]` | Le nom d'éditeur des agents exportés depuis cette machine (`name`). |
 
-L'application desktop lit une section supplémentaire, `[observability]`,
-documentée plus bas. Elle n'est pas modifiable depuis la CLI.
-
-Les tableaux ci-dessous sont générés à partir des types Rust, si bien qu'aucun
-champ ne peut s'en écarter. Ils couvrent le **niveau racine de chaque section**.
-Une table imbriquée, comme une entrée de `[[llm.backends]]` ou
-`[[mcp.servers]]`, a ses propres champs : celle de MCP est documentée
-intégralement plus bas, les autres se lisent depuis les types qu'elles
-nomment.
+Les tableaux ci-dessous suivent le registre des clés du moteur, la liste dont
+sont faits le fichier par défaut et `apollia-os config keys`, si bien qu'aucune
+clé ne peut s'en écarter. Ils couvrent chaque clé, tables imbriquées comprises.
+Une entrée d'une liste de tables, comme `[[llm.backends]]` ou `[[mcp.servers]]`,
+a ses propres champs : celle de MCP est documentée intégralement plus bas, les
+autres se lisent depuis les types qu'elles nomment.
 
 ### Des lignes que les tableaux ne peuvent pas nuancer
 
-Les tableaux sont dérivés des types Rust, et un type dit ce qu'une clé signifie,
-pas si quelque chose la lit. Quatre points demandent une réserve que la
+Les tableaux sont dérivés du registre des clés, et une entrée dit ce qu'une clé
+signifie, pas si quelque chose la lit. Quatre points demandent une réserve que la
 dérivation ne peut pas porter.
 
 **`[api]` est partagée entre deux chargeurs, et aucun ne la lit en entier.** Le
 démon lancé par `apollia-os start` et le runtime embarqué dans l'application de
 bureau construisent leur écouteur à partir de champs différents de la même
-section. Aucune clé n'est lue par les deux, et une clé n'est lue par aucun.
+section. Seule `port` est lue par les deux. Toute clé de la section prend effet
+au démarrage suivant.
 
 | Clé | `apollia-os start` | L'application de bureau |
 | --- | --- | --- |
 | `bind` | lue | ignorée, l'écouteur embarqué est toujours sur `127.0.0.1` |
-| `port` | ignorée, voir plus bas | ignorée, l'écouteur embarqué est toujours sur 7771 |
+| `port` | lue, après l'option `--port` | lue, voir plus bas |
 | `require_token` | lue | ignorée, l'écouteur TCP embarqué exige toujours le jeton |
 | `unix_socket` | ignorée, le démon prend sa socket de l'option `--socket` d'`apollia-os start` et retombe sur la même valeur par défaut | lue |
 | `tls_cert` | lue | ignorée, l'écouteur embarqué ne termine jamais TLS |
@@ -77,148 +141,263 @@ abandonnée : la poser est silencieux, ce n'est pas une erreur. Donc
 `require_token = false` ne désarme pas l'application de bureau, et `tls_cert` y
 est inerte.
 
-`[api] port` n'est lu par aucun des deux. Le démon prend son port TCP de
-l'option `--port` d'`apollia-os start` et retombe sur 7771 ; un fichier qui pose `port =
-8080` obtient quand même 7771.
+`[api] port` règle le port de l'API native, 7771 par défaut. Le démon prend
+d'abord l'option `--port` d'`apollia-os start`, puis cette clé, puis 7771. Une
+fois à l'écoute, le démon inscrit son port dans le dossier de données ;
+l'application de bureau se rattache à ce port quand un démon tourne, et écoute
+sinon sur cette clé. Le port doit différer de `[server] port`, celui du serveur
+compatible : un fichier qui leur donne le même port est refusé, à la ligne de
+`[api] port`.
 
-`[llm] pricing_overrides` n'est pas appliqué. Un démon en marche construit ses
-backends depuis ceux stockés dans sa base, et ce chemin passe au client une
-table de surcharges vide : un tarif écrit ici n'atteint jamais un calcul de
-coût.
-
-`[llm.runner]` sélectionne le sidecar de transcription vocale, pas le moteur
-LLM. Sa clé `backend` décide quel binaire `apollia-runner-*` le démon lance pour
-la transcription. L'inférence texte locale passe par le llama-server embarqué,
-qui se règle depuis les
-[variables d'environnement](/reference/environment-variables).
+L'inférence texte locale passe par le llama-server embarqué, qui se règle
+depuis les [variables d'environnement](/reference/environment-variables), pas
+depuis ce fichier. Le moteur de transcription vocale est choisi d'après le
+matériel détecté, sans clé pour le forcer.
 
 <!-- BEGIN GENERATED: config-fields -->
 
 ### `[llm]`
 
-Backends LLM et routage.
+Backends LLM, routage, et le runner de transcription. Le fichier par défaut laisse cette section en commentaire : les backends se gèrent dans les réglages IA de l'application, qui les gardent dans la base du moteur.
 
-| Clé | Type | Valeur par défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `default` | `String` | **requis** | Nom du backend par défaut (doit exister dans `backends`). |
-| `backends` | `Vec<BackendConfig>` | **requis** | Backends à instancier depuis `[[llm.backends]]`. |
-| `observability` | `ObservabilityConfig` | défaut du type | Réglages d'observabilité (tokens, latence, coût, debug des prompts). |
-| `routing` | `Option<LlmRoutingConfig>` | `None` | Routage LLM par niveau de précision (section `[llm.routing]`). |
-| `pricing_overrides` | `HashMap<String, PricingTier>` | vide | Surcharges de tarification par l'opérateur (section `[llm.pricing_overrides]`). |
-| `cost_alert_threshold_usd` | `Option<f64>` | `None` | Seuil de coût en USD au-delà duquel `RuntimeEvent::TokenBudgetUpdated` est émis avec `threshold_exceeded = true`. |
-| `vertex` | `Option<VertexConfig>` | `None` | Configuration optionnelle du backend Google Vertex AI (`[llm.vertex]`). |
-| `runner` | `LlmRunnerConfig` | défaut du type | Configuration du sidecar LLM local (section `[llm.runner]`). |
-
-### `[runtime]`
-
-Capacités de l'EventBus et des mailbox.
-
-| Clé | Type | Valeur par défaut | Signification |
-| --- | --- | --- | --- |
-| `eventbus_capacity` | `usize` | `1024` | Capacité du canal de diffusion (broadcast) de l'EventBus. |
-| `mailbox_capacity` | `usize` | `100` | Capacité maximale de la mailbox d'un acteur. |
-| `mailbox_visibility_timeout_secs` | `u64` | `60` | Délai de visibilité d'un message de mailbox pris en bail (leased), en secondes. |
-| `mailbox_message_ttl_secs` | `u64` | `86_400` | Durée de vie d'un message de mailbox jamais reçu, en secondes. |
-| `mailbox_send_quota_per_run` | `u32` | `50` | Nombre maximal d'envois de mailbox autorisés par exécution (garde-fou anti-spam). |
-| `mailbox_max_payload_bytes` | `usize` | `65_536` | Taille maximale sérialisée d'un message de mailbox, en octets. |
-| `mailbox_audit_full_payload` | `bool` | `false` | Indique si le journal d'audit enregistre la charge utile complète du message. |
-| `startup_timeout_secs` | `u64` | `300` | Délai de démarrage du runtime, en secondes. |
+| `llm.format_version` | entier | `1` | Version du format de [llm] ; lue comme 1 en son absence. |
+| `llm.default` | chaîne | non définie | Nom du backend utilisé quand aucun n'est demandé ; doit nommer une entrée de llm.backends. |
+| `llm.backends` | liste de tables | non définie | Backends compatibles OpenAI, migrés dans la base du moteur au premier démarrage ; exigés avec llm.default. |
+| `llm.observability.debug_log_prompt` | booléen | `false` | Journaliser le prompt complet au niveau trace. |
+| `llm.routing` | table | non définie | Backends qui répondent aux requêtes précises et rapides, et le plafond du routage hybride. |
+| `llm.guardrails.level` | l'une de disabled, lenient, balanced, strict, ceiling | `"balanced"` | Sévérité avec laquelle le lancement d'un modèle local est tenu à la mémoire de la machine ; un niveau inconnu vaut balanced. La politique de l'organisation peut l'imposer. |
+| `llm.guardrails.ceiling_gb` | décimal | non définie | Plus grande estimation, en gigaoctets, que le niveau ceiling lance. La politique de l'organisation peut l'imposer. |
+| `llm.guardrails.bypass` | l'une de confirm, unrestricted | `"confirm"` | Ce que demande d'abord le chargement d'un modèle refusé : confirm, une confirmation explicite, ou unrestricted, rien. La politique de l'organisation peut l'imposer. |
+| `llm.residency.idle_unload_minutes` | entier | `60` | Minutes sans requête au bout desquelles un modèle local que rien ne retient est déchargé ; 0 ne décharge jamais. La politique de l'organisation peut l'imposer. |
+| `llm.residency.unload_before_load` | booléen | `false` | Avant de charger un modèle local, décharger ceux en mémoire qui ne sont pas épinglés et ne servent aucune requête ; désactivé, plusieurs modèles restent chargés ensemble. La politique de l'organisation peut l'imposer. |
+| `llm.defaults.context` | l'une de custom, model_max | `"custom"` | Fenêtre de contexte d'un modèle local que ni APOLLIA_LLAMA_N_CTX, ni un preset, ni son backend ne fixent : custom, la valeur de llm.defaults.context_tokens, ou model_max, la longueur pour laquelle le modèle a été entraîné. La politique de l'organisation peut l'imposer. |
+| `llm.defaults.context_tokens` | entier | `0` | Fenêtre de contexte par défaut, en jetons, quand llm.defaults.context vaut custom ; 0 laisse le moteur la dimensionner à la mémoire de cette machine, modèle par modèle, jusqu'à 32768. La politique de l'organisation peut l'imposer. |
+| `llm.images.limit_side` | booléen | `true` | Réduire une image avant de l'envoyer à un modèle quand son plus grand côté dépasse llm.images.max_side_px. La politique de l'organisation peut l'imposer. |
+| `llm.images.max_side_px` | entier | `2048` | Plus grand côté, en pixels, d'une image envoyée à un modèle ; les proportions sont gardées. La politique de l'organisation peut l'imposer. |
+| `llm.devices.disabled` | liste de chaînes | `[]` | Périphériques graphiques dont le moteur local est tenu à l'écart, chacun nommé comme le moteur le liste (CUDA0, Vulkan1) : un périphérique listé ne reçoit aucune couche et sa mémoire sort de toute estimation ; vide, le moteur garde tous les périphériques. La politique de l'organisation peut l'imposer. |
 
 ### `[api]`
 
 Écouteur TCP, authentification, TLS, socket Unix.
 
-| Clé | Type | Valeur par défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `bind` | `String` | `"127.0.0.1".to_owned()` | Adresse IP sur laquelle lier l'écouteur TCP. |
-| `port` | `u16` | `7771` | Port TCP du serveur REST. |
-| `require_token` | `bool` | `true` | Exige un jeton Bearer sur chaque connexion TCP entrante. |
-| `unix_socket` | `PathBuf` | `crate::paths::socket_path_or_temp()` | Chemin du socket Unix local. |
-| `tls_cert` | `Option<PathBuf>` | `None` | Chaîne de certificats PEM pour le TLS natif sur l'écouteur TCP. |
-| `tls_key` | `Option<PathBuf>` | `None` | Clé privée PEM correspondant à `tls_cert`. |
+| `api.bind` | chaîne | `"127.0.0.1"` | Adresse sur laquelle se lie l'écouteur TCP du démon. |
+| `api.port` | entier | `7771` | Port TCP de l'API native, lu au démarrage suivant ; l'option --port d'apollia-os start l'emporte sur lui, et il doit différer de server.port. |
+| `api.require_token` | booléen | `true` | Exiger un jeton bearer sur chaque requête TCP au démon. |
+| `api.unix_socket` | chemin | `"~/.apollia/runtime.sock"` | Socket locale du runtime embarqué ; son dossier doit exister. |
+| `api.tls_cert` | chemin | non définie | Chaîne de certificats PEM pour TLS sur l'écouteur TCP du démon ; à poser avec api.tls_key. |
+| `api.tls_key` | chemin | non définie | Clé privée PEM associée à api.tls_cert. |
+
+### `[runtime]`
+
+Capacités de l'EventBus et des mailbox.
+
+| Clé | Type | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `runtime.eventbus_capacity` | entier | `1024` | Événements mis en tampon par l'EventBus avant qu'un lecteur lent décroche (64 à 65536). |
+| `runtime.mailbox_capacity` | entier | `100` | Messages mis en tampon par la mailbox d'un acteur (10 à 10000). |
+| `runtime.mailbox_visibility_timeout_secs` | entier | `60` | Secondes pendant lesquelles un message d'agent loué reste invisible avant d'être redistribué. |
+| `runtime.mailbox_message_ttl_secs` | entier | `86400` | Secondes pendant lesquelles un message d'agent non distribué est gardé. |
+| `runtime.mailbox_send_quota_per_run` | entier | `50` | Messages d'agent qu'une exécution peut envoyer. |
+| `runtime.mailbox_max_payload_bytes` | entier | `65536` | Plus grande charge utile d'un message d'agent, en octets. |
+| `runtime.mailbox_audit_full_payload` | booléen | `false` | Copier la charge utile complète des messages d'agent dans le journal d'audit. |
+| `runtime.startup_timeout_secs` | entier | `300` | Secondes que le moteur peut prendre pour démarrer. |
+| `runtime.agent_idle_unload_secs` | entier | `600` | Secondes sans tâche après lesquelles le module d'un agent est déchargé. |
 
 ### `[hitl]`
 
 Délai d'expiration et intervalle de scan du human-in-the-loop.
 
-| Clé | Type | Valeur par défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `timeout_hours` | `Option<u64>` | `None` | Attente maximale d'une approbation humaine, en heures. |
-| `scan_interval_secs` | `u64` | `60` | Intervalle de scan des tâches HITL expirées, en secondes. |
+| `hitl.timeout_hours` | entier | non définie | Heures après lesquelles une approbation sans réponse annule sa tâche (1 à 168) ; sans valeur, l'attente est infinie. |
+| `hitl.scan_interval_secs` | entier | `60` | Secondes entre deux recherches d'approbations expirées (10 à 3600). |
 
 ### `[tools]`
 
-Outils natifs : désactivation statique et réglages par outil.
+Outils natifs : limites, désactivation statique, et réglages par outil.
 
-| Clé | Type | Valeur par défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `max_output_chars` | `usize` | `30_000` | Taille maximale d'une sortie d'outil transmise au LLM, en octets UTF-8. |
-| `file_path_extraction_pattern` | `Option<String>` | `None` | Motif regex pour extraire des chemins depuis une sortie bash. |
-| `disabled` | `Vec<String>` | vide | Outils natifs désactivés statiquement par l'opérateur dans `apollia.toml`. |
-| `web_search` | `WebSearchConfig` | défaut du type | Configuration de l'outil natif `web_search`. |
-| `web_read` | `WebReadConfig` | défaut du type | Configuration de l'outil natif `web_read`. |
-| `python_interpreter` | `Option<String>` | `None` | Chemin absolu d'un interpréteur Python que l'opérateur a choisi à la place de celui livré, pour l'outil `python_executor` et les environnements virtuels des agents. |
+| `tools.max_output_chars` | entier | `30000` | Plus grande sortie d'outil transmise au modèle, en octets (10 à 1000000). |
+| `tools.disabled` | liste de chaînes | `[]` | Outils natifs retirés de tous les agents. |
+| `tools.web_search.backend` | l'une de auto, duck_duck_go, brave | `"auto"` | Moteur de recherche de l'outil web_search. |
+| `tools.web_search.require_configured` | booléen | `false` | Refuser une recherche quand le moteur choisi n'est pas configuré. |
+| `tools.web_search.brave.api_key_env_var` | chaîne | `"BRAVE_SEARCH_API_KEY"` | Variable d'environnement qui porte la clé Brave Search. |
+| `tools.web_search.brave.timeout_secs` | entier | `15` | Secondes qu'une requête Brave Search peut prendre (1 à 120). |
+| `tools.web_search.brave.max_results` | entier | `10` | Résultats demandés à Brave Search (1 à 20). |
+| `tools.web_search.duckduckgo.timeout_secs` | entier | `15` | Secondes qu'une requête DuckDuckGo peut prendre (1 à 120). |
+| `tools.web_search.duckduckgo.max_response_kb` | entier | `1024` | Plus grande réponse DuckDuckGo lue, en Kio (16 à 16384). |
+| `tools.web_read.timeout_secs` | entier | `20` | Secondes qu'une requête web_read peut prendre (1 à 120). |
+| `tools.web_read.max_response_kb` | entier | `2048` | Plus grande page que lit web_read, en Kio (64 à 32768). |
+| `tools.web_read.ssrf_guard` | booléen | `true` | Refuser une adresse du réseau local ou de la machine elle-même. |
+| `tools.python_interpreter` | chemin | non définie | Interpréteur Python utilisé à la place de celui embarqué. |
+| `tools.new_agent.families` | liste de chaînes | `["read"]` | Familles d'outils qu'un agent créé sans code reçoit en entier, lues sur les outils actifs à sa création : read, read_personal, write_or_delete, send_external, execute_code. La politique de l'organisation peut l'imposer. |
+| `tools.new_agent.access` | liste de chaînes | `[]` | Outils qu'un agent créé sans code reçoit par leur nom, en plus de tools.new_agent.families. La politique de l'organisation peut l'imposer. |
 
 ### `[mcp]`
 
-Client MCP : chargement des outils et limites de réponse.
+Client MCP : approbations, chargement des outils, et le pont qui sert les agents et workflows exposés.
 
-| Clé | Type | Valeur par défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `approval_ttl_hours` | `u64` | `24` | Durée de validité des approbations HITL MCP, en heures. |
-| `tool_loading` | `McpToolLoading` | défaut du type | Stratégie de chargement des schémas d'outils pour tous les serveurs MCP. |
-| `tool_search_limit` | `usize` | `20` | Nombre maximal de résultats renvoyés par l'outil synthétique `tool_search`. |
+| `mcp.tool_loading` | l'une de eager, deferred | `"deferred"` | Charger tous les schémas d'outils MCP d'emblée, ou au premier usage. La politique de l'organisation peut l'imposer. |
+| `mcp.tool_search_limit` | entier | `20` | Résultats rendus par l'outil tool_search (1 à 500). La politique de l'organisation peut l'imposer. |
+| `mcp.server_enabled` | booléen | `false` | Laisser un client MCP atteindre les agents et workflows marqués exposés, par apollia-os mcp server. La politique de l'organisation peut l'imposer. |
 
 ### `[hooks]`
 
-Gestionnaires de hooks de cycle de vie. `PreToolUse` ne fait pas partie de la surface prise en charge de `v0.1.0-preview` : sa décision est appliquée au mieux, et un gestionnaire qui expire, dont la livraison échoue, ou qui répond quelque chose d'illisible retombe sur `allow`, donc l'appel d'outil passe.
+Gestionnaires de hooks de cycle de vie. `PreToolUse` est appliqué au mieux : un gestionnaire qui expire, ne répond pas ou répond quelque chose d'illisible retombe sur `allow`, et l'appel d'outil continue.
 
-| Clé | Type | Valeur par défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `handlers` | `Vec<HookHandlerConfig>` | vide | Gestionnaires de hooks enregistrés. |
+| `hooks.handlers` | liste de tables | `[]` | Gestionnaires de hooks de cycle de vie, une commande ou un point d'accès HTTP chacun. |
 
 ### `[chat]`
 
-Valeurs par défaut de session de chat.
+Valeurs par défaut des sessions de chat.
 
-| Clé | Type | Valeur par défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `plan_mode_default` | `bool` | `false` | État par défaut du mode plan hérité par chaque nouvelle session de chat. |
-| `default_workspace` | `Option<String>` | `None` | Répertoire de travail par défaut pour les sessions de chat libre (sans projet). |
-| `tool_turn_temperature` | `Option<f32>` | `None` | Température LLM appliquée à un tour de chat qui expose des outils au modèle. |
+| `chat.plan_mode_default` | booléen | `false` | Démarrer chaque nouvelle conversation en mode plan. |
+| `chat.tool_turn_temperature` | décimal | non définie | Température du modèle pour un tour qui propose des outils ; sans valeur, 0.3. |
+| `chat.share_profile_default` | booléen | `true` | Démarrer chaque nouvelle conversation avec le profil partagé avec l'assistant intégré ; une conversation existante garde son propre interrupteur. La politique de l'organisation peut l'imposer. |
 
-### `[filesystem]`
+### `[models]`
 
-Le journal réversible, et les chemins dans lesquels un agent travaille sans qu'on lui demande. `trusted_paths` règle une friction plutôt qu'un mur, et les deux surfaces ne le lisent pas de la même façon ; voir *Chemins de confiance, et ce qui se passe en dehors* plus bas.
+L'index signé des fiches de modèles, son miroir, le dossier des modèles, et la règle appliquée à un fichier de modèle importé.
 
-| Clé | Type | Défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `journal` | `JournalConfig` | défaut du type | Sous-section dédiée au journal réversible. |
-| `trusted_paths` | `Vec<PathBuf>` | `vec![PathBuf::from("~")]` | Chemins qu'un agent peut lire et écrire sans demande d'approbation. |
+| `models.registry_url` | chaîne | `"https://registry.apollia.fr/models/stable/index.json"` | Adresse de l'index signé des fiches de modèles. La politique de l'organisation peut l'imposer. |
+| `models.registry_mirror_url` | chaîne | `"https://github.com/Apollia-OS/apollia-os/releases/latest/download/models-stable-index.json"` | Adresse essayée quand l'index ne répond pas ; vide, elle est désactivée. La politique de l'organisation peut l'imposer. |
+| `models.registry_enabled` | booléen | `true` | Lire l'index en ligne des fiches de modèles. La politique de l'organisation peut l'imposer. |
+| `models.dir` | chemin | `""` | Dossier où sont gardés les modèles de langage, leurs projecteurs et les modèles d'embeddings ; vide, il vaut &lt;dossier de données&gt;/models. Le changer ne déplace aucun fichier. La politique de l'organisation peut l'imposer. |
+| `models.preset_load_settings` | booléen | `false` | Permettre de créer ou de modifier un preset avec des réglages de chargement ; éteint, un preset ne prend que des réglages de requête et garde les réglages de chargement qu'il porte. La politique de l'organisation peut l'imposer. |
+| `models.import.require_verified` | booléen | `false` | Refuser un fichier de modèle importé qui ne correspond à aucune fiche signée. La politique de l'organisation peut l'imposer. |
+
+### `[workflows]`
+
+Le budget avec lequel démarre l'exécution d'un workflow. Il est partagé : chaque agent qu'une étape lance et chaque workflow qu'une étape appelle y puisent.
+
+| Clé | Type | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `workflows.max_steps` | entier | `200` | Étapes qu'une exécution de workflow peut faire. |
+| `workflows.max_tool_calls` | entier | `400` | Appels d'outils qu'une exécution de workflow peut faire. |
+| `workflows.wall_clock_secs` | entier | `3600` | Secondes que peut durer une exécution de workflow. |
+
+### `[desktop]`
+
+Réglages de l'application de bureau que le moteur lit.
+
+| Clé | Type | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `desktop.developer_mode` | booléen | `false` | Afficher les surfaces avancées de l'application. La politique de l'organisation peut l'imposer. |
+| `desktop.link_preview_enabled` | booléen | `false` | Récupérer l'aperçu d'un lien affiché dans une conversation. La politique de l'organisation peut l'imposer. |
+| `desktop.update_channel` | l'une de stable, preview | `"stable"` | Canal de mise à jour de l'application : stable reçoit les versions publiées, preview aussi les versions d'essai. La politique de l'organisation peut l'imposer. |
+| `desktop.background_service_allowed` | booléen | `true` | Autoriser l'application à installer le moteur comme service de la session de l'utilisateur. La politique de l'organisation peut l'imposer. |
+| `desktop.chat_auto_naming` | l'une de never, auto, always | `"auto"` | Nommer une nouvelle conversation d'après son premier message : jamais, automatiquement quand le modèle génère assez vite, ou toujours. La politique de l'organisation peut l'imposer. |
+| `desktop.chat_debug_blocks` | booléen | `true` | Mode développeur allumé, montrer les données brutes d'une étape d'outil et la trace détaillée dans une conversation. La politique de l'organisation peut l'imposer. |
+| `desktop.resource_widget` | booléen | `false` | Montrer le processeur, la mémoire et la mémoire vidéo utilisés au pied de la barre latérale. La politique de l'organisation peut l'imposer. |
+| `desktop.chat_single_empty` | booléen | `true` | Rouvrir la conversation vide qui existe déjà plutôt qu'en ouvrir une seconde. La politique de l'organisation peut l'imposer. |
+| `desktop.chat_double_click_edit` | booléen | `false` | Ouvrir la modification d'un message d'une conversation par un double-clic. La politique de l'organisation peut l'imposer. |
+| `desktop.chat_double_click_rename` | booléen | `true` | Renommer une conversation ou un dossier de la liste par un double-clic. La politique de l'organisation peut l'imposer. |
+| `desktop.chat_regenerate_shortcut` | booléen | `true` | Régénérer la dernière réponse de la conversation affichée avec Cmd + R sur un Mac, Ctrl + R ailleurs. La politique de l'organisation peut l'imposer. |
+| `desktop.model_load_window` | booléen | `true` | Ouvrir la fenêtre de chargement quand une conversation choisit un modèle de cette machine qui n'est pas en mémoire ; désactivé, le modèle se charge aussitôt avec son preset par défaut, et le garde-fou de chargement s'applique toujours. La politique de l'organisation peut l'imposer. |
+| `desktop.preset_save_confirm` | booléen | `false` | Demander une confirmation qui liste les réglages modifiés avant de les enregistrer dans un preset. La politique de l'organisation peut l'imposer. |
+
+### `[server]`
+
+Le serveur compatible, qui répond aux formats OpenAI et Anthropic sur l'interface de boucle locale.
+
+| Clé | Type | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `server.enabled` | booléen | `false` | Démarrer le serveur compatible (formats OpenAI et Anthropic) avec le moteur. La politique de l'organisation peut l'imposer. |
+| `server.port` | entier | `7772` | Port TCP du serveur compatible. La politique de l'organisation peut l'imposer. |
+| `server.require_auth` | booléen | `false` | Exiger un jeton du serveur compatible à chaque requête ; lu à l'ouverture de l'écoute. La politique de l'organisation peut l'imposer. |
+| `server.cors` | booléen | `false` | Laisser une page web d'une autre origine appeler le serveur compatible ; lu à chaque démarrage du serveur. La politique de l'organisation peut l'imposer. |
+| `server.jit_loading` | booléen | `true` | Laisser une requête au serveur compatible charger le modèle de cette machine qu'elle nomme. La politique de l'organisation peut l'imposer. |
+| `server.jit_auto_unload` | booléen | `true` | Décharger les modèles que le serveur compatible a chargés après leur propre délai d'inactivité plutôt que le délai général. La politique de l'organisation peut l'imposer. |
+| `server.jit_idle_ttl_minutes` | entier | `60` | Minutes sans requête après lesquelles un modèle chargé par le serveur compatible est déchargé ; 0 le garde chargé. La politique de l'organisation peut l'imposer. |
+| `server.jit_keep_last_only` | booléen | `true` | Quand le serveur compatible charge un modèle, décharger les autres modèles qu'il a chargés et que rien ne retient. La politique de l'organisation peut l'imposer. |
+| `server.separate_reasoning_content` | booléen | `true` | Garder le raisonnement d'un modèle dans reasoning_content, à part de content, dans les complétions de chat du serveur compatible ; éteint, il revient dans content entre balises think. La politique de l'organisation peut l'imposer. |
+| `server.serve_on_lan` | booléen | `false` | Ouvrir le serveur compatible au réseau local, sur toutes les interfaces ; l'API native reste sur l'interface de boucle locale. Lu à l'ouverture de l'écoute. La politique de l'organisation peut l'imposer. |
+| `server.allow_request_mcp` | booléen | `false` | Laisser une requête au serveur compatible apporter son propre serveur MCP, joint en HTTP le temps de l'appel ; éteint, une telle requête est refusée. La politique de l'organisation peut l'imposer. |
+
+### `[engines]`
+
+Réglages des moteurs d'inférence locaux.
+
+| Clé | Type | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `engines.log_level` | l'une de error, warning, info, debug | `"debug"` | Niveau de journal du moteur local, appliqué au prochain chargement d'un modèle. La politique de l'organisation peut l'imposer. |
+| `engines.gguf` | l'une de auto, embedded, cuda, vulkan, cpu, metal | `"auto"` | Moteur qui sert les modèles GGUF : le choix automatique, le moteur livré avec l'application, ou une variante installée par le magasin de moteurs. Une variante qui n'est plus installée retombe sur le choix automatique. Lu au démarrage suivant. La politique de l'organisation peut l'imposer. |
+| `engines.mlx` | l'une de auto, embedded, metal | `"auto"` | Moteur qui sert les modèles MLX sur un Mac à puce Apple : le choix automatique, le moteur livré avec l'application, ou celui installé par le magasin de moteurs. Lu au démarrage suivant. La politique de l'organisation peut l'imposer. |
+| `engines.auto_update` | booléen | `true` | Télécharger et vérifier la mise à jour d'un moteur choisi quand le canal suivi en annonce une ; éteint, la mise à jour est seulement annoncée. La politique de l'organisation peut l'imposer. |
+| `engines.auto_purge` | booléen | `false` | Après la mise à jour d'un moteur, supprimer les versions de sa variante inutilisées depuis le plus longtemps, au-delà de deux ; la version en service et le moteur livré avec l'application ne sont jamais supprimés. La politique de l'organisation peut l'imposer. |
+
+### `[author]`
+
+Le nom d'éditeur des agents exportés depuis cette machine.
+
+| Clé | Type | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `author.name` | chaîne | `""` | Nom d'éditeur des agents exportés depuis cette machine ; vide, il est demandé à l'export. La politique de l'organisation peut l'imposer. |
 
 ### `[observability]`
 
-Capture et rétention des traces. Lu par l'application desktop uniquement.
+Capture et rétention des traces. Lue par le démon et par l'application de bureau.
 
-| Clé | Type | Valeur par défaut | Signification |
+| Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
-| `max_input_bytes` | `usize` | `DEFAULT_MAX_INPUT_BYTES` | Taille maximale des entrées de tâche/étape, en octets (défaut 32768). |
-| `max_output_bytes` | `usize` | `DEFAULT_MAX_OUTPUT_BYTES` | Taille maximale des sorties de tâche/étape/complétion, en octets (défaut 32768). |
-| `max_tool_output_bytes` | `usize` | `DEFAULT_MAX_TOOL_OUTPUT_BYTES` | Taille maximale du stdout/stderr d'un outil, en octets (défaut 10240). |
-| `capture_thoughts` | `bool` | `true` | Si `true`, persiste les enregistrements `Thought` ReAct sur la trace (défaut `true`). Désactiver vide les bulles de raisonnement dans l'UI builder. |
-| `capture_tool_args` | `bool` | `true` | Si `true`, persiste le `args_json` complet des appels d'outils (défaut `true`). Désactiver ne laisse visible que le nom de l'outil et sa durée. |
-| `capture_tool_outputs` | `bool` | `true` | Si `true`, persiste l'`output_json` complet des appels d'outils (défaut `true`). Désactiver ne laisse visible que le succès ou l'échec. |
-| `capture_agent_logs` | `bool` | `true` | Si `true`, persiste les appels Python `ctx.log()` sur la trace (défaut `true`). Désactiver laisse `tracing::*` fonctionner mais n'écrit plus rien dans `runtime_events.db`. |
-| `retention_days` | `u32` | `90` | Durée de rétention en jours des `runtime_events` avant purge automatique (défaut 90, cohérent avec audit.db). |
+| `observability.max_input_bytes` | entier | `32768` | Plus grande entrée d'exécution gardée, en octets. |
+| `observability.max_output_bytes` | entier | `32768` | Plus grande sortie d'exécution gardée, en octets. |
+| `observability.max_tool_output_bytes` | entier | `10240` | Plus grande sortie d'outil gardée, en octets. |
+| `observability.capture_thoughts` | booléen | `true` | Garder le raisonnement du modèle dans l'historique des exécutions. |
+| `observability.capture_tool_args` | booléen | `true` | Garder les arguments des outils dans l'historique des exécutions. |
+| `observability.capture_tool_outputs` | booléen | `true` | Garder les sorties des outils dans l'historique des exécutions. |
+| `observability.capture_agent_logs` | booléen | `true` | Garder les journaux des agents dans l'historique des exécutions. |
+| `observability.retention_days` | entier | `90` | Jours pendant lesquels l'historique des exécutions est gardé. |
+
+### Clés retirées
+
+Acceptées dans un fichier écrit pour une version antérieure, avec un avertissement `config.key.retired`, et lues par rien.
+
+| Clé | À la place |
+| --- | --- |
+| `llm.vertex` | Le client Google Vertex AI a été retiré ; déclarez plutôt un serveur compatible OpenAI. |
+| `mcp.approval_ttl_hours` | Un outil MCP se décide sur sa famille d'action, et un consentement permanent dure jusqu'à son retrait ; retirez la clé. |
+| `memory` | Rien ne la lit ; retirez la section. |
+| `budget` | Rien ne la lit ; retirez la section. |
+| `a2a` | Rien ne la lit ; retirez la section. |
+| `oria` | Rien ne la lit ; retirez la section. |
+| `registry` | Rien ne la lit ; retirez la section. |
+| `permissions` | Rien ne la lit ; retirez la section. |
+| `triggers` | Gérez-la depuis l'application de bureau ou l'API. |
+| `notifications` | Gérez-la depuis l'application de bureau ou l'API. |
+| `stt` | Gérez-la depuis l'application de bureau ou l'API. |
+| `llm.observability.log_token_usage` | Les tokens de chaque appel de modèle sont toujours journalisés ; retirez la clé. |
+| `llm.observability.log_latency` | La latence de chaque appel de modèle est toujours journalisée ; retirez la clé. |
+| `llm.observability.log_cost` | Rien ne la lit ; retirez la clé. |
+| `llm.pricing_overrides` | Rien ne la lit ; retirez la section. |
+| `llm.cost_alert_threshold_usd` | Rien ne la lit ; retirez la clé. |
+| `llm.runner` | Le moteur est choisi d'après le matériel détecté ; retirez la section. |
+| `tools.file_path_extraction_pattern` | Rien ne la lit ; retirez la clé. |
+| `filesystem` | Les outils de fichiers atteignent les dossiers accordés à chaque agent ; les chemins listés ici ont été ajoutés une fois comme connexions dossier, accordez-les sur la fiche de l'agent. |
+| `chat.default_workspace` | Le dossier a été ajouté une fois comme connexion dossier ; accordez-le à un agent sur sa fiche. |
+| `ui` | Déplacée : écrivez desktop.link_preview_enabled ; ui.link_preview_enabled est encore lue tant qu'elle est absente. |
 <!-- END GENERATED: config-fields -->
 
 ### Le socket Unix, en entier
 
-La valeur par défaut de `[api].unix_socket` est rendue ci-dessus sous la forme
-de l'expression Rust vers laquelle le type se replie, puisque la table est
-dérivée de la source. Elle se résout en `~/.apollia/runtime.sock`, et en un
+La valeur par défaut de `[api].unix_socket` est `~/.apollia/runtime.sock`, et un
 socket sous le répertoire temporaire de la plateforme lorsque aucun répertoire
-personnel ne peut être résolu. Le serveur passe le fichier en `0600` juste
+personnel ne peut être résolu. La clé ne développe pas `~` : le fichier par
+défaut écrit donc le chemin absolu du socket sous le dossier personnel où il a
+été écrit. Le serveur passe le fichier en `0600` juste
 après le bind, si bien que seul le compte qui a démarré le runtime peut
 l'atteindre.
 
@@ -231,51 +410,51 @@ qu'avec le `0600` du fichier de socket : il porte donc le même jeton Bearer que
 l'écouteur TCP, et c'est ce jeton qui contrôle l'accès. L'option globale
 `--socket` est acceptée sous Windows et ignorée.
 
-### Chemins de confiance, et ce qui se passe en dehors
+### Les dossiers qu'un agent atteint
 
-`[filesystem] trusted_paths` règle une friction, pas une frontière. Un chemin
-situé sous aucune de ces racines, et hors du répertoire de travail de la
-session, n'est pas refusé : l'opération est suspendue et l'utilisateur est
-sollicité. Vider la liste n'enferme donc pas l'agent, cela signifie que toute
-écriture hors du répertoire de travail lève une approbation. Ajouter un chemin
-est une déclaration de confiance, et les chemins sensibles de la table de risque
-(`~/.ssh`, `/etc`, secrets stockés) gardent leur propre classification quoi que
-contienne cette liste.
+Aucune clé de ce fichier ne dit quels dossiers un agent atteint. Un dossier du
+poste est une connexion, ajoutée depuis l'écran Connexions au sélecteur du
+système, et ses outils de fichiers s'accordent à un agent sur sa fiche. Les
+outils de fichiers d'un agent atteignent l'union des dossiers qui lui sont
+accordés, agent de conversation intégré compris : les outils de lecture tous
+les dossiers accordés, les outils d'écriture seulement ceux accordés pour
+écrire. Le premier dossier accordé, par date d'ajout, est celui où arrive un
+chemin relatif. Un agent sans dossier accordé a des outils de fichiers qui
+refusent, en disant comment en accorder un.
 
-Le répertoire de travail lui-même, `[chat] default_workspace` ou celui du
-projet, est l'endroit où se résolvent les chemins relatifs. Il est de confiance
-au même titre que les entrées de la liste et n'est jamais une limite à lui seul.
-
-Les deux surfaces ne lisent pas cette liste de la même façon, et la différence
-mérite d'être connue avant de la vider :
-
-| Surface | Ce que fait la liste |
-| --- | --- |
-| Chat | Règle une friction. Hors des racines, l'opération est suspendue et l'utilisateur est sollicité. |
-| Mode agent | Pose une frontière. Hors des racines, un outil fichier refuse, en nommant ce réglage. |
-
-Le mode agent n'a pas de demande d'approbation sur laquelle se rabattre :
-l'événement d'approbation filesystem n'est émis que par l'invocateur du chat, et
-un agent peut s'exécuter sans personne devant l'écran. Tant que cette surface
-n'existe pas, un chemin dont un agent a besoin doit être nommé ici.
-
-```toml
-[filesystem]
-trusted_paths = ["~", "/Volumes/travail", "/opt/data"]
-```
+`[filesystem] trusted_paths` et `[chat] default_workspace` nommaient ces
+dossiers. Les deux sont retirées. Au premier démarrage d'une version qui
+connaît les connexions dossier, chaque dossier qu'elles nommaient, dossier
+personnel excepté, a été ajouté une fois comme connexion, accordée à aucun
+agent ; un fichier qui les porte encore se charge avec un avertissement
+`config.key.retired`.
 
 ### Sections retirées
 
 `[a2a]`, `[oria]`, `[registry]`, `[permissions]`, `[memory]` et `[budget]`
 étaient acceptées auparavant. Chacune se désérialisait dans une structure typée
 que rien ensuite ne consultait, si bien qu'écrire une valeur dedans n'avait aucun
-effet et ne produisait pas non plus d'erreur. Elles ne sont plus acceptées, et un
-fichier qui en porte encore une consigne un avertissement au démarrage. Les
-retirer n'a changé aucun comportement, puisque ces sections n'en avaient aucun.
+effet et ne produisait pas non plus d'erreur. Plus rien ne les lit : un
+fichier qui en porte encore une est accepté, avec un avertissement
+`config.key.retired`, et le tableau des clés retirées plus haut dit quoi faire à
+la place. Les retirer n'a changé aucun comportement, puisque ces sections n'en avaient aucun.
 
-`[filesystem]` figurait dans cette liste. C'est de nouveau une section vivante :
-`trusted_paths` est lue au démarrage et parvient au classifieur de risque, qui
-décide si une opération s'exécute ou demande.
+Des clés ont été retirées pour la même raison, parce que rien ne les lisait. Un
+fichier qui en porte encore une est accepté, avec un avertissement
+`config.key.retired` qui la nomme, et `apollia-os config set` refuse de
+l'écrire :
+
+| Clé retirée | Que faire à la place |
+| --- | --- |
+| `[llm.runner]`, et sa clé `backend` | Rien : le moteur de transcription vocale est choisi d'après le matériel détecté. |
+| `[llm] pricing_overrides`, `cost_alert_threshold_usd` | Rien : aucun démon en marche ne les appliquait. `apollia-os llm costs` lit l'historique des coûts et n'écrit plus ni l'une ni l'autre. |
+| `[llm.observability] log_token_usage`, `log_latency`, `log_cost` | Rien : les tokens et la latence sont toujours journalisés. |
+| `[tools] file_path_extraction_pattern` | Rien. |
+| `[filesystem.journal]` | Rien. |
+| `[ui] link_preview_enabled` | Écrire `[desktop] link_preview_enabled`. Tant qu'elle n'est pas écrite, l'ancienne clé reste lue, avec un avertissement `config.key.moved`. |
+
+`[autonomy]` n'est pas une section : aucun chargeur ne la lit, et un fichier qui
+en porte une est refusé comme clé inconnue.
 
 `[permissions]` mérite d'être détaillée, car son nom suggère le contraire :
 aucune de ses quatre clés n'a jamais eu de lecteur sur un chemin d'exécution. La
@@ -290,8 +469,9 @@ avec `apollia-os tools config set <tool>.<key> <value>`.
 
 ## Capture de trace (`[observability]`)
 
-Lu par l'application desktop uniquement ; le démon CLI utilise les valeurs par
-défaut. Modifiable depuis Réglages, Observabilité, ou à la main.
+Lu par le démon lancé avec `apollia-os start` et par l'application desktop.
+Modifiable depuis Réglages, Observabilité, avec
+`apollia-os config set observability.<clé> <valeur>`, ou à la main.
 
 Ces interrupteurs décident de ce qu'une exécution d'agent laisse sur disque,
 dans `runtime_events.db`. Tout reste sur la machine, la question n'est donc pas
@@ -315,8 +495,10 @@ Désactiver un interrupteur vide la partie correspondante de la timeline : la
 piste d'audit et l'historique des coûts sont séparés et n'en sont pas
 affectés. La même séparation vaut pour la rétention : la purge ne supprime que
 depuis le journal d'événements. Le journal d'audit signé est une chaîne de
-hachage que `audit verify` parcourt de bout en bout, il n'est donc jamais
-purgé sur une base temporelle.
+hachage que `audit verify` parcourt de bout en bout : aucune clé
+d'`apollia.toml` ne le purge. Seule une politique d'organisation le fait, par
+sa propre clé `journal.retention_days` : voir
+[Auditer et vérifier](/how-to/audit-and-verify#retention-and-the-organisation-policy).
 
 ### Contenu des prompts (`[llm.observability]`)
 
@@ -337,9 +519,13 @@ et un filtre au niveau trace, par exemple `RUST_LOG=apollia=trace`. C'est un
 second verrou délibéré, pas un oubli, et c'est pourquoi le réglage peut sans
 risque rester visible dans l'interface.
 
-Un `debug_log_prompt` écrit sous `[observability]` n'est lu par rien : les
-deux sections se désérialisent en deux types différents, et seul celui de
-`[llm.observability]` atteint le routeur.
+La section est lue quand le runtime construit son routeur : un changement
+s'applique au démarrage suivant. Un `debug_log_prompt` écrit sous
+`[observability]` est refusé comme clé inconnue : les deux sections sont deux
+types différents, et seul celui de `[llm.observability]` atteint le routeur.
+Les autres clés que portait cette section, `log_token_usage`, `log_latency` et
+`log_cost`, sont retirées : les tokens et la latence de chaque appel au modèle
+sont toujours journalisés.
 
 ### Clés déclarées mais non implémentées
 
@@ -352,6 +538,151 @@ Ces clés sont listées plutôt que masquées parce que la page de réglages en
 affiche encore certaines. Un interrupteur qui ressemble à un contrôle de
 confidentialité et ne fait rien est pire qu'un interrupteur absent, donc tant
 qu'elles ne sont pas implémentées ou retirées, ce tableau fait foi.
+
+## Garde-fous de chargement (`[llm.guardrails]`)
+
+Avant le lancement d'un modèle local, sa mémoire est estimée avec la fenêtre de
+contexte et le nombre de requêtes parallèles avec lesquels il tournerait
+vraiment, puis jugée face à ce poste : il tient, il pourrait tenir (partagé entre
+une carte graphique et la mémoire système), ou il est trop gros. Le niveau décide
+de ce qui est lancé.
+
+```toml
+[llm.guardrails]
+level = "balanced"   # disabled, lenient, balanced, strict ou ceiling
+ceiling_gb = 12.0    # lu par le niveau ceiling seulement
+```
+
+| Niveau | Lance |
+| --- | --- |
+| `disabled` | tous les modèles, sans estimation |
+| `lenient` | tous les modèles, avec un avertissement au journal au-delà de « pourrait tenir » |
+| `balanced` | jusqu'à « pourrait tenir ». Le défaut |
+| `strict` | seulement un modèle qui tient |
+| `ceiling` | un modèle estimé à `ceiling_gb` gigaoctets ou moins |
+
+La section est relue à chaque lancement : un changement vaut pour le prochain
+modèle chargé, sans redémarrage. Un modèle déjà chargé n'est pas arrêté. Un refus
+donne l'estimation et la limite : `POST /api/v1/llm/chat` et
+`POST /api/v1/llm/complete` y répondent par le statut 409, le code
+`guardrail_refused`, le niveau, `estimatedGb` et `budgetGb`. Une section illisible, un niveau inconnu ou un
+niveau `ceiling` sans `ceiling_gb` positif valent `balanced` : une faute de
+frappe ne coupe jamais le garde-fou. Un modèle dont l'empreinte ne peut pas être
+estimée est lancé.
+
+Plusieurs modèles peuvent rester chargés ensemble, autant que le garde-fou en
+admet : un modèle est jugé avec l'empreinte des modèles déjà chargés ajoutée à
+la sienne. Quand cette somme est refusée, les modèles chargés que rien ne
+retient (aucune conversation ouverte, aucune épingle, aucune réponse en cours)
+sont déchargés, le moins récemment utilisé d'abord et seulement autant qu'il le
+faut ; quand même cela ne suffirait pas, rien n'est déchargé et le chargement
+est refusé.
+
+## Résidence des modèles (`[llm.residency]`)
+
+Un modèle local que rien n'utilise rend sa mémoire de lui-même.
+
+```toml
+[llm.residency]
+idle_unload_minutes = 60   # 0 garde chargé un modèle inutilisé
+unload_before_load = false # true charge un seul modèle à la fois
+```
+
+| Règle | Décharge |
+| --- | --- |
+| Délai d'inactivité | un modèle qu'aucune requête n'a utilisé depuis `idle_unload_minutes`, vérifié toutes les trente secondes |
+| Dernière conversation fermée | un modèle aussitôt, quand la dernière conversation ouverte qui l'utilise se ferme |
+| Décharger avant de charger | avec `unload_before_load` activé, tous les autres modèles en mémoire du moteur quand un modèle est chargé, qu'il tienne ou non à côté d'eux |
+
+Plusieurs modèles restent chargés ensemble par défaut, autant que le garde-fou
+de chargement en admet. Avec `unload_before_load` activé, un chargement décharge
+d'abord les modèles en mémoire du même moteur qui ne sont pas épinglés et ne
+servent aucune requête, y compris celui qu'une conversation ouverte utilise. Le
+modèle à charger est jugé par le garde-fou à côté de ceux qui restent, et un
+chargement que le garde-fou refuse ne décharge rien. La clé est relue à chaque
+chargement.
+
+Un modèle que l'utilisateur a épinglé n'est déchargé par aucune des deux règles,
+et un modèle qui sert une réponse n'est jamais déchargé. L'épingle est gardée
+dans `system.db` et survit à un redémarrage. La clé est relue à chaque
+vérification : un changement s'applique sans redémarrage. Une interface dit
+quelles conversations sont ouvertes avec `POST /api/v1/llm/leases` et
+`POST /api/v1/llm/leases/release`, et épingle un modèle avec
+`PUT /api/v1/llm/pins`. Quand le flux d'événements qu'elle a ouvert avec
+`GET /api/v1/events?client=<id>` se termine, les conversations de ce client
+comptent comme fermées. Chaque déchargement est publié sur le bus d'événements
+sous `LlmModelUnloaded`, avec sa raison : `idle`, `last_conversation`,
+`requested`, `make_room`, ou `server_replaced` quand le serveur compatible a
+chargé un autre modèle. Les modèles que le serveur compatible a chargés suivent
+leur propre délai, réglé sous `[server]` (voir la référence des points d'accès
+compatibles).
+
+## Défauts des modèles (`[llm.defaults]`, `[llm.images]`)
+
+Ce que reçoit un modèle local quand rien de plus proche de lui ne dit autre
+chose. L'application les montre dans Réglages, Défauts des modèles.
+
+```toml
+[llm.defaults]
+context = "custom"       # ou "model_max"
+context_tokens = 16384   # 0 laisse le moteur dimensionner la fenêtre à cette machine
+
+[llm.images]
+limit_side = true
+max_side_px = 2048
+
+[llm.guardrails]
+bypass = "confirm"       # ou "unrestricted"
+```
+
+La fenêtre de contexte d'un lancement est la première de ces sources qui se
+prononce :
+
+| Ordre | Source |
+| --- | --- |
+| 1 | `APOLLIA_LLAMA_N_CTX` |
+| 2 | la fenêtre du preset du modèle |
+| 3 | le `context_window` du backend |
+| 4 | `[llm.defaults]` |
+| 5 | 32768 jetons, la valeur avec laquelle le moteur est construit |
+
+Avec `context = "custom"` et une valeur, cette valeur s'applique. Avec
+`context_tokens = 0`, le défaut, le moteur dimensionne la fenêtre modèle par
+modèle : la plus longue, jusqu'à 32768 jetons et jamais sous 4096, à laquelle
+l'estimation qu'utilise le garde-fou de chargement tient encore le modèle dans
+la mémoire de la machine. Avec `context = "model_max"`, la fenêtre est la
+longueur pour laquelle le modèle a été entraîné. Chacune est plafonnée à la
+longueur d'entraînement, et un modèle dont l'en-tête ne se lit pas tombe à la
+dernière ligne du tableau. La section est relue à chaque chargement : un
+changement s'applique au prochain modèle chargé.
+
+`[llm.images]` est lue par le chat de l'application : une image dont le plus
+grand côté dépasse `max_side_px` y est ramenée, proportions gardées, avant
+d'être envoyée à un modèle qui lit les images. Avec `limit_side = false`, une
+image voyage à sa taille, jusqu'à ce que le moteur accepte.
+
+`bypass` dit ce que l'application demande avant de charger un modèle que le
+garde-fou a refusé : `confirm` montre une confirmation qui rappelle le risque,
+`unrestricted` charge aussitôt. Le garde-fou lui-même n'est pas affaibli : le
+refus reste affiché, et une requête qui ne confirme pas reste refusée.
+
+`[llm.devices]` nomme les périphériques graphiques dont le moteur local est
+tenu à l'écart, chacun par l'identifiant qu'affiche
+`llama-server --list-devices`. L'application l'écrit depuis Réglages, Matériel,
+où chaque périphérique a son interrupteur.
+
+```toml
+[llm.devices]
+disabled = ["CUDA1"]
+```
+
+Un périphérique listé sort de la liste `--device` avec laquelle le moteur est
+lancé, et sa mémoire sort de l'estimation que lisent le badge de compatibilité,
+le garde-fou de chargement et le plan de déchargement. Tous les périphériques
+listés, le moteur tourne sur le seul processeur (`--device none`, `-ngl 0`).
+Un identifiant que le moteur ne liste pas est ignoré. Une machine à mémoire
+unifiée n'a qu'un périphérique, qui n'est jamais coupé. La section est relue à
+chaque chargement : un changement s'applique au prochain modèle chargé.
 
 ## Dictée (`system.db`, pas `apollia.toml`)
 
@@ -401,7 +732,7 @@ finir avec des orthographes différentes de la même langue.
 
 <!-- claim:stt-api-language-is-per-request -->
 
-`POST /stt/transcribe` accepte aussi un champ `language`, qui ne s'applique
+`POST /api/v1/stt/transcribe` accepte aussi un champ `language`, qui ne s'applique
 qu'à cette requête et écrase la valeur enregistrée ; l'envoyer vide signifie
 détection automatique pour cette requête.
 
@@ -465,4 +796,37 @@ transport = "streamable-http"
 url = "https://mcp.example.com/mcp"
 max_response_bytes = 16777216  # 16 Mio
 max_tools = 512
+```
+
+### `tool_families`
+
+La famille d'action de chaque outil, indexée par le nom de l'outil sur le
+serveur. Le bureau l'écrit quand une connexion est ajoutée depuis la sélection
+Apollia ; ne la renseignez pas pour un autre serveur.
+
+- Type : table d'un nom d'outil vers une famille
+- Familles : `read`, `read_personal`, `write_or_delete`, `send_external`,
+  `execute_code`
+- Valeur par défaut : vide
+- Bornes : au plus `8192` entrées, chaque clé un nom d'outil valide, aucune
+  valeur `unclassified`
+
+Un outil listé ici prend cette famille. Un outil absent est classé d'après les
+indications que déclare son serveur (`readOnlyHint`, `destructiveHint`) : en
+lecture seule, il lit, ou lit des données personnelles quand la connexion porte
+un jeton OAuth ou un secret enregistré ; destructif, ou déclaré non en lecture
+seule, il écrit ou supprime. Un outil sans indication n'est pas classé et il est
+traité comme sensible. Les indications viennent d'un serveur non fiable : elles
+classent un outil sans jamais le laisser s'exécuter comme une lecture seule, et
+aucune ne peut classer un outil comme un envoi hors de la machine.
+
+```toml
+[[mcp.servers]]
+name = "notion"
+transport = "streamable-http"
+url = "https://mcp.notion.com/mcp"
+
+[mcp.servers.tool_families]
+notion-search = "read_personal"
+notion-create-pages = "write_or_delete"
 ```

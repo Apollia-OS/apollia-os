@@ -91,7 +91,6 @@ ASYNC_TRAIT_TRAITS = {
     "crates/apollia-notifications/src/engine.rs::NotificationChannel",
     "crates/apollia-oria/src/actor.rs::ToolProxyTrait",
     "crates/apollia-runtime/src/chat/agent_chat.rs::ChatAgentRunner",
-    "crates/apollia-runtime/src/chat/types.rs::ProjectContextProvider",
     "crates/apollia-tools/src/tools/web_search/backend.rs::SearchBackend",
 }
 
@@ -99,9 +98,7 @@ ASYNC_TRAIT_TRAITS = {
 # above and their impls. Empties as the traits migrate.
 ASYNC_TRAIT_MANIFESTS = {
     "crates/apollia-aip/Cargo.toml",
-    "crates/apollia-cli/Cargo.toml",
     "crates/apollia-core/Cargo.toml",
-    "crates/apollia-desktop/Cargo.toml",
     "crates/apollia-eval/Cargo.toml",
     "crates/apollia-llm/Cargo.toml",
     "crates/apollia-mcp/Cargo.toml",
@@ -129,29 +126,12 @@ ARC_MUTEX_COUNTS: dict[str, int] = {
     "crates/apollia-auth/src/auth_manager.rs": 1,
     "crates/apollia-auth/src/callback.rs": 2,
     "crates/apollia-auth/src/mcp_oauth_orchestrator.rs": 3,
-    "crates/apollia-cli/src/commands/start.rs": 3,
-    "crates/apollia-cli/src/commands/start/chat_runner.rs": 1,
-    "crates/apollia-cli/src/commands/start/engine.rs": 1,
-    "crates/apollia-cli/src/commands/start/factory.rs": 1,
     "crates/apollia-core/src/pending_approvals.rs": 1,
-    "crates/apollia-desktop/src/backend.rs": 1,
-    "crates/apollia-desktop/src/backend/chat_runner.rs": 3,
-    "crates/apollia-desktop/src/backend/factory.rs": 2,
-    "crates/apollia-desktop/src/backend/runner.rs": 1,
-    "crates/apollia-desktop/src/bootstrap.rs": 1,
-    "crates/apollia-desktop/src/commands/agent_packages.rs": 2,
-    "crates/apollia-desktop/src/commands/agent_packages/install.rs": 2,
-    "crates/apollia-desktop/src/commands/agent_packages/uninstall.rs": 2,
-    "crates/apollia-desktop/src/commands/agents.rs": 2,
-    "crates/apollia-desktop/src/commands/agents/lifecycle.rs": 5,
-    "crates/apollia-desktop/src/commands/llm.rs": 1,
+    "crates/apollia-desktop/src/commands/agents.rs": 1,
     "crates/apollia-desktop/src/commands/model_hub.rs": 1,
-    "crates/apollia-desktop/src/commands/onboarding/memory.rs": 1,
     "crates/apollia-desktop/src/commands/stt.rs": 2,
-    "crates/apollia-desktop/src/commands/user_memory.rs": 1,
-    "crates/apollia-desktop/src/main.rs": 6,
+    "crates/apollia-desktop/src/main.rs": 3,
     "crates/apollia-desktop/src/stt/flow.rs": 3,
-    "crates/apollia-llm/src/backends/vertex.rs": 1,
     "crates/apollia-llm/src/downloader.rs": 1,
     "crates/apollia-llm/src/meta_orchestrator.rs": 1,
     "crates/apollia-llm/src/repository.rs": 1,
@@ -168,24 +148,30 @@ ARC_MUTEX_COUNTS: dict[str, int] = {
     "crates/apollia-runtime/src/api/routes_notifications.rs": 1,
     "crates/apollia-runtime/src/api/routes_triggers/support.rs": 1,
     "crates/apollia-runtime/src/api/server.rs": 14,
-    "crates/apollia-runtime/src/chat/builtin_agent/invoker.rs": 2,
+    "crates/apollia-runtime/src/chat/agent_executor.rs": 1,
+    # The plan cache the runtime opens at boot, forwarded as ORIA's
+    # `with_shared_plan_cache` takes it; the executor holds no lock of its own.
+    "crates/apollia-runtime/src/chat/agent_executor/plan_first.rs": 1,
     "crates/apollia-runtime/src/chat/builtin_agent/mod.rs": 2,
     "crates/apollia-runtime/src/chat/extractor.rs": 4,
     "crates/apollia-runtime/src/chat/manager/handle.rs": 1,
     "crates/apollia-runtime/src/chat/manager/mod.rs": 2,
-    "crates/apollia-runtime/src/chat/manager/types.rs": 1,
-    "crates/apollia-runtime/src/chat/native_wrappers.rs": 1,
-    "crates/apollia-runtime/src/chat/types.rs": 1,
-    "crates/apollia-runtime/src/chat/types/approvals.rs": 2,
+    "crates/apollia-runtime/src/chat/types/approvals.rs": 1,
     "crates/apollia-runtime/src/embedded.rs": 3,
     "crates/apollia-runtime/src/llama_server/mod.rs": 4,
     "crates/apollia-runtime/src/observability/resilience_subscriber.rs": 1,
+    "crates/apollia-runtime/src/onboarding.rs": 2,
     "crates/apollia-runtime/src/perf_trace.rs": 1,
+    "crates/apollia-runtime/src/profile.rs": 1,
     "crates/apollia-runtime/src/runner_supervisor/lifecycle.rs": 3,
     "crates/apollia-runtime/src/runner_supervisor/proxy.rs": 2,
     "crates/apollia-runtime/src/session_metrics.rs": 1,
     "crates/apollia-runtime/src/session_replay.rs": 1,
     "crates/apollia-runtime/src/stt/builder.rs": 1,
+    "crates/apollia-runtime/src/supervisor/boot.rs": 2,
+    "crates/apollia-runtime/src/supervisor/boot/data.rs": 4,
+    "crates/apollia-runtime/src/supervisor/boot/inference.rs": 3,
+    "crates/apollia-runtime/src/supervisor/boot/servers.rs": 1,
     "crates/apollia-runtime/src/supervisor/bootstrap.rs": 2,
     "crates/apollia-runtime/src/supervisor/lifecycle.rs": 4,
     "crates/apollia-runtime/src/supervisor/mod.rs": 3,
@@ -203,13 +189,13 @@ ARC_MUTEX_COUNTS: dict[str, int] = {
 # lock and is red.
 ARC_MUTEX_ALIASES: set[str] = {
     "crates/apollia-auth/src/callback.rs::ResultCell",
-    "crates/apollia-desktop/src/commands/llm.rs::LlmPingCache",
     "crates/apollia-desktop/src/commands/model_hub.rs::SharedDownloadManager",
     "crates/apollia-desktop/src/commands/stt.rs::SttFlowState",
     "crates/apollia-desktop/src/main.rs::SharedLlmRouter",
     "crates/apollia-runtime/src/api/server.rs::SharedLlmRouter",
     "crates/apollia-runtime/src/api/server.rs::SharedSttEngine",
     "crates/apollia-runtime/src/api/server.rs::SharedSttRepository",
+    "crates/apollia-runtime/src/chat/agent_executor/plan_first.rs::SharedPlanCache",
     "crates/apollia-runtime/src/session_metrics.rs::SessionMetricsStore",
     "crates/apollia-workspace/src/assembler.rs::SnapshotCache",
 }
@@ -270,15 +256,50 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     "crates/apollia-auth/src/mcp_oauth_orchestrator.rs": 2,
     "crates/apollia-cli/src/commands/agent/tests.rs": 1,
     "crates/apollia-cli/src/commands/eval.rs": 1,
-    "crates/apollia-cli/src/commands/start.rs": 1,
     "crates/apollia-core/src/net.rs": 1,
+    # The environment is the subject: the configuration file has to follow
+    # `HOME`, and swapping that variable inside the test binary would race
+    # every other test reading it. The test re-runs itself as a child with a
+    # temporary `HOME`, which is the only way to observe it without a lock
+    # over the whole process environment.
+    "crates/apollia-core/src/paths.rs": 1,
     "crates/apollia-core/src/subprocess_env.rs": 3,
     "crates/apollia-core/src/subprocess_window.rs": 2,
+    # The network is the subject: the IMAP client is proven against a fake
+    # server on a loopback port, and a closed port is the only way to observe
+    # an unreachable host. The fake server and the clear-text server bind port
+    # 0; the closed-port test releases the port it was given, which another
+    # process could take before the connection is tried.
+    "crates/apollia-connectors/src/imap/client_tests.rs": 2,
+    "crates/apollia-connectors/src/imap/fake_server.rs": 1,
     # Both sites are the only observable a job object offers: a member is
     # either terminated within a bounded wall time or it is not. The control
     # test holds the second site, and it is the one that proves the first can
     # fail. Windows only.
     "crates/apollia-desktop/src/process_job.rs": 2,
+    # The port is the subject: the startup decision is the claim of a port,
+    # so its tests hold one (`serve_once`) and prove a claimed port cannot be
+    # bound twice. Both binds are on port 0, never a reservation released.
+    # The port of a daemon is resolved from what it recorded: two more tests
+    # hold a port-0 bind as the serving daemon, or release one to stand for a
+    # daemon that is gone, which is the case they prove is ignored.
+    "crates/apollia-desktop/src/startup/tests.rs": 4,
+    # The closed port is the subject: an attached desktop whose daemon has
+    # stopped must get an error back, not wait. The test binds port 0 and
+    # releases it to obtain a port nothing listens on.
+    "crates/apollia-desktop/src/attached/tests.rs": 1,
+    # One helper, the transport is the subject: these tests prove that a
+    # virtualenv gets built, that pip refuses an altered digest, and that the
+    # rewritten command starts. The helper builds the local wheel the
+    # installer reads and runs the entry point it installed; neither can be
+    # observed without a process.
+    "crates/apollia-desktop/src/mcp/python_server/tests.rs": 1,
+    # Two helpers, the transport is the subject: these tests prove that npm
+    # installs from an integrity lock, refuses an altered digest, and that the
+    # rewritten command starts offline. One helper packs the tarball the fake
+    # registry serves (its digest is npm's own), the other runs the entry point
+    # the installer wrote; neither can be observed without a process.
+    "crates/apollia-desktop/src/mcp/npm_server/tests.rs": 2,
     "crates/apollia-llm/src/meta_orchestrator.rs": 1,
     "crates/apollia-llm/src/repository.rs": 1,
     "crates/apollia-llm/src/retry.rs": 1,
@@ -288,21 +309,100 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     "crates/apollia-notifications/src/channels/webhook.rs": 8,
     "crates/apollia-notifications/src/engine.rs": 1,
     "crates/apollia-notifications/src/inactivity_watcher.rs": 5,
-    "crates/apollia-oria/src/actor.rs": 4,
+    "crates/apollia-oria/src/actor.rs": 2,
     "crates/apollia-oria/src/budget.rs": 5,
     "crates/apollia-oria/src/engine.rs": 10,
     "crates/apollia-oria/src/resilience.rs": 3,
-    "crates/apollia-runtime/src/api/server.rs": 12,
-    "crates/apollia-runtime/src/api/unreached_by_cli.rs": 1,
+    # One helper, the transport is the subject: the routes call a declared
+    # inference server over HTTP, and the tests read what that server received
+    # (the `Authorization` header, the `model` of a completion). The fake
+    # server holds a port-0 bind for the whole test, never a port released.
+    "crates/apollia-runtime/src/api/routes_llm/servers.rs": 1,
+    # The engine is the subject: the route reads the template a llama-server
+    # reports on `/props`, so the tests stand a local server in for it. The
+    # stand-in holds a port-0 bind for the whole test, and the silent-port
+    # test releases one to obtain a port nothing listens on.
+    "crates/apollia-runtime/src/api/routes_chat/prompt_template/tests.rs": 2,
+    "crates/apollia-runtime/src/api/server.rs": 13,
+    # The mailbox and the whole-bus event streams never end: each probe reads
+    # its first frame under a deadline, which is what fails it rather than a
+    # hang if the frame never comes.
+    "crates/apollia-runtime/src/api/unreached_by_cli.rs": 2,
     "crates/apollia-runtime/src/chat/builtin_agent/tests.rs": 1,
+    # One helper, the transport is the subject: the engine store fetches a
+    # signed manifest and its archives over HTTP, and the tests count what the
+    # fake server was asked, which is how "no archive before the signature
+    # holds" is observed. The server holds a port-0 bind for the whole test.
+    "crates/apollia-runtime/src/engine_store/tests.rs": 1,
+    # Same helper and same reason for Node.js, published in the same signed
+    # manifest: the fake server counts the archive requests.
+    "crates/apollia-runtime/src/engine_store/node/tests.rs": 1,
+    # The listener is the subject: the compatible server is a second TCP
+    # listener, and "nothing listens", "the port is taken" and "the port
+    # refuses after a stop" are only observable on a real port. One helper,
+    # borrowed by the route and supervisor tests of the same server.
+    "crates/apollia-runtime/src/compat_server/tests.rs": 1,
+    # The accept loop is the subject: the origin a request carries is read
+    # from the peer address of its connection, which only a real listener on
+    # every interface gives. One bound port, one test.
+    "crates/apollia-runtime/src/compat_server/lan_tests.rs": 1,
+    # One helper, the transport is the subject: the relay forwards each
+    # request to the engine that holds the model, over HTTP, and the tests
+    # read what that engine received (the path, the `model` replaced, the
+    # body passed through). The fake engine holds a port-0 bind for the whole
+    # test, never a port released. The reasoning tests of the same server
+    # borrow that helper for the engine that answers their recorded replies.
+    "crates/apollia-runtime/src/compat_server/relay_tests.rs": 1,
+    # The connection is the subject: a client that goes away has to stop the
+    # run it asked for, and only a real connection closed under the handler
+    # shows it. One helper, a port-0 bind held for the whole test.
+    "crates/apollia-runtime/src/compat_server/agents_tests.rs": 1,
+    # The agent and workflow formats are answered through a real socket: one
+    # helper, a port-0 bind held for the whole test.
+    "crates/apollia-runtime/src/compat_server/agents_formats_tests.rs": 1,
+    # The file on disk is the subject: a valid apollia.toml written by another
+    # editor has to reach the running runtime through the folder watch. One
+    # test, two sites: the wait while the watch is armed, and the poll for the
+    # section it applies.
+    "crates/apollia-runtime/src/config_reload/tests.rs": 2,
     "crates/apollia-runtime/src/hooks/executor.rs": 7,
+    # The process is the subject: unloading a resident model has to stop its
+    # child, and `kill -0` on the pid is the one observable left once the
+    # supervisor has taken and reaped the handle. One helper, two tests.
+    "crates/apollia-runtime/src/llama_server/loaded.rs": 1,
     "crates/apollia-runtime/src/llama_server/mod.rs": 1,
+    # The process is the subject: the embeddings instance has to be launched
+    # beside a resident chat model without evicting it, which only a launched
+    # process can show. The site is the shebang of the fake engine, one helper
+    # shared by the supervisor and embedder tests.
+    "crates/apollia-runtime/src/llama_server/embeddings/tests.rs": 1,
+    # The process is the subject: changing a load setting of a resident model
+    # has to stop its child and launch another, which only a launched process
+    # can show. The site is the shell script of the fake engine, one helper
+    # shared by the reload tests.
+    "crates/apollia-runtime/src/llama_server/reload/tests.rs": 1,
+    # The process and the clock are the subject: the MLX supervisor has to
+    # respawn an engine that dies, with backoff, and stop it for good on
+    # shutdown. Two `kill` spawns make the engine die, one sleep polls for the
+    # respawn, one sleep is the window in which no respawn may follow, and one
+    # `sleep 60` child is the stand-in process of `with_stand_in_models`, since
+    # `tokio::process::Child` has no constructor.
+    "crates/apollia-runtime/src/mlx_engine/tests.rs": 5,
     "crates/apollia-runtime/src/perf_trace.rs": 2,
     "crates/apollia-runtime/src/router.rs": 2,
-    "crates/apollia-runtime/src/runner_supervisor/gpu_detection.rs": 1,
     "crates/apollia-runtime/src/session_metrics.rs": 1,
-    "crates/apollia-runtime/src/supervisor/tests.rs": 21,
+    "crates/apollia-runtime/src/supervisor/tests.rs": 19,
     "crates/apollia-runtime/src/test_support.rs": 4,
+    # The clock is the subject: the watcher of the paused tasks scans on a
+    # timer, and a saved timeout has to start a scan at once rather than at
+    # the next tick. One poll of the task store for the cancellation.
+    "crates/apollia-runtime/src/timeout_watcher.rs": 1,
+    # The file system is the subject: the index of a source follows a file
+    # added, rewritten and deleted with no request, so the only observable is
+    # the index once the watch has delivered. One bounded wait, one poll
+    # interval inside it; every other test of the indexer asks for its pass
+    # and awaits the reply.
+    "crates/apollia-sources/src/indexer/tests.rs": 2,
     "crates/apollia-tools/src/executor.rs": 1,
     "crates/apollia-tools/src/file_path_extractor.rs": 2,
     "crates/apollia-tools/src/journal.rs": 2,
@@ -312,6 +412,11 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     "crates/apollia-tools/src/tools/web_read/mod.rs": 1,
     "crates/apollia-tools/src/tools/web_search/brave.rs": 1,
     "crates/apollia-tools/src/tools/web_search/duckduckgo.rs": 1,
+    # The clock and the file system are the subject: the watch of
+    # apollia.toml sends one tick once a burst of writes has stayed quiet, and
+    # nothing for a neighbour file. Two waits while the watch is armed, one
+    # bounded wait for the tick.
+    "crates/apollia-triggers/src/handlers/apollia_config_watch.rs": 3,
     "crates/apollia-triggers/src/definition_repository.rs": 1,
     "crates/apollia-triggers/src/engine.rs": 2,
     "crates/apollia-triggers/src/sources/cron.rs": 1,

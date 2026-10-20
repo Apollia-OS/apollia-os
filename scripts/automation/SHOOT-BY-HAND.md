@@ -160,10 +160,9 @@ was unreachable.
 
 ## Session F. Google Workspace, three images, deferred
 
-**Skipped for this release.** The three images are placeholders that say so on
-their face: a "screenshot pending" card naming the screen it will show and why
-it is not there. They ship rather than leaving a broken image, and a reader who
-lands on one learns something true instead of seeing nothing.
+**Skipped for this release.** The page of Google Workspace shows no image at
+these three places until they are shot: a placeholder card would print this
+file's path on a public page.
 
 | File | What it will show, when it is shot |
 |---|---|
@@ -172,8 +171,8 @@ lands on one learns something true instead of seeing nothing.
 | `integration-google-workspace-3.png` | Back in Apollia after consent: the Drive folder dialog, the `drive.file` scope explanation, the Folder path field. |
 
 They need a real Google account **and** your own OAuth client, since Apollia
-deliberately embeds none. Regenerate the placeholders, or replace them with real
-captures, whenever that changes.
+deliberately embeds none. Once shot, put each image back in the page, in both
+languages, after the step it illustrates.
 
 ---
 
@@ -205,7 +204,6 @@ pages carry no illustration, and one of them matters more than the rest:
 | Page | Why it deserves one |
 |---|---|
 | `integrations/connecter-microsoft-365.md` | The only connector that works with nothing to configure, and the contrast with Google is the point. Automatable. |
-| `transversal/suivre-la-visite-guidee.md` | A whole subsystem, shipped and never shown. |
 | `agents/choisir-un-palier-d-autonomie.md` | The choice happens on screen. Automatable. |
 | `transversal/trouver-sa-version-et-ses-donnees.md` | Its five values just became copyable. |
 

@@ -19,6 +19,8 @@ members = [
     "crates/apollia-workspace",
     "crates/apollia-permissions",
     "crates/apollia-eval",
+    "crates/apollia-signing",
+    "crates/apollia-sources",
     "crates/apollia-cli",
     "crates/apollia-desktop",
     "tests",
@@ -43,6 +45,8 @@ default-members = [
     "crates/apollia-workspace",
     "crates/apollia-permissions",
     "crates/apollia-eval",
+    "crates/apollia-signing",
+    "crates/apollia-sources",
     "crates/apollia-cli",
     "tests",
 ]
@@ -66,7 +70,7 @@ exclude = ["fuzz", "crates/apollia-loom-models"]
 rust-version = "1.89"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-authors = ["Nidal Zoumita <admin@apollia.fr>"]
+authors = ["Apollia <contact@apollia.fr>"]
 repository = "https://github.com/Apollia-OS/apollia-os"
 homepage = "https://apollia.fr"
 
@@ -128,8 +132,72 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # --- Cryptography ---
 sha2 = "0.10"
+# Git blob identifiers of repository files stored outside LFS (apollia-llm).
+# Same RustCrypto `digest` family as sha2. See the `model-download-integrity` decision.
+sha1 = { version = "0.10", default-features = false }
 hmac = "0.12"
 aes-gcm = "0.10"
+# Detached Ed25519 signatures over a digest list (apollia-signing). Default
+# features off: `fast` only adds precomputed tables, `zeroize` wipes the
+# signing key on drop. See the `signing-schemes` decision.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
+# Verification of the minisign signatures on distribution metadata
+# (apollia-signing). Already in the tree through tauri-plugin-updater.
+minisign-verify = "0.2"
+
+# --- Archives ---
+# The `.apo` agent package is a zip archive (apollia-aip). Deflate only, read
+# and write: no AES, bzip2, lzma, zstd or deflate64. Already in the tree through
+# tauri-plugin-updater. See the `package-archive` decision.
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+# Declared only to give zip's deflate its pure-Rust backend (miniz_oxide);
+# without a backend feature flate2 refuses to compile. Already in the tree
+# through png and tauri-plugin-updater.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# --- Spreadsheets ---
+# Writes the Excel export of a batch (apollia-runtime). A writer only, no
+# network. Pinned to the last release that depends on zip 4; its `deflate`
+# feature of zip brings `zopfli` and `zlib-rs`. See the `package-archive`
+# decision.
+rust_xlsxwriter = { version = "=0.92.0", default-features = false }
+# Reads workbooks (.xlsx, .xlsm, .xlsb, .xls, .ods) and CSV files
+# (apollia-sources). Readers only, pure Rust, no network, no system library.
+# calamine depends on zip 8, a second major of zip beside the one above. See
+# the `documents-and-sources` decision.
+calamine = { version = "=0.36.1", default-features = false }
+csv = "1.4.0"
+# Extracts the text of a PDF page by page (apollia-sources). Pure Rust, no
+# network, no system library. Default features off: the colour-profile engine
+# is of no use to text extraction; `legacy-crypto` stays so that a PDF locked
+# with an owner password only still opens. Its dependency `office_oxide` is held
+# at 0.1.11 by the line below: 0.1.12 no longer compiles under pdf_oxide 0.3.78.
+# See the `documents-and-sources` decision.
+pdf_oxide = { version = "=0.3.78", default-features = false, features = ["legacy-crypto"] }
+# Never named in the code: declared only to hold the release pdf_oxide 0.3.78
+# compiles against. The lock file held it alone, so anything that resolves
+# without the lock (the fuzz crate, the rustdoc build of cargo-semver-checks)
+# took 0.1.12 or later and failed to compile. Default features off: this line
+# adds no feature to the one pdf_oxide selects. See the `documents-and-sources`
+# decision.
+office_oxide = { version = "=0.1.11", default-features = false }
+# Reads the text of a scanned page or a picture (apollia-sources, behind its
+# `ocr` feature, off by default). Its build script compiles Tesseract and
+# Leptonica from source with cmake and links them statically, so nothing is
+# installed on the machine that runs the binary; it needs the network at build
+# time. Pinned: a release changes the C++ sources it fetches. See the
+# `documents-and-sources` decision.
+tesseract-rs = "=0.4.0"
+# Decodes the picture a scanned page embeds, and the .png, .jpg and .tiff files
+# of a source, before recognition. Already in the tree through pdf_oxide with
+# these three formats; nothing enters the lock file. See the
+# `documents-and-sources` decision.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+# Reads the XML parts of Word and PowerPoint files (apollia-sources), whose zip
+# archive is opened with `zip` above. Already in the tree through calamine and
+# the desktop bundle; default features off, nothing enters the lock file. See
+# the `documents-and-sources` decision.
+quick-xml = { version = "0.41", default-features = false }
 
 # --- Random ---
 # rand 0.9 = the latest widely adopted stable major (0.10 has only just
@@ -146,6 +214,9 @@ async-trait = "0.1"
 # `timings` object that llama-server attaches, and the generic `post` helper that
 # would otherwise reach it is `pub(crate)`.
 async-openai = { version = "0.28", features = ["byot"] }
+# The retry policy async-openai takes, to bound its retry of server errors
+# (docs/site/docs/architecture/08-decisions.md#llm-retry).
+backoff = { version = "0.4", default-features = false }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 # Local LLM inference runs through the embedded upstream llama-server binary
 # (see crates/apollia-runtime/src/llama_server.rs), not in-process bindings, so
@@ -165,9 +236,6 @@ toml_edit = "0.22"
 
 # --- Interactive password prompt (apollia-cli credentials) ---
 rpassword = "7"
-
-# --- HuggingFace model download ---
-hf-hub = "0.3"
 
 # --- Progress bars (CLI download) ---
 indicatif = "0.17"
@@ -242,6 +310,9 @@ tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
+# Windows and Linux only: hands the file of a second launch to the open window.
+# See the `desktop-single-instance` decision.
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 
 # --- HTML parsing and readability (apollia-desktop, apollia-tools) ---
@@ -261,10 +332,17 @@ whisper-rs = "0.16"
 # --- TLS for the remote API (apollia-runtime) ---
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 
+# --- Mailbox connection over IMAP, read-only (apollia-connectors) ---
+async-imap = { version = "0.11.3", default-features = false, features = ["runtime-tokio"] }
+mail-parser = { version = "0.11.9", default-features = false }
+rustls-native-certs = "0.8.4"
+
 # --- Platform-specific (target tables) ---
 libc = "0.2"
 objc2 = "0.6"
 wmi = "0.16"
+# Win32 security API: owner and access list of the organisation policy folder.
+windows-sys = "0.61"
 
 # --- Test-only ---
 proptest = "1"
@@ -288,6 +366,8 @@ apollia-permissions   = { path = "crates/apollia-permissions" }
 apollia-auth          = { path = "crates/apollia-auth" }
 apollia-connectors    = { path = "crates/apollia-connectors" }
 apollia-eval          = { path = "crates/apollia-eval" }
+apollia-signing       = { path = "crates/apollia-signing" }
+apollia-sources       = { path = "crates/apollia-sources" }
 
 [profile.release]
 opt-level = 3

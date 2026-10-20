@@ -2,30 +2,48 @@
   import { onMount } from "svelte";
   import { t } from "svelte-i18n";
   import { currentRoute, goBack, goForward } from "$lib/stores/navigation";
+  import { developerMode } from "$lib/stores/developerMode";
+  import { reachableRoute } from "$lib/navigation/developerRoutes";
   import { PageTransition } from "$lib/components/motion";
+  import { navPosition } from "$lib/stores/chatAppearance";
+  import { navSide } from "$lib/layout/navSide";
   import Topbar from "./Topbar.svelte";
-  import { RuntimeStatusBanner } from "$lib/components/feedback";
+  import DetailSidebar from "./DetailSidebar.svelte";
+  import { GovernanceFailClosedBanner, RuntimeStatusBanner } from "$lib/components/feedback";
   import { startRuntimeHealthMonitor } from "$lib/stores/runtimeHealth";
-  import Dashboard from "../../../routes/Dashboard.svelte";
   import Agents from "../../../routes/Agents.svelte";
-  import Tasks from "../../../routes/Tasks.svelte";
+  import Batches from "../../../routes/Batches.svelte";
+  import Batch from "../../../routes/Batch.svelte";
   import Inbox from "../../../routes/Inbox.svelte";
-  import Llm from "../../../routes/Llm.svelte";
+  import Ai from "../../../routes/Ai.svelte";
   import Automations from "../../../routes/Automations.svelte";
+  import Library from "../../../routes/Library.svelte";
   import Memory from "../../../routes/Memory.svelte";
-  import Notifications from "../../../routes/Notifications.svelte";
   import Observability from "../../../routes/Observability.svelte";
   import Chat from "../../../routes/Chat.svelte";
-  import Settings from "../../../routes/Settings.svelte";
+  import SettingsWindow from "../../../components/settings/SettingsWindow.svelte";
+  import ConfigInvalidBanner from "../../../components/settings/config/ConfigInvalidBanner.svelte";
   import Transcriptions from "../../../routes/Transcriptions.svelte";
   import Connections from "../../../routes/Connections.svelte";
-  import Projects from "../../../routes/Projects.svelte";
+  import Policy from "../../../routes/Policy.svelte";
+  import Authorizations from "../../../routes/Authorizations.svelte";
+  import Journal from "../../../routes/Journal.svelte";
+  import Developer from "../../../routes/Developer.svelte";
   import Design from "../../../routes/Design.svelte";
   import DesignMotion from "../../../routes/DesignMotion.svelte";
   import DesignEmptyStates from "../../../routes/DesignEmptyStates.svelte";
   import DesignDarkMode from "../../../routes/DesignDarkMode.svelte";
 
   const isDev = import.meta.env.DEV;
+
+  // A developer screen is out of reach with the developer mode off, whatever
+  // asked for it (a link, the guide, the automaton), and so is a route no
+  // screen answers to: the router shows the default route, and the store
+  // follows so the sidebar marks the right entry.
+  const shownRoute = $derived(reachableRoute($currentRoute, $developerMode, isDev));
+  $effect(() => {
+    if (shownRoute !== $currentRoute) currentRoute.set(shownRoute);
+  });
 
   onMount(() => {
     function handleKeydown(event: KeyboardEvent) {
@@ -60,55 +78,70 @@
   <!-- Runtime health : global persistent banner across every route. -->
   <RuntimeStatusBanner />
 
-  <!-- Route content: responsive padding plus a centred container. -->
-  <div class="w-full flex-1 overflow-auto">
-    {#key $currentRoute}
-      <PageTransition>
-        {#if $currentRoute === "dashboard"}
-          <Dashboard />
-        {:else if $currentRoute === "agents"}
-          <Agents />
-        {:else if $currentRoute === "tasks"}
-          <Tasks />
-        {:else if $currentRoute === "chat"}
-          <Chat />
-        {:else if $currentRoute === "inbox"}
-          <Inbox />
-        {:else if $currentRoute === "llm"}
-          <Llm />
-        {:else if $currentRoute === "automations"}
-          <Automations />
-        {:else if $currentRoute === "projects"}
-          <Projects />
-        {:else if $currentRoute === "memory"}
-          <Memory />
-        {:else if $currentRoute === "transcriptions"}
-          <Transcriptions />
-        {:else if $currentRoute === "notifications"}
-          <Notifications />
-        {:else if $currentRoute === "observability"}
-          <Observability />
-        {:else if $currentRoute === "integrations"}
-          <Connections />
-        {:else if $currentRoute === "settings"}
-          <Settings />
-        {:else if isDev && $currentRoute === "design"}
-          <Design />
-        {:else if isDev && $currentRoute === "design-motion"}
-          <DesignMotion />
-        {:else if isDev && $currentRoute === "design-empty-states"}
-          <DesignEmptyStates />
-        {:else if isDev && $currentRoute === "design-dark-mode"}
-          <DesignDarkMode />
-        {:else}
-          <!-- No branch matched. Without this fallback the window renders empty,
-               which is what an unknown route produced: the companion maps
-               `/onboarding` (onboarding is a modal, not a route), so its button
-               opened a blank screen. Any route the switch does not know now
-               lands on the dashboard instead of nothing. -->
-          <Dashboard />
-        {/if}
-      </PageTransition>
-    {/key}
+  <!-- Governance failing closed: sensitive actions blocked, reading continues. -->
+  <GovernanceFailClosedBanner />
+
+  <!-- apollia.toml refused at startup: defaults in force, on every screen. -->
+  <ConfigInvalidBanner />
+
+  <!-- Route content, with the detail sidebar on the side the navigation leaves free. -->
+  <div class="flex min-h-0 w-full flex-1 overflow-hidden {navSide($navPosition).contentRow}">
+    <div class="min-w-0 flex-1 overflow-auto">
+      {#key shownRoute}
+        <PageTransition>
+          {#if shownRoute === "agents"}
+            <Agents />
+          {:else if shownRoute === "batches"}
+            <Batches />
+          {:else if shownRoute === "batch"}
+            <Batch />
+          {:else if shownRoute === "chat"}
+            <Chat />
+          {:else if shownRoute === "inbox"}
+            <Inbox />
+          {:else if shownRoute === "llm"}
+            <Ai />
+          {:else if shownRoute === "library"}
+            <Library />
+          {:else if shownRoute === "automations"}
+            <Automations />
+          {:else if shownRoute === "memory"}
+            <Memory />
+          {:else if shownRoute === "transcriptions"}
+            <Transcriptions />
+          {:else if shownRoute === "observability"}
+            <Observability />
+          {:else if shownRoute === "integrations"}
+            <Connections />
+          {:else if shownRoute === "policy"}
+            <Policy />
+          {:else if shownRoute === "authorizations"}
+            <Authorizations />
+          {:else if shownRoute === "journal"}
+            <Journal />
+          {:else if shownRoute === "developer"}
+            <Developer />
+          {:else if isDev && shownRoute === "design"}
+            <Design />
+          {:else if isDev && shownRoute === "design-motion"}
+            <DesignMotion />
+          {:else if isDev && shownRoute === "design-empty-states"}
+            <DesignEmptyStates />
+          {:else if isDev && shownRoute === "design-dark-mode"}
+            <DesignDarkMode />
+          {:else}
+            <!-- No branch matched. `reachableRoute` already sends an unknown
+                 route to the chat; this arm keeps the window from rendering
+                 empty if a branch above is ever dropped without it. -->
+            <Chat />
+          {/if}
+        </PageTransition>
+      {/key}
+    </div>
+    <DetailSidebar />
   </div>
+
+  <!-- The settings open above the screen, which stays mounted underneath: the
+       `settings` route opens this window rather than switching the screen. -->
+  <SettingsWindow />
 </main>

@@ -107,17 +107,22 @@ BUILDER_GUARD = Path("scripts/check_optional_builders.py")
 # reference, fails the guard as stale, which is what stops an exemption list
 # from rotting into decoration.
 DEAD_RATCHET: dict[str, str] = {
+    "announce_shared_namespaces@apollia-aip": (
+        "announced the shared memory namespaces of a Python agent when its context was built; no agent is Python any more, it goes with the context services of that contract."
+    ),
+    "health_check@apollia-runtime": (
+        "the runner proxy never had a caller for it; it was credited with the occurrences of a homonym in the validator of Python agents, removed since."
+    ),
+    "with_fail_closed@apollia-aip": (
+        "set on the tool proxy of a Python agent by its runner; the agent executor refuses the sensitive calls of a fail-closed run before any proxy. It goes with the context services of that contract."
+    ),
+    "with_mailbox_capability@apollia-aip": (
+        "read `supports_mailbox` from the manifest of a Python agent; without it `ctx.mail` refuses every call. It goes with the context services of that contract."
+    ),
     "default_input@apollia-stt": (
         "convenience wrapper over `AudioCapture::open(None)`; every caller names a device or resolves one first."
     ),
-    "approve_tool@apollia-mcp": (
-        "the only way into the HITL approval path, and nothing calls it; the guard read it as "
-        "live while a tracing sentence of `handle_approve_tool_access` named it."
-    ),
     "delete_draft@apollia-connectors": "same chain as `list_drafts`.",
-    "duck_type_agent@apollia-aip": (
-        "strict duck-typing against a venv `site-packages`; the CLI install path defers it per agent and never calls it."
-    ),
     "from_backend_configs@apollia-llm": (
         "a thin forward to `from_backend_configs_with_override`, which is the one every caller uses."
     ),
@@ -127,17 +132,11 @@ DEAD_RATCHET: dict[str, str] = {
     "list_drafts@apollia-connectors": (
         "Gmail draft management is exposed by the client and by no connector action, so no agent and no route can reach it."
     ),
-    "load_package@apollia-aip": (
-        "the package-wide duck-typing entry, deferred for the same reason as `duck_type_agent`."
-    ),
-    "revoke_tool@apollia-mcp": (
-        "same dead path as `approve_tool`, on the other half of the pair."
-    ),
     "run_task_with_alternatives@apollia-oria": (
-        "the CLI consumes `PlanAlternativesProposed` and nothing emits it; the missing half is the emission, not this method."
+        "plan alternatives were retired from the product with the CLI's --alternatives; this method, its event and its types go together, a removal that reaches apollia-core and the memory schema."
     ),
     "with_style_detection@apollia-workspace": (
-        "the style provider is installed by `from_providers_config` from the stored configuration, never by this builder."
+        "the style provider was installed only from the context providers of the former projects, retired with them; this builder has no caller."
     ),
 }
 
@@ -154,29 +153,27 @@ DEAD_RATCHET: dict[str, str] = {
 # entry that leaves must leave the list too. The way out of it, item by item,
 # is a `TEST-ONLY:` line above the definition saying why it exists.
 TEST_ONLY_RATCHET: frozenset[str] = frozenset([
-    "always_accept_default@apollia-runtime", "backend_names@apollia-llm",
     "build_a2a_context@apollia-runtime", "complete_with_fallback@apollia-llm",
-    "context_window_pct@apollia-core", "create_project_async@apollia-tools", "data_dir_or_err@apollia-core",
+    "context_window_pct@apollia-core", "data_dir_or_err@apollia-core",
     "estimate_tokens@apollia-oria", "filter_kinds@apollia-runtime", "from_config_with_bus@apollia-llm",
     "from_profile@apollia-prompts", "from_repository@apollia-llm", "from_risk_score@apollia-tools",
     "get_choice@apollia-memory", "get_covered_topics@apollia-memory", "get_last_onboarding_session@apollia-memory",
     "get_onboarding_skipped@apollia-memory", "get_state@apollia-triggers", "global_tracker_clear@apollia-memory",
-    "handle_budget_update@apollia-notifications", "has_reasoner@apollia-oria", "in_memory@apollia-mcp",
-    "into_tool_filter@apollia-runtime", "is_enabled@apollia-tools", "language_footer@apollia-prompts",
+    "handle_budget_update@apollia-notifications",
+    "is_enabled@apollia-tools", "language_footer@apollia-prompts",
     "list_entries@apollia-memory", "list_extras@apollia-memory", "load_step_provenance@apollia-oria",
     "log_plan_choice@apollia-memory", "maybe_purge@apollia-memory", "new_for_test@apollia-runtime",
-    "new_with_cwd@apollia-oria", "new_with_workspace@apollia-runtime", "notify_agent_free@apollia-triggers",
+    "new_with_cwd@apollia-oria", "notify_agent_free@apollia-triggers",
     "observe@apollia-oria", "open_with_signer@apollia-runtime", "parse_tool_name@apollia-mcp",
     "plan_with_tombstones@apollia-runtime", "prune_deleted@apollia-memory", "query_by_task@apollia-llm",
-    "query_last@apollia-tools", "recall_all_for_injection@apollia-memory", "register_tool@apollia-oria",
+    "query_last@apollia-tools", "register_tool@apollia-oria",
     "remove_rule@apollia-permissions", "remove_rules_by_creator@apollia-permissions",
-    "reset_timer@apollia-notifications", "resolve_backend@apollia-runtime", "seed_session_cost_usd@apollia-llm",
+    "reset_timer@apollia-notifications", "seed_session_cost_usd@apollia-llm",
     "set_last_onboarding_session@apollia-memory", "set_section@apollia-aip", "set_turn_id@apollia-aip",
     "supports_service@apollia-connectors", "sweep_now@apollia-runtime", "telemetry_for@apollia-runtime",
     "tracked_turns@apollia-memory", "try_with_default_backends@apollia-tools", "validate_id@apollia-triggers",
-    "with_consequences@apollia-core", "with_index_path@apollia-auth", "with_max_output_chars@apollia-tools",
+    "with_consequences@apollia-core", "with_index_path@apollia-auth",
     "with_namespace@apollia-aip", "with_pattern@apollia-tools", "with_produced_plan@apollia-runtime",
-    "with_storage@apollia-auth",
 ])
 
 

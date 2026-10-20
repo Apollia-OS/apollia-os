@@ -21,6 +21,7 @@ source of truth at runtime.
 | `Cargo.toml` (root) | `[workspace.dependencies]`, `[workspace.lints]`, `[workspace.package]` |
 | `package.json` (desktop UI) | Node tooling, scripts |
 | `.github/workflows/*.yml` | CI pipelines |
+| `justfile` + `scripts/lib/*.sh` | the task recipes, grouped, and the shell functions they share; `.env.example` lists their settings, `justfile.local.example` shows a personal recipe file |
 | `scripts/linux-check.sh` + `scripts/linux-check.Dockerfile` | ask the two Linux questions locally, in a container, before pushing: does it compile, do the suites pass |
 
 ---
@@ -138,9 +139,11 @@ Actual structure :
 .github/workflows/
 ├── ci.yml            # PR gate (see jobs below)
 ├── codeql.yml        # CodeQL: rust + python + javascript-typescript
-├── nightly.yml       # heavy / advisory: e2e, feature-matrix, coverage HTML,
+├── weekly.yml        # heavy / advisory: e2e, feature-matrix, coverage HTML,
 │                     #   deep-audit, geiger (unsafe surface), loom, miri, kani, fuzz-deep
 ├── release.yml       # tag-triggered: build binaries, attach to release
+├── engines.yml       # manual: sign and publish the engine channel
+├── preview-channel.yml  # on a published pre-release: copy its manifests to the `preview` release
 └── auto-close-prs.yml
 ```
 
@@ -156,6 +159,9 @@ Actual structure :
 8. `coverage` : `cargo llvm-cov --workspace --fail-under-lines $COVERAGE_FLOOR`
 9. `deny` : `cargo-deny check advisories bans licenses sources`
 10. `vitest` (frontend), `prose-guard`, `links` (lychee)
+11. `msrv` (the 1.89 floor compiles), `cli-e2e` (offline track of the CLI
+    suite), `docs-generated` (generated reference drift), `claims`
+    (`scripts/check_claims.py`), `docs-build` (the documentation site)
 
 Non-blocking (`continue-on-error`) advisory jobs :
 
@@ -174,14 +180,16 @@ blocking.
 - `clippy-stable` : same clippy gate on `@stable`, surfaces future lints.
 - `semver-checks` : `cargo semver-checks` on `apollia-core` / `apollia-runtime`
   against `origin/main`. Informative while the crates are unpublished / pre-1.0.
+- `links-online` : the link check against the network, advisory because a
+  remote host that is down is not a defect of the tree.
 - `fuzz` : `cargo +nightly fuzz run` over each seed corpus for ~60s (nightly,
   libFuzzer). A short regression smoke on the untrusted-input parsers; the long
-  session is `fuzz-deep` in `nightly.yml`. See `docs/agents/TESTING.md` 8b.
+  session is `fuzz-deep` in `weekly.yml`. See `docs/agents/TESTING.md` 8b.
 
 `python-tests` is **blocking**. It was advisory while three SDK tests failed;
 they are fixed, so it gates.
 
-Nightly-only advisory jobs (in `nightly.yml`) :
+Weekly-only advisory jobs (in `weekly.yml`) :
 
 - `loom` : exhaustive interleaving check of the runtime actor algorithms on the
   pinned `1.95.0`, via `RUSTFLAGS="--cfg loom" cargo test --manifest-path
@@ -245,6 +253,31 @@ that escalates the token to `id-token: write` + `attestations: write` (plus the
 `permissions: contents: read` at the top level; jobs escalate only what they
 need. Verification commands for consumers live in `SECURITY.md`.
 
+### Engine channel (`engines.yml`)
+
+The engines the application downloads after install (the CUDA `llama-server`,
+Node.js) are not built by `release.yml` and do not follow its tags. `engines.yml`
+is started by hand with a channel and a llama.cpp tag, and runs
+`packaging/build-engine-manifest.py`: every upstream archive is checked against
+its SHA-256 pinned in `packaging/engine-sources.json`, each package is
+repackaged as one zip, and the manifest is signed in the minisign format by
+`cargo tauri signer sign` with the distribution key.
+
+- **Two keys, never mixed.** `APOLLIA_DIST_SIGNING_KEY` signs distribution
+  metadata; `TAURI_SIGNING_PRIVATE_KEY` signs application updates and is not
+  read by this workflow. The script refuses a run where both hold one value.
+- **The trigger is the fence.** The distribution and object-storage secrets sit
+  at repository level, so the workflow runs on `workflow_dispatch` only;
+  `check_ci_workflows.py` (rule `dist-secrets`) refuses a pull-request trigger
+  on any job that names them.
+- **Proved before signed.** `just test-engine-manifest` runs the script on
+  stand-in archives with a throwaway key and hands the output to the engine
+  store; the workflow runs it first, then verifies the real manifest against
+  the public key compiled into the tree before anything is uploaded.
+- **Adding a tag is a commit.** A tag is publishable once its archives are
+  pinned in `engine-sources.json`; `check_download_sums.py` holds every source
+  to an https address and a 64-hex sum.
+
 ---
 
 ## 6. Coverage
@@ -258,7 +291,7 @@ cargo llvm-cov --workspace --lcov --output-path lcov.info \
 
 `COVERAGE_FLOOR` is a workflow-level env var set just below the measured
 baseline so the gate is green from day one, then ratcheted up over time and
-never lowered. The full HTML report is produced by the nightly `coverage` job.
+never lowered. The full HTML report is produced by the weekly `coverage` job.
 
 Target : > 80% lines / > 70% branches on core crates. Aspirational
 workspace-wide.
@@ -287,6 +320,9 @@ pre-commit install --hook-type commit-msg
 # First build
 cargo build --workspace
 cargo test --workspace --no-fail-fast
+
+# Which tools the recipes need, present and absent (exit 2 when one is missing)
+just doctor
 ```
 
 ### Ask the Linux question before you push
@@ -349,7 +385,7 @@ just linux-test x86           # x86_64-unknown-linux-gnu, emulated, cost unmeasu
 ```
 
 It runs `cargo test --workspace --no-fail-fast --locked`, the first of the two
-steps of the `Rust Tests` job of `.github/workflows/ci.yml:143-146`, in the same
+steps of the `Rust Tests` job of `.github/workflows/ci.yml`, in the same
 container, on the same read-only mount, sharing the same target volume as
 `linux-check`. The default target differs from `linux-check` on purpose: this
 question is the slow one, and `aarch64` is the only one that has been measured.
@@ -372,7 +408,7 @@ the word `not measured` where a count could not be extracted, never `0`.
 What it does not cover, beyond what `linux-check` already does not cover:
 `cargo test -p apollia-e2e-tests --features python-tests`, the second step of the
 same job. That suite declares it needs the SDK installed in the interpreter
-(`tests/integration/test_hello_agent.rs:4-5`), the image is built without a
+(the header of `tests/integration/test_package_tools.rs`), the image is built without a
 context so it cannot install it, and the tree is mounted read-only. And no run of
 this channel confronts the image's system packages with the runner's, so a green
 here is not a promise of a green there. Both facts are printed by the run itself.
@@ -423,6 +459,140 @@ A guard whose precondition is missing is recorded as `not prepared` and never
 counts as agreeing. Read `scripts/worktree-prep.sh` for what each group lays
 down; it is the one place to update when a gate starts reading a new untracked
 path.
+
+### The task recipes, and why they do what they do
+
+`just` with no argument lists the recipes by group: `build`, `test`,
+`quality`, `docs`, `desktop`, `llm`, `automation`, `release`, `linux`,
+`maintainer`. The names are regular (`build-*`, `test-*`, `automation-*`,
+`release-*`), and the justfile itself stays a table of contents: one line of
+documentation per recipe, the shared shell in `scripts/lib/`, and the reasons
+here.
+
+**Settings.** Every setting is an environment variable declared once at the
+head of the justfile with its default, and listed in `.env.example`. `just`
+loads a `.env` file at the repository root, and a variable exported in the
+shell wins over it. No recipe names a model or a path of one machine:
+a recipe that needs a model reads `APOLLIA_LLAMA_MODEL` (or its argument) and
+answers one message when there is none. Recipes of your own go in
+`justfile.local`, which is untracked and imported when present.
+
+**The Python bundle** (`scripts/lib/python-bundle.sh`). The application sets
+`PYTHONHOME` to the interpreter bundle under `target/`. A build that links
+whatever `libpython` the host resolves therefore runs two different CPython
+builds, the interpreter cannot find its own standard library, and every agent
+fails at boot with `ModuleNotFoundError: No module named '_opcode'`, while the
+application itself starts. `python_bundle_activate` points `PYO3_PYTHON` and
+`RUSTFLAGS` at the bundle before any recipe compiles the desktop or the CLI.
+Three details ride along:
+
+- the bundle is relocatable but its `sysconfig` still names its build path, so
+  the library directory is passed with `-L`, as the release workflow does;
+- on Linux an RPATH is added, because `-L` informs the linker and not the
+  loader: without it a locally built binary starts only through a launcher
+  that exports `LD_LIBRARY_PATH`, and the CLI suite reports every assertion
+  red on a binary that could not load;
+- on macOS `target/Resources/python` is linked to the bundle, because the
+  install name is `@executable_path/../Resources/python/lib`, the packaged
+  layout, and dyld resolves it before the process can correct anything.
+
+A tree with no bundle is refused with exit 1 and the command that builds one.
+A warning was not enough: it scrolls past during compilation, and the run that
+follows spends its time on agents that cannot load. `build-cli` goes through
+the same function because PyO3 refuses an interpreter newer than 3.13, which
+is what a current distribution ships, while the bundle carries 3.13.
+
+**The STT runners.** `build-runner` and `build-runner-release` source
+`host_runner_cmake_env`: on MSVC the `cmake` crate strips the optimisation
+flags of whisper.cpp unless the caller sets them, and a runner built without
+them transcribes about fifty times slower than real time. It is a no-op on
+every other host. `build-runner` also leaves a copy named after its backend,
+which is how the daemon detects it, and signs that copy ad hoc on macOS, where
+a copied binary loses the linker's signature and is killed at launch.
+`build-runners` builds `cpu` everywhere and `metal` on macOS alone, the Metal
+backend existing on no other system.
+
+**The desktop bundle.** `build-desktop` with no argument builds for the host,
+into `target/release`; with a triple it builds into `target/<triple>/release`.
+The runner set and the engine default to what the host can run, so a clone on
+Windows or Linux never fetches a macOS interpreter or a Metal engine. The
+release presets take the runner set as their one argument.
+
+**llama-server** (`scripts/lib/llama.sh`). The server is started with
+`--jinja`, so tool calling is driven by the model's template; without it the
+server falls back on a tool grammar it may fail to parse. `-c` is the total
+context, split across the `-np` slots, so one slot gives a single conversation
+the whole window at no extra memory. The automation recipes default to a
+131072-token context, greedy sampling and a fixed seed: a model book asserts
+what the model does next, and eight slots over 16384 tokens left 2048 tokens
+per slot, which the server answers with a 400. A model file under a megabyte
+is refused by name: it is one of the placeholders the automation seed
+installs, and llama-server would otherwise die on `unknown model
+architecture`, which reads as a corrupt model.
+
+**The desktop automaton** (`scripts/lib/automation.sh`). `automation-seeded`
+rebuilds a throwaway `HOME` from `tests/cli/seed` and swaps `HOME` and
+`USERPROFILE` for the application alone; `CARGO_HOME` and `RUSTUP_HOME` are
+pinned first, since their defaults derive from the real home. The narrative
+overlay is stripped for the assertion recipes, because it changes the row
+counts they assert on, and kept by `automation-screenshots`, where an empty
+timeline is the defect. A seeded run points the MCP registry at a closed port,
+so the catalogue answers from the seeded cache: that cache goes stale after
+fifteen minutes, and a long book would otherwise meet the public registry
+mid-run. `automation-first-run` builds a blank home holding only the two model
+files, cloned rather than linked, so the run measures a first launch and not a
+download. `automation-real` and `automation-real-llama` drive your real
+profile and ask for confirmation first. `scripts/lib/selftest.sh` holds these
+choices with every external command stubbed, and `guards` launches it.
+
+**The guards.** `guards` rebuilds `target/debug/apollia-os` before judging:
+five guards interrogate the binary rather than the source, and on a stale
+binary one turns red while the others have nothing to measure, which reads as
+a broken tree. Guards are named one by one, never globbed, because
+`scripts/check_selftest.py` looks each name up in the files that launch it.
+The recipe answers the three codes its guards do: 0 when everything measured
+and everything is green, 1 as soon as one guard is red, 2 when nothing is red
+but at least one guard measured nothing. Reds accumulate instead of stopping
+the run, and skips are named at the end. An external gate whose tool is not
+installed answers the shell's 127 and counts as a skip; a missing cargo
+subcommand answers 101 and still reads red, cargo giving no way to tell it
+from a subcommand that found something. clippy runs first among the external
+gates because it is the one that can hide the others: it stops at the first
+crate that fails to compile.
+
+`ci` is `guards`, the format check, then `test`. clippy runs once, inside
+`guards`; `lint` remains the quick pair of format check and clippy.
+`check-features` builds the three configurations the default features hide,
+which no other command compiles. `audit-deps` audits the bundled Python
+packages, the desktop UI runtime dependencies and the Rust crates against
+their upstream advisory databases, and answers 2 offline.
+
+**The test recipes.** `test` wraps the workspace suite in a sentinel `HOME`
+and fails if the run wrote to `~/.apollia`. `test-cli-runtime` points the
+model variable at a file that does not exist, so Track 3 records a justified
+skip whatever the environment holds. `test-engine-manifest` runs the engine
+manifest script on stand-in archives, signs them with a key pair generated on
+the spot and hands the result to the engine store: accepted intact, refused
+after one altered byte. `test-cli-sweep` plays one real invocation of every
+CLI leaf on a throwaway `HOME` and names the leaves it refuses to play.
+`test-evals-load` loads the two agent evaluation suites and holds their
+invariants; running them needs a loaded model and an outfitted agent, which no
+recipe provides.
+
+### The desktop in dev mode and the macOS keychain
+
+macOS ties each keychain entry to the signature of the program that wrote it.
+An unsigned dev binary carries a new signature after every build, so the
+keychain asks for its password again, once per entry the application reads at
+startup, and "Always allow" lasts until the next build of the Rust side.
+
+`just desktop-dev-identity` makes a self-signed code-signing identity named
+`Apollia Dev` in the login keychain, once. From then on `just desktop-dev` and
+`just desktop-dev-llama` build through `scripts/lib/dev-sign-cargo.sh`, which
+signs the binary with that identity under one identifier before running it:
+every build is the same program to the keychain. `APOLLIA_DEV_SIGN_IDENTITY`
+names another identity. Without any, the recipes run as before. The identity
+signs nothing that ships: release builds are signed by the release workflow.
 
 ---
 

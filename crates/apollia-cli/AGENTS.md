@@ -13,7 +13,7 @@ releases.
 ## 1. Command shape
 
 Every command is `apollia-os <noun> <verb> [args]`, except the bare-verb
-whitelist below. The tree carries 200 leaves today; read it with
+whitelist below. The tree carries 239 leaves today; read it with
 `apollia-os --help` recursively, never from memory.
 
 **Verb taxonomy.** Every leaf's last token belongs to one of the categories
@@ -26,28 +26,33 @@ the same commit as the command.
 |---|---|
 | entity | `show`, `create`, `delete`, `list`, `rename`, `edit` |
 | config | `get`, `set`, `raw-config`, `set-default` |
-| relationship | `add`, `remove`, `link` |
-| lifecycle | `install`, `uninstall`, `enable`, `disable`, `start`, `stop`, `restart`, `reset`, `reload`, `update`, `revoke`, `login`, `logout`, `setup`, `init`, `resume`, `cancel` |
-| maintenance | `clear`, `evict`, `purge`, `repair`, `forget` |
-| report | `status`, `logs`, `stats`, `costs`, `report`, `journal`, `audit`, `pending`, `resolved`, `approvals`, `messages`, `skills`, `chats`, `accounts`, `hardware`, `recommend`, `schema`, `anchor`, `inspect`, `trace`, `version`, `digest` |
-| action | `run`, `test`, `fire`, `invoke`, `validate`, `verify`, `replay`, `search`, `discover`, `download`, `transcribe`, `ping`, `chat`, `learn-procedure`, `seed-builtins`, `set-approval`, `revoke-approval`, `list-pending`, `doctor`, `onboard`, `review`, `guide`, `explain`, `do`, `completions` |
+| relationship | `add`, `remove` |
+| lifecycle | `install`, `uninstall`, `enable`, `disable`, `start`, `stop`, `restart`, `reset`, `reload`, `update`, `revoke`, `login`, `logout`, `setup`, `init`, `resume`, `cancel`, `pause` |
+| maintenance | `clear`, `evict`, `purge`, `forget` |
+| report | `status`, `logs`, `stats`, `costs`, `report`, `journal`, `pending`, `approvals`, `messages`, `skills`, `accounts`, `accesses`, `capabilities`, `template`, `hardware`, `recommend`, `schema`, `keys`, `anchor`, `inspect`, `preview`, `trace`, `version`, `digest` |
+| action | `run`, `build`, `new`, `keygen`, `sign`, `test`, `fire`, `invoke`, `validate`, `verify`, `replay`, `retry`, `search`, `discover`, `download`, `transcribe`, `ping`, `chat`, `learn-procedure`, `decide`, `doctor`, `onboard`, `review`, `guide`, `explain`, `do`, `completions` |
 | interchange | `export`, `import` |
 
 **One verb per intent.** `show` is the only entity-detail read (it absorbed
-`info`, `describe` and entity-`get`), `create` the only entity-creation verb
-(it absorbed `new`), `delete` the only entity deletion. Kept distinct on
+`info`, `describe` and entity-`get`), `create` the only entity-creation verb,
+`delete` the only entity deletion. Kept distinct on
 purpose, verified against real usage:
 
 - `get` / `set` are config key/value pairs (`config`, `chat config`,
-  `tools config`, `notify events`), not entity reads.
-- `add` / `remove` attach and detach a relationship, git-style (`mcp add`,
-  `project agents add`); they do not create or delete an entity.
+  `tools config`, `notify events`), not entity reads. `chat settings` and
+  `chat notes` use them the same way for one conversation: `get <session>`
+  reads what the conversation holds, `set <session> <value>` replaces it.
+- `add` / `remove` attach and detach a relationship, git-style (`mcp add`);
+  they do not create or delete an entity.
 - `clear` and `evict` are distinct in `plan cache`: wipe all against purge by
   age.
+- `new` belongs to `package new` alone: it writes a starter folder on disk,
+  which `package build` then turns into an archive. Nothing is stored, so it
+  is not a `create`.
 
-**Bare-verb whitelist (top level, git-style).** These 17 are the only commands
+**Bare-verb whitelist (top level, git-style).** These 16 are the only commands
 allowed without a noun; everything else is strictly noun-verb:
-`start`, `stop`, `status`, `run`, `doctor`, `inspect`, `logs`, `trace`,
+`start`, `stop`, `status`, `run`, `doctor`, `logs`, `trace`,
 `version`, `digest`, `onboard`, `update`, `review`, `completions`, `guide`,
 `do`, `explain`.
 
@@ -59,7 +64,84 @@ say so.
 `chat-config` -> `chat config`, `plan-cache` -> `plan cache`, `user-memory` ->
 `profile`; `hitl` removed (use `task list --pending-approval`).
 
+**`service`** (`install`, `uninstall`, `status`) is the one noun that acts on
+the operator's session rather than on `~/.apollia`: it hands a definition to
+launchd, the systemd user manager or Task Scheduler. `install --no-load` writes
+the definition and stops there; it is the only form the end-to-end suite, the
+smoke sweep and the `--json` probe may drive, since a load reaches the real
+session whatever `HOME` says.
+
 If you add a new noun, document it here and in `docs/site/docs/reference/cli/`.
+
+**`approvals`** (`pending`, `decide`) lists, from the runtime, every decision
+a run waits on: the tool consents of the conversations and of the runs outside
+any conversation, the paused tasks, the batch items waiting for an access, the
+questions agents asked and the questions running workflows stopped on. Each
+item names the answers it takes (`once`, `always`, `refuse`, or `answer` for a
+question). `decide <id> <answer>` gives one, through
+`POST /api/v1/pending-decisions/decide`: `--value` carries the answer to a
+question, `--reason` the reason of a refusal. An item that does not wait, or
+an answer it does not take, exits 1. With no runtime both exit 2.
+
+**`batch`** (`run`, `status`, `list`, `accesses`, `pause`, `resume`, `stop`,
+`retry`, `export`) runs a stored agent without code on every item of a source, in the
+runtime. `run` returns once the items are recorded; each item is a task of its
+own, so `task list` shows them. The source is named by `--source-type` and
+`--source`; a type no reader serves is refused with exit 1. Two are read:
+`spreadsheet` (a workbook) and `csv`, whose `--option sheet=`,
+`--option header_row=` and `--option columns=A,C` pick the sheet, the header
+row and the checked columns, the proposed ones when absent. `accesses` lists the sensitive accesses of an agent, which
+`run --grant` grants for the duration of the batch; an item that reaches for
+one not granted waits, and `retry` runs it again, with `--grant` if given,
+along with the failed items. A batch in the wrong state for a verb (resume a
+running batch, stop an ended one) is refused with exit 1. `export --format
+xlsx|csv|json` writes the result of a batch to `batch-<id>.<format>`, or to
+`--output`, `-` being standard output.
+
+**`workflow`** (`show`, `run`, `status`, `logs`, `cancel`) runs a workflow of
+an installed package, named `<package>/<workflow>`, in the runtime. `show`
+lists its steps and each input with its type (text, long text, file, date,
+number, yes or no, choice, list). `run` takes each input as
+`--input key=value`, sent as text and read by the runtime as the type the
+workflow declares, a date as `YYYY-MM-DD` and a file as its absolute path; a
+refused input is exit 1 with the field named and the runtime's refusal code
+in brackets (`[malformed_date]`, `[missing_file]`).
+`run` returns once the run is recorded, or follows it to its end with `--wait`
+(exit 3 when it fails or is stopped). `status` reads each step of a run, `logs`
+the history of a workflow, and `cancel` stops a run behind `--confirm`.
+
+**`package`** starts, builds and inspects `.apo` archives on files alone
+(`new`, `build`, `inspect`); `preview`, `install` and the `trust` keyring (`import`, `list`,
+`remove`) go through the runtime, which reads the installed packages, the
+keyring, the connections and the governance, adds the MCP servers a package
+brings and journals the installation. The archive is sent by its absolute
+path; a missing file is refused before the runtime is reached.
+
+**`source`** (`list`, `create`, `delete`, `inspect`, `report`) reads and writes the registry of
+sources an agent may consult once checked: a folder, a file or a mailbox,
+which name what they point at with `--reference`, the profile, the memory, a
+code folder. Every leaf goes through the runtime, whose actor owns the
+registry in `system.db`; daemon off, each refuses with exit 2. An agent checks
+a source by naming its identifier in `agent set <agent> sources ...`, and the
+runtime refuses an identifier the registry does not hold. `inspect <file>` previews
+a workbook or a CSV file as a batch would read it, through the runtime too:
+the sheet and header row proposed, the first twenty rows, the columns by
+letter and name, and whether results may be written into the original. A
+file that is not there is refused with exit 1 before the runtime is reached.
+`report` shows what the migration of the former projects carried over into
+sources at boot, and what it listed instead; exit 1 when no migration has run.
+
+**`agent uninstall`** and **`agent package uninstall`** go through the
+runtime, the same route the desktop calls: it removes the definitions,
+overrides, models, triggers, environments, files and the MCP servers a package
+brought, unregisters the agents and journals the removal. `--clear-memory` and
+`--clear-history` erase what is kept otherwise. Without a runtime nothing is
+removed, exit 2; Apollia is refused before the runtime is reached, exit 1.
+
+**`policy`** prepares the organisation policy on files alone (`keygen`,
+`init`, `sign`, `verify`, `show`) and never reaches the runtime: the policy is
+read by the runtime at startup, not served by it. No leaf writes into the
+system policy folder; IT deploys the prepared folder with its own tools.
 
 ---
 

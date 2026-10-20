@@ -16,6 +16,8 @@ pub(in crate::chat::builtin_agent) struct StreamConsumeParams<'a> {
     /// begins. Threading the origin in is what keeps the measured interval the
     /// one the contract defines.
     pub dispatched_at: std::time::Instant,
+    /// Measures the call as its chunks pass, for the aggregate of the turn.
+    pub meter: &'a mut apollia_llm::CallMeter,
 }
 
 impl BuiltInChatAgent {
@@ -41,11 +43,18 @@ impl BuiltInChatAgent {
             message_id,
             cancel,
             dispatched_at,
+            meter,
         } = params;
         let mut tool_calls = Vec::new();
         // Turn instrumentation only, inert outside an instrumented turn where
         // the recorder entry points are no-ops.
         let mut first_token_seen = false;
+        // What tells an answer that is empty from an engine that gave none:
+        // whether anything was generated, whether the engine said how it
+        // ended, and whether it is the engine that closed the stream.
+        let mut generated = false;
+        let mut finish_reported = false;
+        let mut closed_by_engine = false;
 
         loop {
             // Race the stop token against the next chunk so a Stop takes effect
@@ -66,14 +75,21 @@ impl BuiltInChatAgent {
                     // at the checkpoint. An aborted generation may legitimately
                     // produce no usage at all, in which case the caller falls
                     // back to the previous iteration's prompt size.
-                    Self::drain_accounting_chunks(&mut stream, usage).await;
+                    Self::drain_accounting_chunks(&mut stream, usage, meter).await;
                     break;
                 }
                 next = stream.next() => match next {
                     Some(chunk) => chunk,
-                    None => break,
+                    None => {
+                        closed_by_engine = true;
+                        break;
+                    }
                 },
             };
+            match &chunk_result {
+                Ok(chunk) => meter.read_chunk(chunk),
+                Err(_) => meter.observe_error(),
+            }
             match chunk_result {
                 Ok(StreamChunk::Text(token)) => {
                     // Time to first token, client-observed: from the dispatch of
@@ -92,10 +108,12 @@ impl BuiltInChatAgent {
                         token: token.clone(),
                     });
                     accumulated_text.push_str(&token);
+                    generated = true;
                 }
                 Ok(StreamChunk::ToolCall(call)) => {
                     // Tool call detected in stream
                     tool_calls.push(call);
+                    generated = true;
                 }
                 Ok(StreamChunk::Usage(chunk_usage)) => {
                     // Terminal token accounting for this call; fold it in.
@@ -107,6 +125,7 @@ impl BuiltInChatAgent {
                     // engine time to this iteration.
                     crate::perf_trace::iteration_engine_timings(&timings);
                 }
+                Ok(StreamChunk::Finish(_)) => finish_reported = true,
                 Err(e) => {
                     // Stream interrupted
                     warn!(
@@ -119,6 +138,19 @@ impl BuiltInChatAgent {
             }
         }
 
+        // An engine that closes the stream having generated nothing and
+        // without saying how the answer ended gave no answer: a server that
+        // refuses a request it is too busy for does exactly this, with a 200.
+        // Reported as a failure, it is retried or said; taken for an answer,
+        // the turn ended on nothing and called it normal.
+        if closed_by_engine && !generated && !finish_reported {
+            warn!(session_id = %session_id, "llm.stream.closed_without_answer");
+            return Err(
+                "the engine closed the answer before generating anything; it may be busy with another request"
+                    .to_owned(),
+            );
+        }
+
         // Tool calls now arrive as structured `StreamChunk::ToolCall` from every
         // backend: cloud providers emit them natively, and the local runner
         // decodes them through the GGUF's own chat-template parser (common_chat)
@@ -128,8 +160,10 @@ impl BuiltInChatAgent {
 
     /// Fold any in-flight accounting chunks into `usage` after a cancellation.
     ///
-    /// Bounded: stops at the first per-item timeout, at end of stream, or on
-    /// error, so a Stop never waits on a model that keeps generating. Content
+    /// Bounded by one deadline for the whole drain, not per item: a model that
+    /// keeps generating yields a chunk every few milliseconds, so a per-item
+    /// timeout never fires and a Stop would wait for the natural end of the
+    /// stream. Stops at the deadline, at end of stream, or on error. Content
     /// chunks are deliberately dropped: the turn is frozen at its checkpoint
     /// and only the measurement is worth salvaging.
     async fn drain_accounting_chunks(
@@ -137,15 +171,24 @@ impl BuiltInChatAgent {
             Box<dyn futures::Stream<Item = Result<StreamChunk, apollia_llm::LlmError>> + Send>,
         >,
         usage: &mut TokenUsage,
+        meter: &mut apollia_llm::CallMeter,
     ) {
-        const DRAIN_ITEM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+        const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
+        let deadline = tokio::time::Instant::now() + DRAIN_BUDGET;
         loop {
-            match tokio::time::timeout(DRAIN_ITEM_TIMEOUT, stream.next()).await {
+            // `timeout_at` polls the stream first, so a stream that is always
+            // ready would never let the deadline fire: check it here too.
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            match tokio::time::timeout_at(deadline, stream.next()).await {
                 Ok(Some(Ok(StreamChunk::Usage(chunk_usage)))) => {
+                    meter.read_chunk(&StreamChunk::Usage(chunk_usage.clone()));
                     usage.merge(&chunk_usage);
                 }
                 Ok(Some(Ok(StreamChunk::Timings(timings)))) => {
                     crate::perf_trace::iteration_engine_timings(&timings);
+                    meter.read_chunk(&StreamChunk::Timings(timings));
                 }
                 Ok(Some(Ok(_))) => {}
                 Ok(Some(Err(_)) | None) | Err(_) => break,

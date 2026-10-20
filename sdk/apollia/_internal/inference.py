@@ -15,6 +15,9 @@ Supported annotations:
 - ``Literal[...]`` → ``{"enum": [...]}`` with inferred ``type``
 - ``Any`` / missing annotation → ``{}`` (any-type)
 - ``Annotated[T, "description"]`` → schema of ``T`` with ``description``
+- ``datetime.date`` → ``{"type": "string", "format": "date"}``
+- ``Annotated[str, InputFormat(f)]`` (``LongText``, ``FileInput``) →
+  ``{"type": "string", "format": f}``
 - dataclasses / TypedDict / NamedTuple → object schemas
 
 Strictness:
@@ -28,6 +31,7 @@ Strictness:
 """
 
 import dataclasses
+import datetime
 import difflib
 import inspect
 import typing
@@ -39,6 +43,7 @@ from types import UnionType as _UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from apollia.errors import PayloadError, SchemaError
+from apollia.types import DATE_FORMAT, InputFormat
 
 __all__ = [
     "EXCLUDED_PARAM_NAMES",
@@ -117,6 +122,10 @@ def _scalar_schema(tp: object) -> dict[str, Any] | None:
         return {"type": "number"}
     if tp is bytes:
         return {"type": "string", "format": "byte"}
+    # Identity, not issubclass: a ``datetime.datetime`` is a ``date`` too, and
+    # it is not a day.
+    if tp is datetime.date:
+        return {"type": "string", "format": DATE_FORMAT}
     return None
 
 
@@ -152,14 +161,14 @@ def _typeddict_schema(tp: type) -> dict[str, Any]:
     # annotations (plain strings or ``ForwardRef`` wrappers, depending on the
     # Python version). That silently corrupts ``__required_keys__`` (Python
     # cannot see through ``NotRequired[...]`` when it is a string) and therefore
-    # the generated skill schema. Surface it loudly rather than mis-deriving.
+    # the generated schema. Surface it loudly rather than mis-deriving.
     raw_annotations = getattr(tp, "__annotations__", {})
     if any(isinstance(ann, (str, typing.ForwardRef)) for ann in raw_annotations.values()):
         warnings.warn(
             f"TypedDict {getattr(tp, '__name__', tp)!r} exposes stringified "
             "annotations, most likely from 'from __future__ import annotations'. "
             "Remove that import from the defining module: it breaks "
-            "required/optional field derivation for agent skill schemas.",
+            "required/optional field derivation for the schema of a tool or a workflow.",
             stacklevel=2,
         )
 
@@ -267,7 +276,14 @@ def _schema_for_annotated(annotation: object) -> dict[str, Any] | None:
         return None
     inner_ann = annotated_args[0]
     descriptions = [m for m in annotated_args[1:] if isinstance(m, str) and m]
+    formats = [m.format for m in annotated_args[1:] if isinstance(m, InputFormat)]
     inner_schema = annotation_to_schema(inner_ann)
+    if formats:
+        if inner_schema.get("type") != "string":
+            raise SchemaError(
+                f"InputFormat({formats[-1]!r}) marks a text input; {inner_ann!r} is not str"
+            )
+        inner_schema = {**inner_schema, "format": formats[-1]}
     if not descriptions:
         return inner_schema
     merged = dict(inner_schema)

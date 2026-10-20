@@ -14,6 +14,8 @@ import { seam } from "./invokeSeam";
 import { simulateHeartbeatLoss } from "../stores/runtimeHealth";
 import { clearToasts } from "$lib/components/ui/toast";
 import { waitClickable } from "./clickable";
+import { dragOnto } from "./pointerDrag";
+import { elapsedVerdict } from "./timing";
 import type {
   AutomationBoot,
   RunReport,
@@ -514,6 +516,14 @@ async function runStep(step: Step, ctx: RunContext): Promise<string> {
       select.dispatchEvent(new Event("change", { bubbles: true }));
       return `selectOption ${sel.label} = ${opts[idx].value}`;
     }
+    case "drag": {
+      const sel = selectorFor(step);
+      const timeout = step.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      const source = await waitForEl(sel.css, timeout, step.nth);
+      const to = `[data-testid="${cssEscape(step.toTestid)}"]`;
+      await dragOnto(source, await waitForEl(to, timeout, step.toNth));
+      return `dragged ${sel.label} onto ${step.toTestid}`;
+    }
     case "press": {
       let target: HTMLElement;
       if (step.testid || step.testidPrefix) {
@@ -565,6 +575,15 @@ async function runStep(step: Step, ctx: RunContext): Promise<string> {
         argsMatch: step.argsMatch,
       });
       return `stubbed ${step.command} (${mode}${step.once ? ", once" : ""})`;
+    }
+    case "expectElapsed": {
+      // Since the webview started loading the interface: the launch, as far
+      // as a recipe can observe it. The measure is kept whichever way the
+      // verdict falls, since the number is what the report is read for.
+      const verdict = elapsedVerdict(performance.now(), step.maxMs);
+      captures[step.as] = String(verdict.elapsedMs);
+      if (!verdict.ok) throw new Error(verdict.detail);
+      return verdict.detail;
     }
     case "clearToasts": {
       clearToasts();
@@ -624,14 +643,6 @@ function keyToCode(key: string): string {
 // on, a stale `apollia.delete_automation.skip` bypasses the delete dialog. Clear
 // the known non-deterministic UI-state keys so each component falls back to its
 // default. Every key a component persists is a new leak until it is added here.
-//
-// The two MCP disclaimer keys are on the list: the dialog they gate opens only
-// from a catalogue Connect click (Connections.svelte handleConnect), never at
-// boot, so clearing them costs nothing at startup and makes that click land on
-// the disclaimer every run. `apollia.tour.state` is deliberately absent:
-// tour-det measures the Getting started band with whatever followVisited the
-// machine holds, and a reset at boot would make getting-started-keep
-// unreachable for good.
 
 // App.svelte hands the runner the boot's script and gate; the tokens a recipe
 // may name come from the same payload, re-read here when the caller passes

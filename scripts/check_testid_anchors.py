@@ -45,7 +45,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # (no build embeds any, so a fresh install renders the configure CTA instead,
 # and the only remaining opener also opens the system browser, an external
 # boundary the deterministic suite never crosses).
-NEVER_REACHED_MAX = 681
+# 681 -> 683: surfaces of the batch of integrated stories (the profile proposal,
+# the conversation profile indicator, the chat sort menu, the engine table row)
+# have no script yet; each story measured below the ceiling on its own base.
+# 683 -> 685: the second batch of integrated stories (the journal summary,
+# the model defaults, the workflow launch) leaves two anchors without a
+# script; each story measured below the ceiling on its own base.
+# 685 -> 694: nine anchors of the model panel of the AI screen (preset
+# naming, author fields, structured error, read-only load) have no script yet.
+# 694 -> 695: the loading state of the README of a model card has no script yet.
+# 695 -> 707: the twelve anchors of the accelerated engine card of the AI
+# screen. The card is shown only on a machine with an NVIDIA card, and the
+# deterministic suite runs on a seed without one, so no script can reach it.
+# 707 -> 713: the settings tab of the chat panel leaves six anchors without a
+# script (its error banners, the no-model notices, the reasoning controls of a
+# model with a profile); the story measured below the ceiling on its own base.
+NEVER_REACHED_MAX = 713
 
 LITERAL = re.compile(r'data-testid="([A-Za-z0-9_\-./:]+)"')
 

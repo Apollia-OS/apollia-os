@@ -12,6 +12,10 @@
 //! - `PUT    /api/v1/llm/backends/:name`          , update backend
 //! - `DELETE /api/v1/llm/backends/:name`          , delete backend
 //! - `POST   /api/v1/llm/backends/:name/set-default`, mark as default
+//! - `GET    /api/v1/llm/loaded-models`           , list resident local models
+//! - `POST   /api/v1/llm/loaded-models/unload`    , unload one resident model
+//! - loading a model by hand, its estimate and the last model loaded: see [`load`]
+//! - presets, the model of each agent and the default model: see [`presets`]
 
 use std::time::Instant;
 
@@ -26,9 +30,16 @@ use apollia_llm::{BackendInfo, ChatMessage, CompletionRequest};
 
 use crate::api::server::AppState;
 use crate::coordinator::ExecutionBackend;
+use crate::local_engine::guardrails::{GuardrailRefusedBody, GUARDRAIL_REFUSED_CODE};
 
 pub mod backends;
 pub mod costs;
+pub mod load;
+pub mod loaded;
+pub mod presets;
+pub mod residency;
+pub mod servers;
+pub mod turn_calls;
 
 use backends::{
     create_llm_backend, delete_llm_backend, get_llm_backend, list_llm_backends, reload_llm_router,
@@ -96,6 +107,20 @@ pub struct ChatRequest {
     pub prompt: String,
     /// Backend to use; falls back to the router default if omitted.
     pub backend: Option<String>,
+    /// JSON Schema the answer must satisfy, or `null` for free-form generation.
+    ///
+    /// Same contract as `ctx.llm(schema=...)`: the backend turns it into
+    /// whatever decoding constraint it supports, the answer is validated
+    /// against it, and the validated value comes back in `value`.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub schema: Option<serde_json::Value>,
+    /// Sampling temperature; the backend default when omitted.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Sampling seed, for a reproducible answer on a backend that carries one.
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 /// Response body for `POST /api/v1/llm/chat` and `POST /api/v1/llm/complete`.
@@ -109,6 +134,13 @@ pub struct ChatResponse {
     pub usage: TokenUsageResponse,
     /// Total round-trip latency in milliseconds.
     pub latency_ms: u64,
+    /// The answer validated against the requested `schema`.
+    ///
+    /// Absent on a free-form call. Present whenever `schema` was given, since a
+    /// call that could not satisfy it answers an error rather than a body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub value: Option<serde_json::Value>,
 }
 
 /// A single message in a multi-turn conversation request.
@@ -132,6 +164,20 @@ pub struct CompleteRequest {
     /// Optional GBNF grammar constraining the decoding (local backends).
     #[serde(default)]
     pub grammar: Option<String>,
+    /// JSON Schema the answer must satisfy, or `null` for free-form generation.
+    ///
+    /// A `grammar` already on the request wins over it, being the more specific
+    /// constraint of the two; the answer is validated against the schema either
+    /// way and comes back in `value`.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub schema: Option<serde_json::Value>,
+    /// Sampling temperature; the backend default when omitted.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Sampling seed, for a reproducible answer on a backend that carries one.
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 // ─────────────────────────────────────────────
@@ -222,8 +268,11 @@ pub async fn ping_llm_backend<B: ExecutionBackend + Clone>(
         .unwrap_or_else(|| router.default_name())
         .to_owned();
 
+    // One token is enough to prove the backend answers; without a cap the
+    // diagnostic paid for a whole generation.
     let ping_req = CompletionRequest {
         messages: vec![ChatMessage::user("ping")],
+        max_tokens: Some(1),
         ..Default::default()
     };
     let obs = ObservabilityConfig::default();
@@ -271,6 +320,7 @@ pub async fn ping_llm_backend<B: ExecutionBackend + Clone>(
     request_body = ChatRequest,
     responses(
         (status = 200, description = "Completion result", body = ChatResponse),
+        (status = 409, description = "A local model the load guardrail refused; confirm the load to go ahead", body = crate::local_engine::guardrails::GuardrailRefusedBody),
         (status = 503, description = "No router configured or backend call failed", body = crate::api::openapi::ApiErrorBody),
     )
 )]
@@ -286,8 +336,12 @@ pub async fn llm_chat<B: ExecutionBackend + Clone>(
     })?;
 
     let backend_name = req.backend.as_deref();
+    let response_schema = req.schema.clone();
     let completion_req = CompletionRequest {
         messages: vec![ChatMessage::user(req.prompt)],
+        temperature: req.temperature,
+        seed: req.seed,
+        response_schema: response_schema.clone(),
         ..Default::default()
     };
     let obs = ObservabilityConfig::default();
@@ -303,12 +357,9 @@ pub async fn llm_chat<B: ExecutionBackend + Clone>(
             &obs,
         )
         .await
-        .map_err(|e| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+        .map_err(llm_error_response)?;
+
+    let value = validated_value(&response.content, response_schema.as_ref())?;
 
     Ok(Json(ChatResponse {
         content: response.content,
@@ -319,7 +370,60 @@ pub async fn llm_chat<B: ExecutionBackend + Clone>(
             cost_usd: response.usage.cost_usd,
         },
         latency_ms: response.latency_ms,
+        value,
     }))
+}
+
+/// Map an [`apollia_llm::LlmError`] onto the status the caller can act on.
+///
+/// A structured-output failure is the caller's to fix, not the backend's to
+/// retry: a schema no grammar can express and an answer the schema refuses are
+/// both 422, where an unreachable backend stays 503. Collapsing the three into
+/// one status is what made a malformed schema look like an outage. A local
+/// model the load guardrail refused is 409 with [`GuardrailRefusedBody`]: the
+/// estimate and the budget, for the interface to word in its own language.
+fn llm_error_response(err: apollia_llm::LlmError) -> (StatusCode, Json<serde_json::Value>) {
+    use apollia_llm::LlmError;
+    if let Some(refused) = GuardrailRefusedBody::from_llm_error(&err) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::to_value(refused).unwrap_or_else(
+                |_| serde_json::json!({"error": err.to_string(), "code": GUARDRAIL_REFUSED_CODE}),
+            )),
+        );
+    }
+    let status = match &err {
+        LlmError::StructuredOutputUnavailable { .. }
+        | LlmError::StructuredOutputUnsupported { .. }
+        | LlmError::StructuredOutputInvalid { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let mut body = serde_json::json!({"error": err.to_string()});
+    if let LlmError::StructuredOutputUnsupported { path, .. }
+    | LlmError::StructuredOutputInvalid { path, .. } = &err
+    {
+        if let Some(map) = body.as_object_mut() {
+            map.insert("path".to_string(), serde_json::Value::String(path.clone()));
+        }
+    }
+    (status, Json(body))
+}
+
+/// Validate `content` against `schema`, when one was asked for.
+///
+/// Returns `None` on a free-form call, so the response body carries no `value`
+/// key at all rather than a null the caller would have to tell apart from a
+/// validated `null`.
+fn validated_value(
+    content: &str,
+    schema: Option<&serde_json::Value>,
+) -> Result<Option<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let Some(schema) = schema else {
+        return Ok(None);
+    };
+    apollia_llm::parse_and_validate(content, schema)
+        .map(Some)
+        .map_err(llm_error_response)
 }
 
 /// Handler for `POST /api/v1/llm/complete`.
@@ -343,6 +447,7 @@ pub async fn llm_chat<B: ExecutionBackend + Clone>(
     responses(
         (status = 200, description = "Completion result", body = ChatResponse),
         (status = 400, description = "Unknown message role", body = crate::api::openapi::ApiErrorBody),
+        (status = 409, description = "A local model the load guardrail refused; confirm the load to go ahead", body = crate::local_engine::guardrails::GuardrailRefusedBody),
         (status = 503, description = "No router configured or backend call failed", body = crate::api::openapi::ApiErrorBody),
     )
 )]
@@ -379,9 +484,13 @@ pub async fn llm_complete<B: ExecutionBackend + Clone>(
         messages.push(msg);
     }
 
+    let response_schema = req.schema.clone();
     let completion_req = CompletionRequest {
         messages,
         grammar: req.grammar,
+        temperature: req.temperature,
+        seed: req.seed,
+        response_schema: response_schema.clone(),
         ..Default::default()
     };
     let obs = ObservabilityConfig::default();
@@ -398,12 +507,9 @@ pub async fn llm_complete<B: ExecutionBackend + Clone>(
             &obs,
         )
         .await
-        .map_err(|e| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        })?;
+        .map_err(llm_error_response)?;
+
+    let value = validated_value(&response.content, response_schema.as_ref())?;
 
     Ok(Json(ChatResponse {
         content: response.content,
@@ -414,6 +520,7 @@ pub async fn llm_complete<B: ExecutionBackend + Clone>(
             cost_usd: response.usage.cost_usd,
         },
         latency_ms: response.latency_ms,
+        value,
     }))
 }
 
@@ -435,6 +542,13 @@ pub async fn llm_complete<B: ExecutionBackend + Clone>(
 /// - `PUT    /api/v1/llm/backends/:name`               , update backend
 /// - `DELETE /api/v1/llm/backends/:name`               , delete backend
 /// - `POST   /api/v1/llm/backends/:name/set-default`   , mark as default
+/// - `GET    /api/v1/llm/loaded-models`                , list resident local models
+/// - `POST   /api/v1/llm/loaded-models/unload`         , unload one resident model
+/// - `POST   /api/v1/llm/loaded-models`                , load a model by hand
+/// - `POST   /api/v1/llm/loaded-models/estimate`       , what a load would take
+/// - `GET    /api/v1/llm/loaded-models/last`           , the last model loaded by hand
+/// - `POST   /api/v1/llm/loaded-models/last/reload`    , load it again
+/// - `GET    /api/v1/sessions/:id/turns/:turn_id/llm-calls`, the model calls of one turn
 pub fn llm_routes<B: ExecutionBackend + Clone>() -> Router<AppState<B>> {
     Router::new()
         .route("/api/v1/llm/status", get(get_llm_status::<B>))
@@ -458,14 +572,27 @@ pub fn llm_routes<B: ExecutionBackend + Clone>() -> Router<AppState<B>> {
             post(set_default_llm_backend::<B>),
         )
         .route("/api/v1/llm/reload", post(reload_llm_router::<B>))
+        .route(
+            "/api/v1/sessions/:id/turns/:turn_id/llm-calls",
+            get(turn_calls::get_turn_llm_calls::<B>),
+        )
+        .merge(loaded::loaded_model_routes::<B>())
+        .merge(load::load_routes::<B>())
+        .merge(servers::server_routes::<B>())
+        .merge(presets::preset_routes::<B>())
+        .merge(residency::residency_routes::<B>())
 }
 
 // ─────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────
 
+// The engine routes' tests build their state with the same helper.
 #[cfg(test)]
-mod tests {
+pub(crate) use tests::{test_app_state_no_llm, MockBackend};
+
+#[cfg(test)]
+pub mod tests {
     use super::*;
     use crate::coordinator::ExecutionBackend;
     use crate::eventbus::EventBus;
@@ -482,7 +609,7 @@ mod tests {
 
     /// Minimal `ExecutionBackend` for tests, never actually executed.
     #[derive(Clone)]
-    struct MockBackend;
+    pub(crate) struct MockBackend;
 
     impl ExecutionBackend for MockBackend {
         fn execute(
@@ -503,7 +630,7 @@ mod tests {
     }
 
     /// Build a minimal `AppState` with `llm_router = None`.
-    fn test_app_state_no_llm() -> AppState<MockBackend> {
+    pub(crate) fn test_app_state_no_llm() -> AppState<MockBackend> {
         let (event_tx, _event_rx) = EventBus::new();
         let registry_handle = AgentRegistry::spawn(event_tx.clone());
         let router_handle: TaskRouterHandle<MockBackend> =
@@ -512,7 +639,6 @@ mod tests {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -521,11 +647,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -545,7 +673,284 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         }
+    }
+
+    /// A backend that answers one fixed text, whatever it is asked.
+    ///
+    /// Enough to check what the route does with the answer, which is the half
+    /// the schema keyword changed: the constraint itself is applied by the real
+    /// backends and covered where they are.
+    struct FixedAnswerModel {
+        answer: String,
+    }
+
+    #[async_trait::async_trait]
+    impl apollia_llm::CompletionModel for FixedAnswerModel {
+        async fn complete(
+            &self,
+            _req: apollia_llm::CompletionRequest,
+        ) -> Result<apollia_llm::CompletionResponse, apollia_llm::LlmError> {
+            Ok(apollia_llm::CompletionResponse {
+                content: self.answer.clone(),
+                tool_calls: Vec::new(),
+                usage: apollia_llm::TokenUsage::default(),
+                finish_reason: apollia_llm::FinishReason::Stop,
+                latency_ms: 1,
+                ttft_ms: None,
+                engine_timings: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _req: apollia_llm::CompletionRequest,
+        ) -> Result<
+            Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<apollia_llm::StreamChunk, apollia_llm::LlmError>,
+                        > + Send,
+                >,
+            >,
+            apollia_llm::LlmError,
+        > {
+            Err(apollia_llm::LlmError::InferenceError("not used".into()))
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn backend_name(&self) -> &str {
+            "fixed"
+        }
+
+        fn model_id(&self) -> &str {
+            "fixed-model"
+        }
+    }
+
+    /// An app state whose router answers `answer` on the backend `fixed`.
+    async fn state_answering(answer: &str) -> AppState<MockBackend> {
+        let state = test_app_state_no_llm();
+        let model: Arc<dyn apollia_llm::CompletionModel> = Arc::new(FixedAnswerModel {
+            answer: answer.to_owned(),
+        });
+        let mut backends = std::collections::HashMap::new();
+        backends.insert("fixed".to_owned(), model);
+        *state.llm_router.write().await =
+            Some(Arc::new(LlmRouter::with_backends(backends, "fixed")));
+        state
+    }
+
+    /// Send one `POST /api/v1/llm/chat` and read back its status and body.
+    async fn post_chat(
+        state: AppState<MockBackend>,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let app_router = llm_routes::<MockBackend>().with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/llm/chat")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
+            .expect("build request");
+        let resp = app_router.oneshot(req).await.expect("request failed");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_schema_on_chat_comes_back_as_a_validated_value() {
+        // GIVEN a backend answering the object a caller asked for, and the
+        // schema that answer has to satisfy. The route used to drop the schema
+        // on the floor: it was not a field of its request type, so serde
+        // discarded it and the caller validated an answer nobody constrained.
+        let state = state_answering("{\"title\": \"Facture\", \"count\": 3}").await;
+
+        // WHEN the schema travels with the prompt
+        let (status, json) = post_chat(
+            state,
+            serde_json::json!({
+                "prompt": "le titre et le nombre de lignes",
+                "backend": "fixed",
+                "schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}, "count": {"type": "integer"}},
+                    "required": ["title", "count"]
+                }
+            }),
+        )
+        .await;
+
+        // THEN the caller gets the validated value, not a string to parse
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["value"]["title"], "Facture");
+        assert_eq!(json["value"]["count"], 3);
+    }
+
+    #[tokio::test]
+    async fn a_reasoning_prefix_no_longer_makes_a_constrained_answer_unreadable() {
+        // GIVEN a reasoning model whose thinking is inlined ahead of the value,
+        // which is what a server with no template-aware parser hands back
+        let state =
+            state_answering("<think>the user wants a label</think>{\"title\": \"Facture\"}").await;
+
+        // WHEN the same constrained call is made
+        let (status, json) = post_chat(
+            state,
+            serde_json::json!({
+                "prompt": "le titre",
+                "backend": "fixed",
+                "schema": {"type": "object", "properties": {"title": {"type": "string"}}}
+            }),
+        )
+        .await;
+
+        // THEN the value is read, where the caller used to get "the answer is
+        // not JSON" over text the model never meant as its answer
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["value"]["title"], "Facture");
+    }
+
+    #[tokio::test]
+    async fn an_answer_the_schema_refuses_is_a_422_naming_the_path() {
+        // GIVEN an answer that is JSON but misses a required property
+        let state = state_answering("{\"title\": \"Facture\"}").await;
+
+        // WHEN it is checked against the schema that was asked for
+        let (status, json) = post_chat(
+            state,
+            serde_json::json!({
+                "prompt": "le titre et le nombre de lignes",
+                "backend": "fixed",
+                "schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}, "count": {"type": "integer"}},
+                    "required": ["title", "count"]
+                }
+            }),
+        )
+        .await;
+
+        // THEN the caller gets the field it has to branch on, and a status that
+        // says the request is the thing to fix rather than the backend
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(json["path"], "$.count");
+    }
+
+    /// A local backend whose load guardrail refuses its model, as the local
+    /// engine backend reports it.
+    struct RefusedLoadModel;
+
+    #[async_trait::async_trait]
+    impl apollia_llm::CompletionModel for RefusedLoadModel {
+        async fn complete(
+            &self,
+            _req: apollia_llm::CompletionRequest,
+        ) -> Result<apollia_llm::CompletionResponse, apollia_llm::LlmError> {
+            Err(apollia_llm::LlmError::LoadRefused {
+                backend: "local".to_owned(),
+                model: "/models/big.gguf".to_owned(),
+                level: "strict".to_owned(),
+                estimated_gb: 18.3,
+                budget_gb: 12.0,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _req: apollia_llm::CompletionRequest,
+        ) -> Result<
+            Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<apollia_llm::StreamChunk, apollia_llm::LlmError>,
+                        > + Send,
+                >,
+            >,
+            apollia_llm::LlmError,
+        > {
+            Err(apollia_llm::LlmError::InferenceError("not used".into()))
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn backend_name(&self) -> &str {
+            "local"
+        }
+
+        fn model_id(&self) -> &str {
+            "big"
+        }
+    }
+
+    #[tokio::test]
+    async fn a_load_the_guardrail_refuses_answers_its_typed_body() {
+        // GIVEN a router whose local backend is refused by the load guardrail
+        let state = test_app_state_no_llm();
+        let model: Arc<dyn apollia_llm::CompletionModel> = Arc::new(RefusedLoadModel);
+        let mut backends = std::collections::HashMap::new();
+        backends.insert("local".to_owned(), model);
+        *state.llm_router.write().await =
+            Some(Arc::new(LlmRouter::with_backends(backends, "local")));
+
+        // WHEN a chat call reaches it
+        let (status, json) = post_chat(
+            state,
+            serde_json::json!({"prompt": "bonjour", "backend": "local"}),
+        )
+        .await;
+
+        // THEN the answer is the guardrail body: its code, its level, the
+        // estimate and the budget, for an interface to word in French or in
+        // English, beside the English sentence
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["code"], "guardrail_refused");
+        assert_eq!(json["model"], "/models/big.gguf");
+        assert_eq!(json["level"], "strict");
+        assert_eq!(json["estimatedGb"], 18.3);
+        assert_eq!(json["budgetGb"], 12.0);
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("18.3 GB")),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_free_form_call_carries_no_value_key_at_all() {
+        // GIVEN a call that asks for no schema
+        let state = state_answering("une phrase libre").await;
+
+        // WHEN it is made
+        let (status, json) = post_chat(
+            state,
+            serde_json::json!({"prompt": "bonjour", "backend": "fixed"}),
+        )
+        .await;
+
+        // THEN nothing about the response changed, so an existing caller reads
+        // exactly what it read before
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["content"], "une phrase libre");
+        assert!(json.get("value").is_none());
     }
 
     // GIVEN an AppState with llm_router = None
@@ -746,12 +1151,19 @@ mod tests {
 
     // ── CRUD backend tests ────────────────────────────────────────────────
 
-    /// Build a test `AppState` with a real in-memory `LlmBackendRepository`.
+    /// Build a test `AppState` with a real in-memory `LlmBackendRepository`
+    /// and a file secret store inside `dir`, never the operator's keychain.
     fn test_app_state_with_repo(dir: &tempfile::TempDir) -> AppState<MockBackend> {
         let db_path = dir.path().join("system.db");
         let repo = LlmBackendRepository::open(&db_path).expect("open system.db");
         let mut state = test_app_state_no_llm();
         state.llm_backend_repo = Some(Arc::new(std::sync::Mutex::new(repo)));
+        let secrets = dir.path().join("secrets");
+        state.secret_store = Arc::new(move || {
+            apollia_auth::AgeFileSecretStore::new(secrets.clone(), "test-passphrase".into())
+                .map(|s| Box::new(s) as Box<dyn apollia_auth::SecretStore>)
+                .map_err(|e| e.to_string())
+        });
         state
     }
 
@@ -783,8 +1195,8 @@ mod tests {
             .unwrap();
             repo.save(&LlmBackendConfig {
                 name: "beta".into(),
-                provider: apollia_core::LlmProvider::Mistral,
-                model: "mistral-small-latest".into(),
+                provider: apollia_core::LlmProvider::Ollama,
+                model: "qwen3:8b".into(),
                 config_json: serde_json::json!({}),
                 enabled: true,
                 is_default: false,
@@ -807,14 +1219,15 @@ mod tests {
         assert_eq!(backends.len(), 2);
     }
 
-    // GIVEN a runtime without "test-backend"
-    // WHEN POST /api/v1/llm/backends with valid body
-    // THEN 201 + backend is in the list
+    // GIVEN a runtime without "test-backend", its secret store a throwaway file store
+    // WHEN POST /api/v1/llm/backends with valid body and a key in clear
+    // THEN 201, and the key sits in the store the state holds
     #[tokio::test]
     async fn test_create_persists_new_backend() {
         // GIVEN
         let dir = tempfile::tempdir().unwrap();
         let state = test_app_state_with_repo(&dir);
+        let state_store = Arc::clone(&state.secret_store);
         let app_router = llm_routes::<MockBackend>().with_state(state);
 
         // WHEN
@@ -839,6 +1252,11 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["name"], "test-backend");
         assert_eq!(json["provider"], "openai");
+        let stored = (state_store)()
+            .unwrap()
+            .get(crate::backend_keys::BACKEND_SECRET_SERVICE, "test-backend")
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("sk-test"));
     }
 
     // GIVEN backend "a" marked is_default=true
@@ -964,5 +1382,24 @@ mod tests {
             cell.read().await.is_some(),
             "a failed reload must not drop the previously-loaded router"
         );
+    }
+
+    #[tokio::test]
+    async fn test_the_cost_alert_threshold_route_is_withdrawn() {
+        // GIVEN a runtime serving a router; no setting gives it a cost alert
+        // threshold any more
+        let state = test_app_state_no_llm();
+        *state.llm_router.write().await = Some(Arc::new(LlmRouter::empty()));
+
+        // WHEN the former threshold route is asked
+        let app_router = llm_routes::<MockBackend>().with_state(state);
+        let req = Request::builder()
+            .uri("/api/v1/llm/cost-alert-threshold")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app_router.oneshot(req).await.unwrap();
+
+        // THEN no route answers it
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -9,28 +9,31 @@
  *
  * Usage:
  *   const rewriter = new InputRewriter();
- *   const workContext = await fetchWorkContext();
+ *   const workContext = await fetchConversationWorkContext(sessionId);
  *   const outcome = await rewriter.rewrite(currentText, workContext);
  *   const original = rewriter.restoreOriginal();
  *   rewriter.reset(); // when field cleared
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import type { UserProfileView } from '$lib/types';
+import { getChatSession } from '$lib/ipc/chat';
+import { DEFAULT_PROFILE, getProfileById, type ProfileDetailView } from '$lib/ipc/profile';
 
 export type RewriteState = 'idle' | 'rewriting' | 'error';
 
 /**
- * Work context extracted from user profile's Work section.
+ * Work context read from the profile of the conversation: its role, its
+ * function and its tools.
  * Mirrors Rust `WorkContext` struct in `apollia-llm/src/meta/rewrite_input.rs`.
  */
 export interface WorkContext {
-	sector?: string | null;
-	teamSize?: string | null;
-	techStack?: string | null;
-	dailyTools?: string | null;
-	integrations?: string | null;
+	role?: string | null;
+	function?: string | null;
+	tools?: string | null;
 }
+
+/** The profile fields the rewrite takes, by the key the schema gives them. */
+const WORK_CONTEXT_KEYS = ['role', 'function', 'tools'] as const;
 
 interface RewriteInputRequest {
 	originalText: string;
@@ -40,8 +43,8 @@ interface RewriteInputRequest {
 /**
  * Why no rewrite happened.
  *
- * Mirrors `RewriteFallbackIpc` in
- * `crates/apollia-desktop/src/commands/meta_rewrite.rs`. Only the first two
+ * Mirrors `RewriteFallbackReason` in
+ * `crates/apollia-runtime/src/chat_assists.rs`. Only the first two
  * mean the operator has no engine to configure; the last two mean the engine
  * answered, and telling them to go set one up would be false.
  */
@@ -152,47 +155,48 @@ export class InputRewriter {
 }
 
 /**
- * Fetch Work context from user profile.
+ * Fetch the work context of a conversation from its profile.
  *
- * Reads the user's profile via get_profile and extracts the Work section fields
- * (domain.sector, domain.team_size, tech.stack, tools.daily, tech.integrations).
+ * Reads the profile the conversation designates, or the default profile when
+ * it designates none or when the designated profile no longer exists, and
+ * keeps its role, its function and its tools.
  *
- * @returns WorkContext with filled fields from profile, or null if profile fetch fails
+ * @param profileId profile the conversation designates, if any
+ * @returns WorkContext with the filled fields, or null when none is filled or
+ *          no profile can be read
  */
-export async function fetchWorkContext(): Promise<WorkContext | null> {
+export async function fetchWorkContext(profileId?: string | null): Promise<WorkContext | null> {
+	let profile: ProfileDetailView;
 	try {
-		const profile = await invoke<UserProfileView>('get_profile');
-		const workContext: WorkContext = {};
-
-		// Extract Work section fields from profile entries
-		for (const entry of profile.entries) {
-			if (entry.key === 'domain.sector' && entry.value.trim()) {
-				workContext.sector = entry.value;
-			} else if (entry.key === 'domain.team_size' && entry.value.trim()) {
-				workContext.teamSize = entry.value;
-			} else if (entry.key === 'tech.stack' && entry.value.trim()) {
-				workContext.techStack = entry.value;
-			} else if (entry.key === 'tools.daily' && entry.value.trim()) {
-				workContext.dailyTools = entry.value;
-			} else if (entry.key === 'tech.integrations' && entry.value.trim()) {
-				workContext.integrations = entry.value;
-			}
-		}
-
-		// Return null if all fields are empty
-		if (
-			!workContext.sector &&
-			!workContext.teamSize &&
-			!workContext.techStack &&
-			!workContext.dailyTools &&
-			!workContext.integrations
-		) {
+		profile = await getProfileById(profileId || DEFAULT_PROFILE);
+	} catch {
+		if (!profileId) return null;
+		try {
+			profile = await getProfileById(DEFAULT_PROFILE);
+		} catch {
 			return null;
 		}
-
-		return workContext;
-	} catch {
-		// Profile fetch failed, return null
-		return null;
 	}
+
+	const workContext: WorkContext = {};
+	for (const key of WORK_CONTEXT_KEYS) {
+		const value = profile.fields.find((field) => field.key === key)?.value.trim();
+		if (value) workContext[key] = value;
+	}
+	return Object.keys(workContext).length > 0 ? workContext : null;
+}
+
+/**
+ * Fetch the work context of the conversation `sessionId`, read from the
+ * profile that conversation designates at the moment of the rewrite. A
+ * conversation that cannot be read falls back to the default profile.
+ */
+export async function fetchConversationWorkContext(sessionId: string): Promise<WorkContext | null> {
+	let profileId: string | null = null;
+	try {
+		profileId = (await getChatSession(sessionId)).profile_id ?? null;
+	} catch {
+		profileId = null;
+	}
+	return fetchWorkContext(profileId);
 }

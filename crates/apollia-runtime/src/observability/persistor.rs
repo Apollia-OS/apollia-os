@@ -136,8 +136,8 @@ impl EventPersistor {
     /// Delete every row strictly older than `cutoff_unix`.
     ///
     /// Scoped to `runtime_events` by construction: this actor owns the only
-    /// connection to `runtime_events.db` and opens nothing else. The audit trail
-    /// and the signed audit journal live in separate databases and are never
+    /// connection to `runtime_events.db` and opens nothing else. The signed
+    /// audit journal lives in a separate database and is never
     /// reachable from here, which matters because the journal is a hash chain
     /// that `audit verify` walks: deleting a link would break verification for
     /// every entry after it.
@@ -258,10 +258,9 @@ impl EventPersistorHandle {
     /// at `INFO`: a deletion the operator did not watch happen should still be
     /// findable afterwards.
     ///
-    /// Only `runtime_events.db` is affected. The audit trail and the signed
-    /// audit journal are separate databases with their own lifecycle, and the
-    /// journal in particular is a hash chain that `audit verify` walks end to
-    /// end, so it is never purged on a timer.
+    /// Only `runtime_events.db` is affected. The signed audit journal is a
+    /// separate database with its own lifecycle: it is a hash chain that
+    /// `audit verify` walks end to end, so it is never purged on a timer.
     ///
     /// # Errors
     ///
@@ -312,12 +311,13 @@ impl EventPersistorHandle {
 pub fn spawn_runtime_events_subscriber(
     handle: EventPersistorHandle,
     event_bus: &EventBusSender,
-    obs_config: ObservabilityConfig,
+    obs_config: impl Into<crate::config_reload::Live<ObservabilityConfig>>,
 ) -> tokio::task::JoinHandle<()> {
+    let obs_config = obs_config.into();
     let mut rx = subscribe_resilient(event_bus, "observability.runtime_events");
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            if let Some(record) = event_to_record(event, &obs_config) {
+            if let Some(record) = event_to_record(event, &obs_config.get()) {
                 handle.append(record);
             }
         }
@@ -374,6 +374,28 @@ fn event_to_record(event: RuntimeEvent, obs: &ObservabilityConfig) -> Option<Run
                 created_at_unix: now_unix,
             })
         }
+
+        RuntimeEvent::ProfileRead {
+            task_id: Some(task_id),
+            agent_id,
+            profile_id,
+            read_at,
+        } => Some(RuntimeEventRecord {
+            event_id: uuid::Uuid::now_v7().to_string(),
+            task_id: task_id.to_string(),
+            agent_id: agent_id.to_string(),
+            parent_event_id: None,
+            correlation_id: None,
+            step_num: None,
+            kind: "profile_read".to_string(),
+            payload_json: serde_json::json!({
+                "profile_id": profile_id,
+                "read_at": read_at,
+            })
+            .to_string(),
+            ts: now_iso,
+            created_at_unix: now_unix,
+        }),
 
         RuntimeEvent::Thought {
             task_id,
@@ -688,6 +710,9 @@ mod tests {
             tool_name: "web_search".into(),
             args_json: Some("{\"query\":\"hello\"}".into()),
             run_id: None,
+            tool_call_id: None,
+            family: None,
+            target: None,
         })
         .expect("bus send started");
 
@@ -701,6 +726,9 @@ mod tests {
             duration_ms: 412,
             success: true,
             run_id: None,
+            tool_call_id: None,
+            family: None,
+            target: None,
         })
         .expect("bus send completed");
 
@@ -860,6 +888,39 @@ mod tests {
         assert!(rows[0].payload_json.contains("\"level\":\"warn\""));
     }
 
+    #[tokio::test]
+    async fn a_profile_read_shows_in_the_trace_of_its_task() {
+        // GIVEN a read of the profile inside a task and one outside any task
+        let events = vec![
+            RuntimeEvent::ProfileRead {
+                task_id: Some("task-profile".into()),
+                agent_id: "cours".into(),
+                profile_id: "profile-formateur".into(),
+                read_at: "2026-10-03T09:00:00Z".into(),
+            },
+            RuntimeEvent::ProfileRead {
+                task_id: None,
+                agent_id: "cours".into(),
+                profile_id: "profile-formateur".into(),
+                read_at: "2026-10-03T09:00:01Z".into(),
+            },
+        ];
+
+        // WHEN both reach the persistor
+        let rows = rows_for(ObservabilityConfig::default(), "task-profile", events).await;
+
+        // THEN the task's trace holds one profile read naming the agent, the profile and the time
+        let reads: Vec<_> = rows.iter().filter(|r| r.kind == "profile_read").collect();
+        assert_eq!(reads.len(), 1, "{rows:?}");
+        assert_eq!(reads[0].agent_id, "cours");
+        assert!(reads[0]
+            .payload_json
+            .contains("\"profile_id\":\"profile-formateur\""));
+        assert!(reads[0]
+            .payload_json
+            .contains("\"read_at\":\"2026-10-03T09:00:00Z\""));
+    }
+
     // ── Capture switches ──────────────────────────────────────────────────
     //
     // One test per switch of `[observability]`. Each proves the same thing:
@@ -949,6 +1010,9 @@ mod tests {
                 tool_name: "file_read".into(),
                 args_json: Some("{\"path\":\"/SECRET_ARG\"}".into()),
                 run_id: None,
+                tool_call_id: None,
+                family: None,
+                target: None,
             },
             RuntimeEvent::ToolCallCompleted {
                 parent_event_id: started_id,
@@ -960,6 +1024,9 @@ mod tests {
                 duration_ms: 5,
                 success: true,
                 run_id: None,
+                tool_call_id: None,
+                family: None,
+                target: None,
             },
         ]
     }

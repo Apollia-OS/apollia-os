@@ -10,22 +10,35 @@ impl ChatSessionManager {
         &mut self,
         session_id: &str,
         content: &str,
+        images: Vec<apollia_llm::message_image::MessageImage>,
+        documents: Option<crate::chat::documents::MessageDocuments>,
     ) -> Result<MessageId, ChatError> {
-        let session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or_else(|| ChatError::SessionNotFound(session_id.to_string()))?;
+        {
+            let session = self
+                .sessions
+                .get(session_id)
+                .ok_or_else(|| ChatError::SessionNotFound(session_id.to_string()))?;
 
-        if session.status == SessionStatus::Closed {
-            return Err(ChatError::SessionClosed(session_id.to_string()));
+            if session.status == SessionStatus::Closed {
+                return Err(ChatError::SessionClosed(session_id.to_string()));
+            }
+
+            if session.status == SessionStatus::Processing {
+                return Err(ChatError::SessionBusy(session_id.to_string()));
+            }
         }
-
-        if session.status == SessionStatus::Processing {
-            return Err(ChatError::SessionBusy(session_id.to_string()));
+        if !images.is_empty() {
+            self.check_images_readable(session_id, &images)?;
         }
 
         let message_id = uuid::Uuid::new_v4().to_string();
         let now = now_rfc3339();
+
+        let mut metadata = self.store_message_images(session_id, &message_id, &images)?;
+        if let Some(documents) = &documents {
+            documents.write_into(&mut metadata);
+        }
+        let metadata_json = metadata.as_ref().map(serde_json::Value::to_string);
 
         // Persist message to SQLite
         let seq = self.repository.append_message(&AppendMessageParams {
@@ -36,8 +49,13 @@ impl ChatSessionManager {
             tool_calls_json: None,
             tool_name: None,
             created_at: &now,
-            metadata: None,
+            metadata: metadata_json.as_deref(),
         })?;
+
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| ChatError::SessionNotFound(session_id.to_string()))?;
 
         // Add to in-memory history
         let msg = ChatMessage {
@@ -48,7 +66,7 @@ impl ChatSessionManager {
             tool_name: None,
             created_at: now.clone(),
             seq,
-            metadata: None,
+            metadata,
         };
         session.history.push(msg);
 
@@ -60,6 +78,7 @@ impl ChatSessionManager {
             message_id: message_id.clone(),
             started_at: now,
             run_id: run_id.clone(),
+            answer_id: Some(uuid::Uuid::new_v4().to_string()),
         });
         if let Err(e) = self
             .repository
@@ -83,8 +102,14 @@ impl ChatSessionManager {
 
         // The agent path clones the full session, which already carries `run_id`
         // in `active_exchange`; only the Libre path needs it threaded explicitly.
-        let dispatch = if session.mode == ChatMode::Libre || session.mode == ChatMode::Companion {
-            self.dispatch_libre_exchange(session_id, &message_id, content, &run_id)
+        // A declarative agent runs through the agent executor, as the free
+        // chat does; an agent that runs code goes to the agent runner.
+        let declarative = self.declarative_session_agent(session);
+        let dispatch = if session.mode == ChatMode::Libre
+            || session.mode == ChatMode::Companion
+            || declarative.is_some()
+        {
+            self.dispatch_libre_exchange(session_id, &message_id, content, &run_id, declarative)
         } else {
             self.dispatch_agent_exchange(session_id, &message_id, content)
         };
@@ -156,7 +181,8 @@ impl ChatSessionManager {
             session.history.retain(|m| m.seq <= user_seq);
         }
 
-        self.rerun_turn(session_id, &user_id, &user_content)
+        let answer_id = uuid::Uuid::new_v4().to_string();
+        self.rerun_turn(session_id, &user_id, &user_content, answer_id)
     }
 
     /// Replace a user message and re-run from it (truncate-in-place).
@@ -202,7 +228,7 @@ impl ChatSessionManager {
             session.history.retain(|m| m.seq < seq);
         }
 
-        self.handle_send_message(session_id, content)
+        self.handle_send_message(session_id, content, Vec::new(), None)
     }
 
     /// Re-run a turn on the existing history without appending a new user
@@ -213,12 +239,15 @@ impl ChatSessionManager {
     /// `user_message_id`. Mirrors the dispatch half of
     /// [`handle_send_message`](Self::handle_send_message) (fresh run_id,
     /// Processing status, fresh pause token created inside the dispatch) but
-    /// reuses the already-persisted user turn as the prompt.
-    fn rerun_turn(
+    /// reuses the already-persisted user turn as the prompt. The answer is
+    /// persisted under `answer_id`: a fresh one for a regenerated answer, the
+    /// one of the answer being continued otherwise.
+    pub(in crate::chat::manager) fn rerun_turn(
         &mut self,
         session_id: &str,
         user_message_id: &str,
         user_content: &str,
+        answer_id: String,
     ) -> Result<(), ChatError> {
         let now = now_rfc3339();
         let run_id = RunId::new();
@@ -232,6 +261,7 @@ impl ChatSessionManager {
                 message_id: user_message_id.to_string(),
                 started_at: now,
                 run_id: run_id.clone(),
+                answer_id: Some(answer_id),
             });
         }
         if let Err(e) = self
@@ -245,8 +275,18 @@ impl ChatSessionManager {
             .sessions
             .get(session_id)
             .ok_or_else(|| ChatError::InternalError("session vanished".into()))?;
-        let dispatch = if session.mode == ChatMode::Libre || session.mode == ChatMode::Companion {
-            self.dispatch_libre_exchange(session_id, user_message_id, user_content, &run_id)
+        let declarative = self.declarative_session_agent(session);
+        let dispatch = if session.mode == ChatMode::Libre
+            || session.mode == ChatMode::Companion
+            || declarative.is_some()
+        {
+            self.dispatch_libre_exchange(
+                session_id,
+                user_message_id,
+                user_content,
+                &run_id,
+                declarative,
+            )
         } else {
             self.dispatch_agent_exchange(session_id, user_message_id, user_content)
         };

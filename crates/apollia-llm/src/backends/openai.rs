@@ -31,7 +31,7 @@ mod stream;
 
 use convert::{
     build_messages, build_tools, estimate_cost_usd, map_finish_reason, map_openai_error,
-    with_structured_output,
+    with_sampling_extensions, with_structured_output,
 };
 use reasoning::{constrained_content, inline_reasoning, ReasoningEnvelope, WithTimings};
 use stream::{next_openai_stream_item, OpenAIStreamState};
@@ -101,6 +101,60 @@ impl ApiBackendConfig {
     }
 }
 
+/// Narrow a seed onto the signed range the OpenAI protocol declares.
+///
+/// The wire field is a signed integer and [`CompletionRequest::seed`] is
+/// unsigned, so a seed above `i64::MAX` has no wire spelling. Keeping the low 63
+/// bits is total and injective on everything below that bound, which is every
+/// seed a caller writes by hand, and it never maps two usable seeds onto one.
+/// Clamping would have done exactly that.
+fn narrow_seed(seed: u64) -> i64 {
+    (seed & (i64::MAX as u64)) as i64
+}
+
+/// Build the request common to the completion and the streaming path.
+///
+/// Both carry the same messages, tools and sampling settings; only the stream
+/// options and the structured-output transport differ, and those are applied by
+/// the caller. Shared so a sampling field cannot be honoured on one path and
+/// dropped on the other, which is how `seed` came to reach neither.
+fn sampling_builder(
+    req: &CompletionRequest,
+    model: &str,
+) -> Result<CreateChatCompletionRequestArgs, LlmError> {
+    let messages = build_messages(&req.messages)?;
+    let tools = build_tools(&req.tools);
+
+    let mut builder = CreateChatCompletionRequestArgs::default();
+    builder.model(model).messages(messages);
+
+    if !tools.is_empty() {
+        builder.tools(tools);
+    }
+    if let Some(temp) = req.temperature {
+        builder.temperature(temp);
+    }
+    if let Some(max_tokens) = req.max_tokens {
+        builder.max_tokens(max_tokens);
+    }
+    if let Some(seed) = req.seed {
+        builder.seed(narrow_seed(seed));
+    }
+    if let Some(top_p) = req.top_p {
+        builder.top_p(top_p);
+    }
+    if let Some(penalty) = req.presence_penalty {
+        builder.presence_penalty(penalty);
+    }
+    if let Some(penalty) = req.frequency_penalty {
+        builder.frequency_penalty(penalty);
+    }
+    if let Some(stop) = req.stop.as_ref().filter(|stop| !stop.is_empty()) {
+        builder.stop(stop.clone());
+    }
+    Ok(builder)
+}
+
 /// HTTP client for any OpenAI-compatible backend.
 ///
 /// Built via [`OpenAICompatibleClient::new`] with an [`ApiBackendConfig`] and a
@@ -118,6 +172,46 @@ pub struct OpenAICompatibleClient {
     retry_policy: RetryPolicy,
     /// Session cancellation token: `cancel()` interrupts in-flight calls and delays.
     cancel: CancellationToken,
+    /// Fields added to every request body, for a setting of the server the
+    /// OpenAI protocol does not carry. Empty for every backend but a declared
+    /// server that was given some.
+    extra_params: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Add `extra` to a request body, leaving alone every field the body already
+/// carries: what the request fixed, per agent or per preset, wins over what
+/// the server was declared with.
+fn with_extra_params(
+    mut body: serde_json::Value,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(map) = body.as_object_mut() {
+        for (field, value) in extra {
+            if !map.contains_key(field) {
+                map.insert(field.clone(), value.clone());
+            }
+        }
+    }
+    body
+}
+
+/// How long a server error is retried before it is reported.
+///
+/// The client retries every 5xx, and its default policy keeps at it for
+/// fifteen minutes: an engine that refuses a request for its shape (a chat
+/// template rejecting the conversation answers 500 every time) then held a
+/// batch item that long. One minute covers an engine that is briefly busy.
+/// See `docs/site/docs/architecture/08-decisions.md#llm-retry`.
+pub(crate) const SERVER_ERROR_RETRY_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// The retry policy handed to the HTTP client, bounded by
+/// [`SERVER_ERROR_RETRY_BUDGET`].
+fn server_error_backoff() -> backoff::ExponentialBackoff {
+    backoff::ExponentialBackoff {
+        max_elapsed_time: Some(SERVER_ERROR_RETRY_BUDGET),
+        ..backoff::ExponentialBackoff::default()
+    }
 }
 
 impl OpenAICompatibleClient {
@@ -154,13 +248,28 @@ impl OpenAICompatibleClient {
             .with_api_key(api_key)
             .with_api_base(config.api_url.clone());
         Self {
-            client: Client::with_config(openai_config).with_http_client(
-                crate::http_client::build_llm_http_client(idle_timeout, &config.api_url),
-            ),
+            client: Client::with_config(openai_config)
+                .with_http_client(crate::http_client::build_llm_http_client(
+                    idle_timeout,
+                    &config.api_url,
+                ))
+                .with_backoff(server_error_backoff()),
             config: config.clone(),
             retry_policy: RetryPolicy::default(),
             cancel,
+            extra_params: serde_json::Map::new(),
         }
+    }
+
+    /// Add `extra_params` to every request this client sends. A field a
+    /// request already carries is left as the request set it.
+    #[must_use]
+    pub fn with_extra_params(
+        mut self,
+        extra_params: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.extra_params = extra_params;
+        self
     }
     /// Make a single call to the OpenAI-compatible API without retry.
     ///
@@ -177,28 +286,18 @@ impl OpenAICompatibleClient {
             .unwrap_or(&self.config.model)
             .to_owned();
 
-        let messages = build_messages(&req.messages)?;
-        let tools = build_tools(&req.tools);
-
-        let mut builder = CreateChatCompletionRequestArgs::default();
-        builder.model(&model).messages(messages);
-
-        if !tools.is_empty() {
-            builder.tools(tools);
-        }
-        if let Some(temp) = req.temperature {
-            builder.temperature(temp);
-        }
-        if let Some(max_tokens) = req.max_tokens {
-            builder.max_tokens(max_tokens);
-        }
-
-        let request = builder
+        let request = sampling_builder(&req, &model)?
             .build()
             .map_err(|e| LlmError::InferenceError(format!("build request: {e}")))?;
         // A structured-output constraint is applied here, on the serialized
         // body, because the grammar half has no place in the typed builder.
-        let request = with_structured_output(request, &req, self.config.llama_cpp_extensions)?;
+        let request = with_extra_params(
+            with_sampling_extensions(
+                with_structured_output(request, &req, self.config.llama_cpp_extensions)?,
+                &req,
+            ),
+            &self.extra_params,
+        );
 
         // `create_byot` rather than `create`: the crate's own response type drops
         // any field it does not declare, which discards the `timings` object the
@@ -365,21 +464,7 @@ impl CompletionModel for OpenAICompatibleClient {
             .unwrap_or(&self.config.model)
             .to_owned();
 
-        let messages = build_messages(&req.messages)?;
-        let tools = build_tools(&req.tools);
-
-        let mut builder = CreateChatCompletionRequestArgs::default();
-        builder.model(&model).messages(messages);
-
-        if !tools.is_empty() {
-            builder.tools(tools);
-        }
-        if let Some(temp) = req.temperature {
-            builder.temperature(temp);
-        }
-        if let Some(max_tokens) = req.max_tokens {
-            builder.max_tokens(max_tokens);
-        }
+        let mut builder = sampling_builder(&req, &model)?;
         // Ask the server for a terminal usage chunk so token accounting is not
         // lost on the streaming path. OpenAI-compatible servers (including the
         // embedded llama-server) append a final chunk with empty `choices` and a
@@ -394,7 +479,13 @@ impl CompletionModel for OpenAICompatibleClient {
         // `create_stream` sets this itself; `create_stream_byot` does not, and a
         // request without it would come back as a single non-streamed body.
         request.stream = Some(true);
-        let request = with_structured_output(request, &req, self.config.llama_cpp_extensions)?;
+        let request = with_extra_params(
+            with_sampling_extensions(
+                with_structured_output(request, &req, self.config.llama_cpp_extensions)?,
+                &req,
+            ),
+            &self.extra_params,
+        );
 
         // See `do_complete`: byot recovers the `timings` object that the crate's
         // declared chunk type would drop. The engine attaches it to the final
@@ -459,7 +550,9 @@ impl CompletionModel for OpenAICompatibleClient {
             pending: HashMap::new(),
             model,
             pending_timings: None,
+            pending_usage: None,
             in_think: false,
+            finish: None,
         };
 
         let mapped = futures::stream::unfold(state, next_openai_stream_item);
@@ -469,6 +562,13 @@ impl CompletionModel for OpenAICompatibleClient {
 
     /// Return `true`: the client is configured and ready to send requests.
     fn is_available(&self) -> bool {
+        true
+    }
+
+    /// Return `true`: `seed` is a field of the OpenAI chat protocol, and it is
+    /// written into every request that carries one. The embedded llama-server
+    /// reads it too, which is what makes a local call replayable.
+    fn carries_seed(&self) -> bool {
         true
     }
 
@@ -501,7 +601,221 @@ mod tests {
     use super::convert::{GPT_4O_MINI_COMPLETION_RATE, GPT_4O_MINI_PROMPT_RATE};
     use super::stream::next_emittable_text;
     use super::*;
+
+    #[test]
+    fn test_a_server_error_is_retried_for_one_minute_at_most() {
+        // GIVEN the retry policy the client is built with
+        let policy = server_error_backoff();
+
+        // WHEN its total budget is read
+        let budget = policy.max_elapsed_time;
+
+        // THEN it is bounded, and to one minute rather than the client's
+        // default fifteen
+        assert_eq!(budget, Some(std::time::Duration::from_secs(60)));
+    }
     use crate::types::FinishReason;
+
+    /// Build the body both transport paths send, from a bare request.
+    fn built_body(req: &CompletionRequest) -> serde_json::Value {
+        let request = sampling_builder(req, "test-model")
+            .expect("a buildable request")
+            .build()
+            .expect("a buildable request");
+        serde_json::to_value(request).expect("a serializable request")
+    }
+
+    /// Build the body the client sends, structured-output transport and
+    /// sampling extensions included, for a plain or a llama-server backend.
+    fn sent_body(req: &CompletionRequest, llama_cpp_extensions: bool) -> serde_json::Value {
+        let request = sampling_builder(req, "test-model")
+            .expect("a buildable request")
+            .build()
+            .expect("a buildable request");
+        with_sampling_extensions(
+            with_structured_output(request, req, llama_cpp_extensions)
+                .expect("a serializable request"),
+            req,
+        )
+    }
+
+    const SAMPLING_FIELDS: [&str; 7] = [
+        "top_p",
+        "top_k",
+        "min_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "repeat_penalty",
+        "stop",
+    ];
+
+    fn fully_tuned_request() -> CompletionRequest {
+        CompletionRequest {
+            messages: vec![crate::types::ChatMessage::user("hello")],
+            top_p: Some(0.5),
+            top_k: Some(40),
+            min_p: Some(0.25),
+            presence_penalty: Some(0.75),
+            frequency_penalty: Some(-0.5),
+            repeat_penalty: Some(1.125),
+            stop: Some(vec!["</answer>".to_string(), "\n\n".to_string()]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_untuned_request_sends_no_sampling_field() {
+        // GIVEN a call that fixes none of the request sampling settings
+        let req = CompletionRequest {
+            messages: vec![crate::types::ChatMessage::user("hello")],
+            ..Default::default()
+        };
+
+        for llama in [false, true] {
+            // WHEN the body is built, for a plain server and for llama-server
+            let body = sent_body(&req, llama);
+
+            // THEN none of the seven fields is on the wire, so the engine
+            // keeps its own defaults
+            for field in SAMPLING_FIELDS {
+                assert!(
+                    body.get(field).is_none(),
+                    "{field} sent unset (llama={llama}): {body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_fixed_sampling_field_reaches_an_openai_compatible_server() {
+        // GIVEN a call that fixes all seven request sampling settings
+        let req = fully_tuned_request();
+
+        // WHEN the body is built for a plain OpenAI-compatible server
+        let body = sent_body(&req, false);
+
+        // THEN each one is present with the value the caller gave
+        assert_eq!(body["top_p"], serde_json::json!(0.5));
+        assert_eq!(body["top_k"], serde_json::json!(40));
+        assert_eq!(body["min_p"], serde_json::json!(0.25));
+        assert_eq!(body["presence_penalty"], serde_json::json!(0.75));
+        assert_eq!(body["frequency_penalty"], serde_json::json!(-0.5));
+        assert_eq!(body["repeat_penalty"], serde_json::json!(1.125));
+        assert_eq!(body["stop"], serde_json::json!(["</answer>", "\n\n"]));
+    }
+
+    #[test]
+    fn llama_server_reads_its_own_sampling_names() {
+        // GIVEN a call fixing the three settings llama-server names itself,
+        // alongside a structured-output schema
+        let mut req = fully_tuned_request();
+        req.response_schema = Some(serde_json::json!({
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"]
+        }));
+
+        // WHEN the body is built for the embedded llama-server
+        let body = sent_body(&req, true);
+
+        // THEN they travel as `min_p`, `repeat_penalty` and `top_k`, the names
+        // of its completion API, and the schema transport is unchanged
+        assert_eq!(body["min_p"], serde_json::json!(0.25));
+        assert_eq!(body["repeat_penalty"], serde_json::json!(1.125));
+        assert_eq!(body["top_k"], serde_json::json!(40));
+        assert!(body
+            .get("response_format")
+            .is_some_and(serde_json::Value::is_object));
+        assert!(body.get("grammar").is_none());
+    }
+
+    #[test]
+    fn an_empty_stop_list_sends_no_stop_field() {
+        // GIVEN a call whose stop list is present but empty
+        let req = CompletionRequest {
+            messages: vec![crate::types::ChatMessage::user("hello")],
+            stop: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        // WHEN the body is built
+        let body = sent_body(&req, false);
+
+        // THEN no stop field is sent, since the protocol wants at least one
+        assert!(body.get("stop").is_none());
+    }
+
+    #[test]
+    fn a_requested_seed_reaches_the_request_body() {
+        // GIVEN a call asking for a reproducible answer, the way
+        // `ctx.llm.complete(seed=1)` does
+        let req = CompletionRequest {
+            messages: vec![crate::types::ChatMessage::user("hello")],
+            seed: Some(1),
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+
+        // WHEN the request is built
+        let body = built_body(&req);
+
+        // THEN the seed is a field of what the server receives, where it used
+        // to be read off the request and never written
+        assert_eq!(body["seed"], serde_json::json!(1));
+        assert_eq!(body["temperature"], serde_json::json!(0.0));
+    }
+
+    #[test]
+    fn a_call_without_a_seed_sends_no_seed_field() {
+        // GIVEN an ordinary call that asks for nothing reproducible
+        let req = CompletionRequest {
+            messages: vec![crate::types::ChatMessage::user("hello")],
+            ..Default::default()
+        };
+
+        // WHEN the request is built
+        let body = built_body(&req);
+
+        // THEN the field is absent rather than sent as a null, which some
+        // OpenAI-compatible servers refuse with a 400
+        assert!(body.get("seed").is_none_or(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn a_seed_above_the_signed_range_stays_distinct_from_its_neighbours() {
+        // GIVEN two seeds past `i64::MAX`, which the wire field cannot spell
+        // WHEN they are narrowed
+        let a = narrow_seed(u64::MAX);
+        let b = narrow_seed(u64::MAX - 1);
+
+        // THEN both are representable and still tell each other apart, where
+        // clamping would have collapsed them onto one value
+        assert_ne!(a, b);
+        assert!(a >= 0 && b >= 0);
+        // AND a seed inside the range is untouched
+        assert_eq!(narrow_seed(42), 42);
+    }
+
+    #[test]
+    fn the_backend_declares_that_it_carries_a_seed() {
+        // GIVEN the OpenAI-compatible client, which every remote provider and
+        // the embedded llama-server are reached through
+        let config = ApiBackendConfig {
+            name: "probe".into(),
+            api_url: "http://127.0.0.1:1/v1".into(),
+            api_key_env: String::new(),
+            model: "test-model".into(),
+            context_window: None,
+            llama_cpp_extensions: false,
+        };
+        let client =
+            OpenAICompatibleClient::new(&config, "sk-no-key".to_owned(), CancellationToken::new());
+
+        // WHEN its capabilities are read
+        // THEN it says a seed reaches the server, so `GET /llm/status` can tell
+        // a caller which backends a seeded call means anything on
+        assert!(client.carries_seed());
+    }
 
     // GIVEN an ApiBackendConfig whose api_key_env is not set in the environment
     // WHEN resolve_api_key() is called
@@ -859,6 +1173,56 @@ mod tests {
         assert_eq!(call.arguments["path"], "/tmp/x");
     }
 
+    // ── The last chunk of a stream ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_the_text_of_the_chunk_that_carries_the_usage_is_kept() {
+        // GIVEN a stream whose last chunk carries the last tokens, the finish
+        // reason and the usage together, as vllm-mlx sends it
+        let opening =
+            stream_chunk(serde_json::json!({"content": "{\"Terms\": \"30 days end of mo"}));
+        let last: TimedStreamResponse = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "nth\"}"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 12, "total_tokens": 22},
+        }))
+        .expect("chunk must parse");
+        let inner: TimedChatStream = Box::pin(futures::stream::iter(vec![Ok(opening), Ok(last)]));
+        let state = OpenAIStreamState::Streaming {
+            inner,
+            first: None,
+            pending: HashMap::new(),
+            model: "m".into(),
+            pending_timings: None,
+            pending_usage: None,
+            in_think: false,
+            finish: None,
+        };
+
+        // WHEN the stream is read to its end
+        let chunks: Vec<StreamChunk> =
+            futures::stream::unfold(state, super::stream::next_openai_stream_item)
+                .map(|chunk| chunk.expect("a chunk"))
+                .collect()
+                .await;
+
+        // THEN the whole answer is there, and the usage still comes after it
+        let text: String = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                StreamChunk::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "{\"Terms\": \"30 days end of month\"}");
+        assert!(chunks
+            .iter()
+            .any(|chunk| matches!(chunk, StreamChunk::Usage(u) if u.completion_tokens == 12)));
+    }
+
     // ── Reasoning reported beside the content ───────────────────────────────
 
     fn stream_chunk(delta: serde_json::Value) -> TimedStreamResponse {
@@ -874,7 +1238,47 @@ mod tests {
 
     fn emit(chunk: TimedStreamResponse, in_think: &mut bool) -> Option<String> {
         let mut pending = HashMap::new();
-        next_emittable_text(&mut pending, chunk.inner, chunk.reasoning, in_think)
+        let mut finish = None;
+        next_emittable_text(
+            &mut pending,
+            chunk.inner,
+            chunk.reasoning,
+            super::stream::StreamFlags {
+                in_think,
+                finish: &mut finish,
+            },
+        )
+    }
+
+    // GIVEN the last chunk of a streamed answer, cut by the token limit
+    // WHEN it is read
+    // THEN its finish reason is kept for the stream's terminal chunk
+    #[test]
+    fn test_stream_chunk_finish_reason_is_kept() {
+        let chunk: TimedStreamResponse = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "fin"}, "finish_reason": "length"}],
+        }))
+        .expect("chunk must parse");
+        let mut pending = HashMap::new();
+        let mut in_think = false;
+        let mut finish = None;
+
+        let text = next_emittable_text(
+            &mut pending,
+            chunk.inner,
+            chunk.reasoning,
+            super::stream::StreamFlags {
+                in_think: &mut in_think,
+                finish: &mut finish,
+            },
+        );
+
+        assert_eq!(text.as_deref(), Some("fin"));
+        assert_eq!(finish, Some(FinishReason::Length));
     }
 
     // GIVEN a streamed chunk shaped like Ollama's, with the reasoning in its own

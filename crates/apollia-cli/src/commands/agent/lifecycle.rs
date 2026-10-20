@@ -14,10 +14,8 @@ pub(in crate::commands::agent) async fn run_list(
         return run_list_a2a(client, json).await;
     }
 
-    // Fetch installed agents from local DB.
-    let installed = open_repository()
-        .and_then(|repo| repo.list().ok())
-        .unwrap_or_default();
+    // The stored agents of the local store.
+    let installed = stored_agents();
 
     // Fetch runtime agents (may fail if runtime not running).
     let runtime_agents = client.list_agents().await.ok();
@@ -58,37 +56,24 @@ async fn run_list_a2a(client: &RuntimeClient, json: bool) -> i32 {
     }
 }
 
-/// `apollia-os agent start <path-or-name>`: register / re-load an agent.
+/// `apollia-os agent start <agent_id>`: make a stored agent available again.
 ///
-/// Accepts either a filesystem path to a `.py` (legacy mode for ad-hoc
-/// agents) or the **name** of an already installed agent. In the latter case
-/// we look it up in `agents.db` and forward its `install_path` to the runtime,
-/// so operators don't have to remember where every package landed inside
-/// `~/.apollia/agents/`.
+/// An agent is available as soon as it is installed and enabled; the verb
+/// brings back one that `agent stop` took out of the runtime inventory.
 pub(in crate::commands::agent) async fn run_start(
     client: &RuntimeClient,
     arg: &str,
     json: bool,
 ) -> i32 {
-    let resolved_path = if looks_like_file_path(arg) {
-        arg.to_string()
-    } else {
-        match open_repository().and_then(|r| r.get(arg).ok().flatten()) {
-            Some(entry) => entry.install_path.to_string_lossy().to_string(),
-            None => {
-                let msg = format!(
-                    "agent '{arg}' not installed (and not a file path); install it first via \
-                     `apollia-os agent install <path>` or pass a `.py` path"
-                );
-                return crate::output::emit_error(
-                    json,
-                    exit_codes::GENERAL_ERROR,
-                    &msg.to_string(),
-                );
-            }
-        }
-    };
-    match client.start_agent(&resolved_path).await {
+    if looks_like_file_path(arg) {
+        // A Python file is not an agent: an agent arrives with a package.
+        let msg = format!(
+            "{}\nAn agent is installed with its package: apollia-os package install <file.apo>",
+            file_path_hint(HintVerb::Start, arg)
+        );
+        return crate::output::emit_error(json, exit_codes::GENERAL_ERROR, &msg);
+    }
+    match client.start_agent(arg).await {
         Ok(resp) => {
             if json {
                 println!(
@@ -121,6 +106,7 @@ pub(in crate::commands::agent) const HINT_EXAMPLE_AGENT: &str = "apollia-guide";
 /// into a second failure.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::commands::agent) enum HintVerb {
+    Start,
     Stop,
     Show,
 }
@@ -128,10 +114,11 @@ pub(in crate::commands::agent) enum HintVerb {
 impl HintVerb {
     /// Every variant, so the crate's tests can check them all against the parser.
     #[cfg(test)]
-    pub(in crate::commands::agent) const ALL: [Self; 2] = [Self::Stop, Self::Show];
+    pub(in crate::commands::agent) const ALL: [Self; 3] = [Self::Start, Self::Stop, Self::Show];
 
     pub(in crate::commands::agent) fn as_str(self) -> &'static str {
         match self {
+            Self::Start => "start",
             Self::Stop => "stop",
             Self::Show => "show",
         }
@@ -184,8 +171,18 @@ pub(in crate::commands::agent) async fn run_info(
         let msg = file_path_hint(HintVerb::Show, agent_id);
         return print_compact_error_and_exit(&msg, json);
     }
+    // The definition comes from agents.db through the runtime; an agent the
+    // registry has never loaded may still have one, and a runtime agent may
+    // have none (a module started by path).
+    let definition = client.get_agent_definition(agent_id).await.ok();
     match client.get_agent(agent_id).await {
-        Ok(resp) => {
+        Ok(mut resp) => {
+            if let Some(map) = resp.as_object_mut() {
+                map.insert(
+                    "definition".into(),
+                    definition.clone().unwrap_or(serde_json::Value::Null),
+                );
+            }
             if json {
                 println!(
                     "{}",
@@ -193,6 +190,9 @@ pub(in crate::commands::agent) async fn run_info(
                 );
             } else {
                 format_agent_detail(&resp);
+                if let Some(definition) = &definition {
+                    print_definition_section(definition);
+                }
             }
             exit_codes::SUCCESS
         }
@@ -201,7 +201,7 @@ pub(in crate::commands::agent) async fn run_info(
         // repository so `apollia-os agent show` works on every installed
         // agent regardless of its runtime state.
         Err(ClientError::ServerError { status: 404, .. }) => {
-            run_info_local_fallback(agent_id, json)
+            run_info_local_fallback(agent_id, definition, json)
         }
         Err(e) => handle_error(e, json),
     }
@@ -281,12 +281,11 @@ pub(in crate::commands::agent) async fn run_messages(
 /// `apollia-os agent logs <id> [--last N] [--follow]`: display recent
 /// activity for an agent.
 ///
-/// Until a dedicated agent stderr persistence layer ships (v0.1.1+), the
-/// runtime does not expose `/api/v1/agents/:id/logs`. We fall back to the
-/// audit trail: every tool invocation attributed to `<agent_id>` is fetched
-/// from `GET /api/v1/audit?limit=…` and rendered as one timestamped line per
-/// event. This gives operators the "what did this agent do recently?" view
-/// that `agent logs` should answer.
+/// The runtime keeps no log channel per agent. The command reads the audit
+/// journal instead: the actions that name `<agent_id>` and the runs of its
+/// tasks, from `GET /api/v1/audit/journal?agents=...&nature=action`, each
+/// printed as its summary. This is the "what did this agent do recently?"
+/// view that `agent logs` answers.
 ///
 /// With `--follow`, opens the SSE stream at
 /// `GET /api/v1/agents/{id}/logs/stream` (server-side route; when absent,
@@ -310,7 +309,7 @@ pub(in crate::commands::agent) async fn run_logs(
         return run_logs_follow(client, agent_id, json).await;
     }
 
-    // Validate the agent exists before falling back to the audit trail, so a
+    // Validate the agent exists before reading the audit journal, so a
     // typo'd name reports not-found (exit 1) like the rest of the `agent`
     // family rather than silently printing "no recent activity" with exit 0.
     match client.get_agent(agent_id).await {
@@ -325,17 +324,13 @@ pub(in crate::commands::agent) async fn run_logs(
         Err(e) => return handle_error(e, json),
     }
 
-    // Fetch a generous slice of recent audit events. We cap at 500
-    // (runtime hard limit) and client-side filter on agent_id, then keep
-    // the last `last` matches. This is O(500) per call, fine for an
-    // interactive CLI; a dedicated route would be faster but is out of
-    // scope.
-    let fetch_limit = 500u32;
-    let uri = format!("/api/v1/audit?limit={fetch_limit}");
+    // The journal narrows the page to what names the agent and to the runs of
+    // its tasks, so the `last` entries asked for are the last of that agent.
+    let uri = agent_logs_uri(agent_id, last);
     let resp = match client.get(&uri).await {
         Ok(r) if r.status < 400 => r,
         Ok(r) => {
-            let msg = format!("HTTP {} from /audit: {}", r.status, r.body);
+            let msg = format!("HTTP {} from the audit journal: {}", r.status, r.body);
             return print_compact_error_and_exit(&msg, json);
         }
         Err(e) => return handle_error(e, json),
@@ -343,49 +338,48 @@ pub(in crate::commands::agent) async fn run_logs(
     let body: serde_json::Value = match serde_json::from_str(&resp.body) {
         Ok(v) => v,
         Err(e) => {
-            return print_compact_error_and_exit(&format!("invalid audit JSON: {e}"), json);
+            return print_compact_error_and_exit(&format!("invalid journal JSON: {e}"), json);
         }
     };
 
     let empty: Vec<serde_json::Value> = Vec::new();
-    let events: Vec<&serde_json::Value> = body
-        .get("events")
+    let events = body
+        .get("entries")
         .and_then(|v| v.as_array())
-        .unwrap_or(&empty)
-        .iter()
-        .filter(|e| {
-            e.get("agent_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s == agent_id)
-                .unwrap_or(false)
-        })
-        .take(last as usize)
-        .collect();
+        .unwrap_or(&empty);
 
     if json {
-        let array: Vec<serde_json::Value> = events.iter().map(|e| (*e).clone()).collect();
         let out = serde_json::json!({
             "agent_id": agent_id,
-            "events": array,
-            "source": "audit-trail (no dedicated agent log channel yet)",
+            "events": events,
+            "source": "audit journal",
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
         return exit_codes::SUCCESS;
     }
 
     if events.is_empty() {
-        println!("(no recent activity for {agent_id} in the audit trail)");
+        println!("(no recent activity for {agent_id} in the audit journal)");
         return exit_codes::SUCCESS;
     }
 
     println!(
-        "  Recent audit events for {agent_id} ({} of last {fetch_limit}):",
+        "  Recent actions of {agent_id} in the audit journal ({}):",
         events.len()
     );
-    for e in &events {
-        print_audit_event_row(e);
+    for e in events {
+        println!("  {}", crate::commands::audit::journal_summary_line(e));
     }
     exit_codes::SUCCESS
+}
+
+/// The page of the audit journal `agent logs` reads: the last `last` actions
+/// that name `agent_id` or belong to the runs of its tasks.
+pub(in crate::commands::agent) fn agent_logs_uri(agent_id: &str, last: u32) -> String {
+    format!(
+        "/api/v1/audit/journal?limit={last}&offset=0&agents={}&nature=action",
+        crate::commands::model::urlencode(agent_id)
+    )
 }
 
 /// `apollia-os agent logs <id> --follow`: live stream placeholder.

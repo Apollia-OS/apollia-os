@@ -1,89 +1,20 @@
-use super::display::{format_audit_event_row, trust_banner_text};
-use super::scaffold::{list_generated_files, VALID_AGENT_TYPES};
 use super::*;
-use apollia_core::AgentManifest;
 use std::path::Path;
 
-#[test]
-fn trust_banner_states_the_in_process_model() {
-    // GIVEN the install-time trust banner
-    let text = trust_banner_text();
-    // WHEN it is rendered
-    // THEN it names the core risks an operator must accept before installing
-    assert!(text.contains("in-process"));
-    assert!(text.contains("no OS sandbox"));
-    assert!(text.contains("audited"));
-}
-
-fn test_manifest(name: &str) -> AgentManifest {
-    AgentManifest {
-        format_version: 1,
+/// A stored agent named `name`, enabled.
+fn test_stored_agent(name: &str) -> StoredAgent {
+    StoredAgent {
         name: name.to_string(),
+        origin: apollia_tools::AgentOrigin::Package,
+        package: None,
         version: "0.1.0".to_string(),
-        description: format!("Test agent {name}"),
-        tools_required: vec![],
-        tools_optional: vec![],
-        supports_streaming: false,
-        supports_a2a: false,
-        memory_namespace: None,
-        shared_memory_namespaces: vec![],
-        max_concurrent_tasks: 1,
-        step_budget: None,
-        network_allowlist: None,
-        dangerous_tools_allowed: false,
-        tags: vec![],
-        skills: vec![],
-        execution_mode: "auto".to_string(),
-        supports_mailbox: false,
-        mailbox_allowlist: None,
-        system_prompt: None,
-        tools_requiring_approval: vec![],
-        llm_backend: None,
-        packages: vec![],
-        memory_config: None,
-        agent_type: None,
-        examples: vec![],
-        limitations: vec![],
-        setup_notes: None,
-        agent_class: None,
-        user_memory_write: false,
-        datasources: vec![],
-        templates: vec![],
-        secrets: vec![],
-        check_commands: vec![],
-    }
-}
-
-fn test_installed_agent(name: &str) -> InstalledAgent {
-    InstalledAgent {
-        name: name.to_string(),
-        version: "0.1.0".to_string(),
-        install_path: PathBuf::from(format!("/tmp/.apollia/agents/{name}/agent.py")),
-        source_path: PathBuf::from(format!("/tmp/{name}.py")),
-        manifest: test_manifest(name),
+        definition: serde_json::json!({
+            "id": name, "name": name, "mission": "", "defaults": {},
+        }),
         enabled: true,
         installed_at: "2026-03-17T10:00:00Z".to_string(),
         updated_at: "2026-03-17T10:00:00Z".to_string(),
     }
-}
-
-// install command output format (JSON)
-#[test]
-fn test_install_command_output() {
-    // GIVEN an InstalledAgent
-    let agent = test_installed_agent("mon-agent");
-    // WHEN formatting JSON output
-    let output = serde_json::json!({
-        "name": agent.name,
-        "version": agent.version,
-        "install_path": agent.install_path.to_string_lossy(),
-    });
-    // THEN JSON contains expected fields
-    assert_eq!(output["name"], "mon-agent");
-    assert_eq!(output["version"], "0.1.0");
-    assert!(output["install_path"]
-        .as_str()
-        .is_some_and(|p| p.contains("mon-agent")));
 }
 
 // uninstall command output format (JSON)
@@ -114,25 +45,12 @@ fn test_enable_disable_output() {
     assert_eq!(disable_output["enabled"], false);
 }
 
-// update command output format
-#[test]
-fn test_update_command_output() {
-    // GIVEN update result
-    let name = "mon-agent";
-    let version = "0.2.0";
-    // WHEN formatting JSON output
-    let output = serde_json::json!({ "name": name, "version": version });
-    // THEN JSON contains expected fields
-    assert_eq!(output["name"], "mon-agent");
-    assert_eq!(output["version"], "0.2.0");
-}
-
 // list shows installed agents merged with runtime
 #[test]
 fn test_list_shows_installed_agents() {
     // GIVEN 2 installed agents (1 enabled, 1 disabled) and runtime data
-    let installed = vec![test_installed_agent("agent-active"), {
-        let mut a = test_installed_agent("agent-disabled");
+    let installed = vec![test_stored_agent("agent-active"), {
+        let mut a = test_stored_agent("agent-disabled");
         a.enabled = false;
         a
     }];
@@ -191,7 +109,7 @@ fn test_uninstall_not_found_error() {
     // GIVEN a repository with no agents
     let repo = AgentRepository::open(Path::new(":memory:")).expect("open in-memory repo");
     // WHEN checking for a nonexistent agent
-    let result = repo.get("inexistant").expect("get should not error");
+    let result = repo.stored("inexistant").expect("stored should not error");
     // THEN the agent is not found
     assert!(result.is_none());
 }
@@ -218,90 +136,11 @@ fn test_looks_like_file_path_detection() {
     assert!(!looks_like_file_path("uuid-1234"));
 }
 
-#[test]
-fn test_new_validates_agent_type() {
-    // GIVEN an invalid template type
-    // WHEN run_new is called
-    let code = run_new("test-agent", "invalid", false);
-    // THEN it returns GENERAL_ERROR
-    assert_eq!(code, exit_codes::GENERAL_ERROR);
-}
-
 // The name-conflict branch of `run_new` has no test: it sits behind the SDK
 // probe, so a test that called `run_new` would read GENERAL_ERROR whether the
 // name clashed or python3 simply had no `apollia` module. The test that stood
 // here created a directory and asserted the directory existed, which is the
 // assertion the tempdir crate owns.
-
-#[test]
-fn test_new_rejects_a_type_the_scaffolder_does_not_know() {
-    // GIVEN template names outside the supported list, including one that
-    // differs from a supported name only in case
-    for t in ["invalid", "custom", "React", ""] {
-        // WHEN run_new is asked for one
-        let code = run_new("test-agent", t, false);
-        // THEN it stops at the validation gate, before probing for the SDK or
-        // touching the data directory
-        assert_eq!(
-            code,
-            exit_codes::GENERAL_ERROR,
-            "type '{t}' was not refused"
-        );
-    }
-    assert!(!VALID_AGENT_TYPES.is_empty());
-}
-
-#[test]
-fn test_new_json_output_format() {
-    // GIVEN a scaffolding result
-    let name = "my-agent";
-    let agent_type = "react";
-    let path = "/home/user/.apollia/agents/my-agent/";
-    let files = vec![
-        "my_agent_agent.py".to_string(),
-        "test_my_agent_agent.py".to_string(),
-    ];
-
-    // WHEN formatting JSON output
-    let output = serde_json::json!({
-        "name": name,
-        "type": agent_type,
-        "path": path,
-        "files": files,
-    });
-
-    // THEN the JSON contains all required fields
-    assert_eq!(output["name"], "my-agent");
-    assert_eq!(output["type"], "react");
-    assert!(output["path"]
-        .as_str()
-        .is_some_and(|p| p.contains("my-agent")));
-    let file_list = output["files"].as_array().expect("files should be array");
-    assert_eq!(file_list.len(), 2);
-}
-
-#[test]
-fn test_new_default_type_is_react() {
-    // GIVEN the AgentCommand::Create parsed without --type
-    use clap::Parser;
-
-    #[derive(Debug, Parser)]
-    struct TestCli {
-        #[command(subcommand)]
-        cmd: AgentCommand,
-    }
-
-    let cli = TestCli::parse_from(["test", "create", "simple-bot"]);
-    // WHEN clap parses the argument line
-    // THEN the default type is "react"
-    match cli.cmd {
-        AgentCommand::Create { name, r#type } => {
-            assert_eq!(name, "simple-bot");
-            assert_eq!(r#type, "react");
-        }
-        other => panic!("expected AgentCommand::Create, got {other:?}"),
-    }
-}
 
 #[test]
 fn test_a2a_skill_id_field_name() {
@@ -423,50 +262,6 @@ fn test_agent_logs_parses_follow_flag() {
     }
 }
 
-// ── agent validate parsing ────────────────────────────────────────────────
-
-#[test]
-fn test_agent_validate_parses_path() {
-    // GIVEN "agent validate ./mon-agent.py"
-    use clap::Parser;
-
-    #[derive(Debug, Parser)]
-    struct TestCli {
-        #[command(subcommand)]
-        cmd: AgentCommand,
-    }
-
-    let cli = TestCli::parse_from(["test", "validate", "./mon-agent.py"]);
-    // WHEN clap parses the argument line
-    // THEN AgentCommand::Validate with correct path
-    match cli.cmd {
-        AgentCommand::Validate { path } => {
-            assert_eq!(path, PathBuf::from("./mon-agent.py"));
-        }
-        other => panic!("expected AgentCommand::Validate, got {other:?}"),
-    }
-}
-
-#[test]
-fn test_agent_validate_file_not_found_returns_error() {
-    // GIVEN a path that does not exist
-    let path = PathBuf::from("/tmp/this-file-does-not-exist-apollia-test.py");
-    // WHEN run_validate is called
-    let code = run_validate(&path, false);
-    // THEN exit code is GENERAL_ERROR
-    assert_eq!(code, exit_codes::GENERAL_ERROR);
-}
-
-#[test]
-fn test_agent_validate_file_not_found_json_output() {
-    // GIVEN a path that does not exist and json=true
-    let path = PathBuf::from("/tmp/this-file-does-not-exist-apollia-test.py");
-    // WHEN run_validate is called in JSON mode
-    let code = run_validate(&path, true);
-    // THEN exit code is GENERAL_ERROR
-    assert_eq!(code, exit_codes::GENERAL_ERROR);
-}
-
 #[test]
 fn test_agent_logs_file_path_rejected() {
     // GIVEN an agent_id that looks like a file path
@@ -508,67 +303,21 @@ fn test_format_a2a_agent_list_skills_read_from_id_field() {
 }
 
 #[test]
-fn test_list_generated_files_collects_recursively() {
-    // GIVEN a directory with files at different depths
-    let tmp = tempfile::tempdir().expect("create tmpdir");
-    let base = tmp.path();
-    std::fs::write(base.join("agent.py"), "").expect("write file");
-    let tests_dir = base.join("tests");
-    std::fs::create_dir_all(&tests_dir).expect("create tests dir");
-    std::fs::write(tests_dir.join("test_agent.py"), "").expect("write test file");
+fn test_agent_logs_reads_the_actions_of_the_agent_in_the_journal() {
+    // GIVEN an agent whose name needs encoding, and a number of lines asked for
+    // WHEN the page `agent logs` reads is built
+    let uri = super::lifecycle::agent_logs_uri("mail sorter", 20);
 
-    // WHEN listing generated files
-    let files = list_generated_files(base);
-
-    // THEN both files are found with relative paths
-    assert_eq!(files.len(), 2);
-    assert!(files.contains(&"agent.py".to_string()));
-    assert!(files.contains(&"tests/test_agent.py".to_string()));
+    // THEN it is a page of the audit journal, narrowed to the actions of that
+    // agent, of the size asked for
+    assert_eq!(
+        uri,
+        "/api/v1/audit/journal?limit=20&offset=0&agents=mail%20sorter&nature=action"
+    );
 }
 
-#[test]
-fn test_format_audit_event_row_uses_real_keys() {
-    // GIVEN an audit event with the real JSON shape from GET /agents/:id/logs
-    let event = serde_json::json!({
-        "started_at": "2026-07-01T15:05:32Z",
-        "tool_name": "mcp:filesystem/list_criteria",
-        "success": true,
-        "duration_ms": 13,
-        "task_id": "dcd2713a-0000-4000-8000-000000000000",
-    });
-
-    // WHEN the row is formatted
-    let row = format_audit_event_row(&event);
-
-    // THEN the real values render (no stray `?` placeholders)
-    assert!(!row.contains('?'), "row still has `?` placeholders: {row}");
-    assert!(row.contains("2026-07-01T15:05:32Z"));
-    assert!(row.contains("mcp:filesystem/list_criteria"));
-    assert!(row.contains("ok"));
-    assert!(row.contains("13ms"));
-    assert!(row.contains("task=dcd2713a-0000-4000-8000-000000000000"));
-}
-
-#[test]
-fn test_format_audit_event_row_failed_uses_error_code() {
-    // GIVEN a failed audit event carrying an error_code and no duration
-    let event = serde_json::json!({
-        "started_at": "2026-07-01T15:06:00Z",
-        "tool_name": "mcp:filesystem/write",
-        "success": false,
-        "error_code": "PERMISSION_DENIED",
-        "task_id": "abc",
-    });
-
-    // WHEN the row is formatted
-    let row = format_audit_event_row(&event);
-
-    // THEN the error code is surfaced as the outcome
-    assert!(row.contains("PERMISSION_DENIED"), "row: {row}");
-    assert!(row.contains("task=abc"));
-}
-
-/// Names declared by the agent manifests this repository ships under `agents/`.
+/// Identifiers of the agents the packages of this repository declare, under
+/// `agents/`.
 ///
 /// Reads the tree rather than a hardcoded list: an agent removed from `agents/`
 /// must make the assertion below fail, which a duplicated list would not do.
@@ -580,19 +329,13 @@ fn shipped_agent_names() -> Vec<String> {
             continue;
         };
         for entry in entries.flatten() {
-            let Ok(raw) = std::fs::read_to_string(entry.path().join("manifest.toml")) else {
+            let Ok(raw) = std::fs::read_to_string(entry.path().join("apollia.toml")) else {
                 continue;
             };
-            let Ok(parsed) = raw.parse::<toml::Value>() else {
+            let Ok(manifest) = apollia_aip::apollia_manifest::parse(&raw) else {
                 continue;
             };
-            if let Some(name) = parsed
-                .get("agent")
-                .and_then(|agent| agent.get("name"))
-                .and_then(|name| name.as_str())
-            {
-                names.push(name.to_string());
-            }
+            names.extend(manifest.agents.into_iter().map(|agent| agent.id));
         }
     }
     names
@@ -640,4 +383,59 @@ fn file_path_hint_offers_a_command_an_operator_can_really_run() {
             "hint for '{spelled}': {hint}"
         );
     }
+}
+
+#[test]
+fn test_override_value_follows_the_field_shape() {
+    // GIVEN values typed for a string field and for a list field
+    let one = vec!["Sort the inbox.".to_owned()];
+    let two = vec!["file_read".to_owned(), "web_fetch".to_owned()];
+    // WHEN they are turned into override values
+    let mission = definition::override_value("mission", &one);
+    let access = definition::override_value("access", &two);
+    let empty = definition::override_value("sources", &[]);
+    let too_many = definition::override_value("mission", &two);
+    let unknown = definition::override_value("model", &one);
+    // THEN a string field takes exactly one value and a list field any number
+    assert_eq!(mission.unwrap(), serde_json::json!("Sort the inbox."));
+    assert_eq!(
+        access.unwrap(),
+        serde_json::json!(["file_read", "web_fetch"])
+    );
+    assert_eq!(empty.unwrap(), serde_json::json!([]));
+    assert!(too_many.unwrap_err().contains("exactly one value"));
+    assert!(unknown.unwrap_err().contains("unknown field"));
+}
+
+#[tokio::test]
+async fn test_uninstall_refuses_the_apollia_agent() {
+    // GIVEN the identifier of the Apollia agent, the built-in chat, and no
+    // runtime behind the socket
+    let dir = tempfile::tempdir().unwrap();
+    let client = RuntimeClient::new(dir.path().join("absent.sock"));
+    let erase = Erase {
+        memory: false,
+        history: false,
+    };
+    // WHEN it is uninstalled, confirmed
+    let code = run_uninstall(&client, apollia_tools::APOLLIA_AGENT_ID, erase, true, true).await;
+    // THEN the command refuses it with a usage error, before reaching the runtime
+    assert_eq!(code, exit_codes::GENERAL_ERROR);
+}
+
+#[tokio::test]
+async fn test_uninstall_without_a_runtime_is_a_runtime_error() {
+    // GIVEN no runtime behind the socket
+    let dir = tempfile::tempdir().unwrap();
+    let client = RuntimeClient::new(dir.path().join("absent.sock"));
+    let erase = Erase {
+        memory: true,
+        history: true,
+    };
+    // WHEN an agent and a package are uninstalled, confirmed
+    let agent = run_uninstall(&client, "notes", erase, true, true).await;
+    let package = run_package_uninstall(&client, "crm", erase, true, true).await;
+    // THEN nothing is removed offline: both answer the runtime error
+    assert_eq!(agent, exit_codes::RUNTIME_ERROR);
+    assert_eq!(package, exit_codes::RUNTIME_ERROR);
 }

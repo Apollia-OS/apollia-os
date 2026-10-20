@@ -15,16 +15,16 @@
 --       FROM stt_config WHERE id = 1
 --     consumed by get_stt_config IPC -> the STT settings form.
 --
--- Unblocks the desktop automation for llm-det.json / llm-backends.json:
---   * llm-grid / llm-backends-list / llm-backends-section  <- >= 1 backend row
---   * llm-backend-card / llm-backend-badge / llm-backend-type-badge
---   * set-default-{name}  (settings/Llm.svelte, one per backend)
+-- Unblocks the desktop automation for llm-det.json and destructive.json:
+--   * ai-server-entry / ai-server-panel  <- each OpenAI-compatible row below
+--     becomes a server of the AI screen at the first opening of the database,
+--     one per distinct address, sorted by name
 -- and stt-det.json:
 --   * stt-config-form / stt-model-select / stt-language-input / stt-trigger /
 --     stt-clipboard / stt-silence / stt-max-rec / stt-enable-toggle
 --     (settings/Stt.svelte reads the seeded row as a configured state)
 --
--- config_json shape mirrors what LlmBackendDialog.svelte writes/reads:
+-- config_json shape is the one the runtime reads:
 --   llama-cpp -> model_path (basename must match form.model), context_size, temperature
 --   api       -> base_url, api_key ("${VAR}" sentinel), context_size, temperature
 --
@@ -46,9 +46,14 @@
 -- (Llm.svelte:107), and a ping can only succeed against something reachable:
 --   * local-llama-server points at :8899, which the -llama recipe brings up, so
 --     it is the one that shows a healthy card. It is the default.
---   * anthropic-claude stays enabled without a key, which is the honest error
---     state the "provider does not answer" troubleshooting page documents.
---   * openai-gpt4o-mini is disabled, so the list also shows a disabled card.
+--   * gpu-server is an enabled OpenAI-compatible server at 127.0.0.1:9, which
+--     refuses at once: the honest error state the "provider does not answer"
+--     troubleshooting page documents, reached without any network.
+--   * vllm-qwen is a self-hosted vLLM server, disabled, so the list also shows a
+--     disabled card.
+-- No row points at a cloud API: those have no dedicated provider any more, and
+-- the system.db migration deletes them when it finds them. The names keep the
+-- ORDER BY name position of the rows they replaced (non-default card first).
 -- local-qwen was dropped: it needs the apollia-runner sidecar, absent in dev, so
 -- it was red in every run and added nothing but a second identical error.
 INSERT INTO llm_backends (name, provider, model, config_json, enabled, is_default, created_at, updated_at) VALUES
@@ -60,18 +65,18 @@ INSERT INTO llm_backends (name, provider, model, config_json, enabled, is_defaul
    1,
    '2026-07-01T00:00:00Z',
    '2026-07-01T00:00:00Z'),
-  ('openai-gpt4o-mini',
+  ('vllm-qwen',
    'openai',
-   'gpt-4o-mini',
-   '{"base_url":"https://api.openai.com/v1","api_key":"${OPENAI_API_KEY}","context_size":128000,"temperature":0.7}',
+   'qwen3-32b',
+   '{"base_url":"http://10.0.0.5:8000/v1","api_key":"${VLLM_API_KEY}","context_size":32768,"temperature":0.7}',
    0,
    0,
    '2026-07-01T00:00:00Z',
    '2026-07-01T00:00:00Z'),
-  ('anthropic-claude',
-   'anthropic',
-   'claude-3-5-sonnet-latest',
-   '{"base_url":"https://api.anthropic.com","api_key":"${ANTHROPIC_API_KEY}","context_size":200000,"temperature":0.7}',
+  ('gpu-server',
+   'openai',
+   'gemma-3-27b',
+   '{"base_url":"http://127.0.0.1:9/v1","context_size":32768,"temperature":0.7}',
    1,
    0,
    '2026-07-01T00:00:00Z',
@@ -91,3 +96,10 @@ INSERT INTO stt_config (id, enabled, model_path, hotkey, clipboard_mode, clipboa
    'en',
    'toggle',
    '2026-07-01T00:00:00Z');
+
+-- The checkout, a folder connection the Apollia agent is granted
+-- (fragments/agents.sql), so the chat's file tools reach it and a relative path
+-- lands there. The file tools reach the folders granted to an agent and
+-- nothing else; this row replaces the former `[chat] default_workspace`.
+INSERT INTO folder_connections (id, path, label, added_at)
+VALUES ('seed-checkout', '__APOLLIA_SEED_WORKSPACE__', 'checkout', '2026-07-01T00:00:00Z');

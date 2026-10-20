@@ -11,12 +11,12 @@ impl BuiltInChatAgent {
     /// continues until the LLM produces a final text response (no tool calls)
     /// or the [`StepBudget`] is exhausted.
     ///
-    /// The autonomy tier governs the prompt variant, memory injection, and the
-    /// post-run verification. The `budget` is built by the manager via
+    /// The autonomy tier governs the prompt variant and the post-run
+    /// verification. The `budget` is built by the manager via
     /// `StepBudget::from_capped`, so it is already the capped ceiling; this method
     /// never raises it. `level_config` carries the resolved tier flags
-    /// (`inject_memory`, `run_verification`); when `None` the call behaves as the
-    /// assisted tier (no memory injection, no verification).
+    /// (`run_verification`); when `None` the call behaves as the assisted tier
+    /// (no verification).
     ///
     /// # Errors
     ///
@@ -50,7 +50,6 @@ impl BuiltInChatAgent {
             Some(system_prompt)
         };
         let level = autonomy.copied().unwrap_or(AutonomyLevel::Assisted);
-        let inject_memory = level_config.is_some_and(|c| c.inject_memory);
         let run_verification = level_config.is_some_and(|c| c.run_verification);
 
         // Auditable trace of the applied tier. The budget is already capped by
@@ -58,7 +57,7 @@ impl BuiltInChatAgent {
         // the effective values.
         tracing::info!(
             autonomy_level = %level.as_str(),
-            inject_memory,
+            profile_store = self.user_memory.is_some(),
             run_verification,
             max_steps = budget.max_steps,
             max_tool_calls = budget.max_tool_calls,
@@ -66,7 +65,7 @@ impl BuiltInChatAgent {
             "chat.autonomy_tier.applied"
         );
 
-        let effective_prompt = self.build_system_prompt(custom_prompt, level, inject_memory);
+        let effective_prompt = self.build_system_prompt(custom_prompt, level);
 
         // Route the turn: in plan mode a substantive turn enters the plan flow
         // (discovery + plan), a trivial one stays conversational. Outside plan
@@ -81,49 +80,10 @@ impl BuiltInChatAgent {
             "chat.turn.routed"
         );
 
-        let mut tool_specs = build_tool_specs(
-            available_tools,
-            &self.tool_registry,
-            self.mcp_index.as_deref(),
-            self.tool_search_limit,
-        )
-        .await;
-        if let Some(ref a2a) = self.a2a_invoker {
-            tool_specs.extend(generate_a2a_tool_specs(a2a).await);
-        }
-        // Advertise the todo_write built-in whenever a todo store is attached.
-        if self.todo.is_some() {
-            tool_specs.push(todo_write_spec());
-        }
-        // Advertise the plan_* tool surface only while the session is in plan
-        // mode, mirroring how todo_write is gated. The surface is phase-aware:
-        // once a plan is approved (Executing) the proposal tools are withheld so
-        // the agent executes the approved plan instead of re-proposing it.
-        if self.plan_mode_active() {
-            tool_specs.extend(plan_tool::plan_tool_specs_for_phase(
-                self.session_plan_phase,
-            ));
-        }
-        // Authoritative set of callable names for the turn: every advertised
-        // spec, every session-declared tool, and every deferred MCP tool the
-        // model can discover and invoke by its `mcp:server/tool` name. A call to
-        // any other name is a hallucination, refused with a corrective tool
-        // result rather than handed to the invoker. The union never false-refuses
-        // a real tool and, since every member is a genuine tool, never lets a
-        // hallucinated name slip through.
-        let mut valid_tool_names: HashSet<String> =
-            tool_specs.iter().map(|s| s.name.clone()).collect();
-        valid_tool_names.extend(available_tools.iter().cloned());
-        // A tool the operator pre-authorized for the session is, by definition,
-        // a real callable tool: never refuse one as unknown.
-        valid_tool_names.extend(authorized_tools.iter().cloned());
-        if let Some(index) = self.mcp_index.as_deref() {
-            valid_tool_names.extend(
-                index
-                    .iter()
-                    .map(|e| format!("mcp:{}/{}", e.server_name, e.tool_name)),
-            );
-        }
+        let catalog::Catalog {
+            specs: tool_specs,
+            callable: valid_tool_names,
+        } = self.catalog(available_tools).await;
 
         info!(
             session_id = %session_id,
@@ -138,6 +98,8 @@ impl BuiltInChatAgent {
             user_message,
             summary,
             context_window_size,
+            &self.turn_images,
+            self.session.preserve_thinking == Some(true),
         );
 
         // A resume turn carrying an operator instruction prepends it as a user
@@ -156,6 +118,13 @@ impl BuiltInChatAgent {
                 origin = "user_inject",
                 "plan.inject.consumed"
             );
+        }
+
+        // A continued answer closes the request: the engine prefills it and
+        // writes what follows. Nothing is added to ask for the rest.
+        if let Some(answer) = self.answer_prefill.as_deref() {
+            llm_messages.push(LlmChatMessage::assistant(answer));
+            tracing::info!(session_id = %session_id, "chat.answer.continued");
         }
 
         let ids = ToolCallContextIds {
@@ -230,15 +199,17 @@ impl BuiltInChatAgent {
         let initial_output = first.content.clone();
         let tool_specs_ref: &[ToolSpec] = &tool_specs;
         let valid_tool_names_ref: &HashSet<String> = &valid_tool_names;
-        // Seed the carried authorization set with the session's authorized tools
-        // plus anything the first turn auto-authorized, so a correction turn does
-        // not re-prompt for a tool the user already approved this turn.
-        let mut carried_authorized = authorized_tools.clone();
-        carried_authorized.extend(first.newly_authorized.iter().cloned());
+        // A correction turn runs with the grants of the run; an "always"
+        // answered in the first turn is a standing consent governance already
+        // reads. A grant of one call is not given again.
         let carry = RetryCarry {
             messages: llm_messages,
             last_response: first,
-            authorized: carried_authorized,
+            authorized: authorized_tools
+                .iter()
+                .filter(|grant| !crate::governance::is_once_grant(grant))
+                .cloned()
+                .collect(),
         };
         let (report, carry) = run_verification_with_retry(
             level,
@@ -273,12 +244,13 @@ impl BuiltInChatAgent {
                         )
                         .await
                     {
-                        Ok(next) => {
+                        Ok(mut next) => {
                             let output = next.content.clone();
-                            // Carry any tool authorized on this retry into the next.
-                            state
-                                .authorized
-                                .extend(next.newly_authorized.iter().cloned());
+                            // The retry is the same turn: its calls follow the
+                            // ones already made.
+                            let mut calls = std::mem::take(&mut state.last_response.llm_calls);
+                            calls.append(&mut next.llm_calls);
+                            next.llm_calls = calls;
                             state.last_response = next;
                             (Ok(output), state)
                         }

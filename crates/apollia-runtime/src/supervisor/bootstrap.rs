@@ -1,6 +1,61 @@
 use super::*;
 use apollia_core::events::{subscribe_resilient, ResilientReceiver};
 
+/// Create and supervise the two local engines, embedded llama-server and MLX,
+/// then share between them the leases and pins that keep a model loaded.
+///
+/// llama-server is created lazily: it locates the binary but does not launch a
+/// process until a model is requested, and is `None` when the binary is
+/// absent. MLX exists only on a Mac with Apple Silicon whose build carries it;
+/// an MLX model elsewhere is refused with its reason by the router. Both read
+/// `[llm.guardrails]` from `guardrails_file` at every launch, under the
+/// settings `org_policy` fixes.
+pub(in crate::supervisor) fn start_local_engines(
+    system_db_path: &std::path::Path,
+    guardrails_file: std::path::PathBuf,
+    event_sender: &EventBusSender,
+    org_policy: &apollia_permissions::PolicyVerdict,
+) -> (
+    Option<Arc<crate::llama_server::LlamaServerSupervisor>>,
+    Option<Arc<crate::mlx_engine::MlxEngineSupervisor>>,
+) {
+    let llama = crate::llama_server::LlamaServerSupervisor::new(
+        crate::llama_server::LlamaServerConfig::default(),
+        Some(system_db_path.to_path_buf()),
+        Some(event_sender.clone()),
+        Some(guardrails_file.clone()),
+        org_policy.imposed_settings(),
+    )
+    .ok();
+    if let Some(supervisor) = &llama {
+        Arc::clone(supervisor).spawn_supervision();
+    }
+    let mlx = crate::mlx_engine::MlxEngineSupervisor::for_this_machine(
+        Some(guardrails_file.clone()),
+        org_policy.imposed_settings(),
+    );
+    if let Some(engine) = &mlx {
+        Arc::clone(engine).spawn_supervision();
+    }
+    // The followed engine channel is checked once at startup; an update of a
+    // chosen engine is installed when `[engines] auto_update` asks for it.
+    if let Some(data_dir) = apollia_core::paths::data_dir() {
+        crate::engine_store::auto_update::spawn(
+            &data_dir,
+            Some(guardrails_file.clone()),
+            org_policy.imposed_settings(),
+        );
+    }
+    crate::residency::start_residency(
+        system_db_path.to_path_buf(),
+        guardrails_file,
+        event_sender.clone(),
+        llama.as_ref(),
+        mlx.as_ref(),
+    );
+    (llama, mlx)
+}
+
 /// Detect the GPU and spawn the sidecar runner for the local LLM and STT
 /// backends. Returns `None` (logged) when the runner cannot start; cloud
 /// backends keep working without it.
@@ -123,6 +178,57 @@ pub(in crate::supervisor) fn load_trigger_definitions(
     Ok(defs)
 }
 
+/// The agent executor an agent without code runs on outside a conversation,
+/// when the runtime has both the executor and the task store. It shares no
+/// plan cache: the caller sets the one the runtime opened.
+pub(in crate::supervisor) fn agent_launcher<B: ExecutionBackend + Clone>(
+    router: &TaskRouterHandle<B>,
+    chat: Option<&crate::chat::ChatSessionManagerHandle>,
+    repository: Option<&Arc<TaskRepository>>,
+    event_bus: &EventBusSender,
+    observability: &apollia_core::ObservabilityConfig,
+) -> Option<crate::agents::task::AgentTaskLauncher<B>> {
+    match (chat, repository) {
+        (Some(chat), Some(repo)) => Some(crate::agents::task::AgentTaskLauncher {
+            router: router.clone(),
+            chat: chat.clone(),
+            repository: Some(repo.clone()),
+            event_bus: event_bus.clone(),
+            observability: observability.clone(),
+            plan_cache: None,
+        }),
+        _ => None,
+    }
+}
+
+/// Starts the trigger engine on `definitions`, starting their targets
+/// through `targets` and recording each fire in the history under the data
+/// directory, then announces how many are active.
+pub(in crate::supervisor) async fn start_trigger_engine<B>(
+    definitions: Vec<apollia_triggers::TriggerDefinition>,
+    targets: crate::trigger_targets::TriggerTargets<B>,
+    event_bus: &EventBusSender,
+    config: &SupervisorConfig,
+) -> TriggerEngineHandle
+where
+    B: ExecutionBackend + Clone + Send + Sync + 'static,
+{
+    let enabled_count = definitions.iter().filter(|t| t.enabled).count();
+    let engine = TriggerEngineHandle::spawn(
+        definitions,
+        targets,
+        event_bus.clone(),
+        super::persistence::open_trigger_persistence(&config.data_dir),
+        config.obs_config.clone(),
+    )
+    .await;
+    tracing::info!(active = enabled_count, "trigger.engine.started");
+    let _ = event_bus.send(RuntimeEvent::TriggersReloaded {
+        count: enabled_count,
+    });
+    engine
+}
+
 /// One-shot migration of MCP servers from `mcp.toml` into `mcp.db` when the
 /// database is empty. No-op when the DB already has servers or the TOML is
 /// absent/empty. Errors are logged, never fatal.
@@ -169,7 +275,6 @@ pub(in crate::supervisor) async fn start_mcp_manager(
         server_configs,
         tool_registry_handle,
         Some(event_sender.clone()),
-        None,
         loading_mode,
     )
     .await

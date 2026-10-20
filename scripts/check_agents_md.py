@@ -85,6 +85,8 @@ COVERED_BY_GLOBAL_RULEBOOK: dict[str, str] = {
     "apollia-runner": "docs/agents/RUST-PATTERNS.md",
     "apollia-eval": "docs/agents/TESTING.md",
     "apollia-prompts": "docs/agents/RUST-PATTERNS.md",
+    "apollia-signing": "docs/agents/SECURITY.md",
+    "apollia-sources": "docs/agents/RUST-PATTERNS.md",
 }
 
 BACKTICKED = re.compile(r"`([^`\n]+)`")
@@ -150,7 +152,7 @@ CAMEL_WORD = re.compile(
 # document cites any more, is itself a red. Without that, the list is a way of
 # passing rather than a set of exceptions.
 ILLUSTRATIVE = {
-    "EmailPayload", "EmailResult", "EmailTriage", "MyClass",
+    "EmailPayload", "EmailResult",
 }
 
 # Identifiers that are real and live outside the three source roots: the

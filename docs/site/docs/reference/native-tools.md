@@ -15,22 +15,22 @@ pre-authorize a tool, argument-prefix rules are evaluated per invocation, and
 code executors are never blanket-authorized), and the autonomy tier's step
 budget.
 
-<!-- claim:audit-list-reads-the-tool-invocation-trail -->
-The two audit registers do not see the same calls. The tool-invocation trail,
-the flat table `audit list` reads, is written from `ctx.tools` on the agent path
-only, so a chat tool call never appears there. The hash-chained journal does
-record the chat: the chat ReAct loop emits `ToolOutputCaptured` for every tool
+<!-- claim:journal-records-the-tool-calls-of-a-run -->
+The audit journal records the tool calls of a conversation: the chat loop
+announces each call with its run, emits `ToolOutputCaptured` for every tool
 result and `LlmResponseCaptured` for every completion, and the journal
-subscriber turns both into signed, chained entries. Tool outputs and model
+subscriber turns them into signed, chained entries. Tool outputs and model
 completions from a chat session are therefore persisted verbatim in an
 append-only register, readable with `audit show <run>` and checkable with
 `audit verify`. A chat session additionally keeps the tool-call record its
 assistant message carries, serialized into the `tool_calls_json` column of
 `chat_messages`, which is not an audited record.
 
-An agent reaches these tools through `ctx.tools`, or has them handed to a ReAct
-loop via `ctx.tools.describe(<name>)`. Each call is dispatched by the canonical
-tool name listed below.
+An agent is granted these tools by name, in its access list: `access` under
+`[agents.defaults]` in the [package manifest](/reference/package-manifest),
+which the person can change on the sheet of the agent. Each call is dispatched
+by the canonical tool name listed below. The Python of a package does not call
+them: `ctx.tools` is `None` in a tool and in a workflow.
 
 ## List the effective state
 
@@ -43,19 +43,16 @@ apollia-os tools list
 
 Disable or re-enable a tool with `apollia-os tools disable <name>` and
 `apollia-os tools enable <name>`. The setting is written to the governance
-database, and it governs the agent path only: the agent runners merge that
-snapshot into the dispatcher's disabled list, so an agent that invokes a
+database. A tool is off when that database disables it or when the `disabled`
+list of `[tools]` in `apollia.toml` names it: the agent runners and the
+conversation path both read the union of the two, so an agent that invokes a
 disabled tool receives an `UnknownTool` error.
 
-The desktop chat path does not read the governance database at all. It builds
-its dispatcher from the `disabled` list of `[tools]` in `apollia.toml`, and
-`tools disable` never writes there. Six natives escape even that list:
-`file_write`, `file_edit`, `notebook_edit`, `bash_executor`, `python_executor`
-and `http_fetch` are removed from the dispatcher and re-added afterwards as
-approval-guarded wrappers, unconditionally, so a chat can still call them
-whatever the configuration says. Restricting what a chat can reach is done
-through the approval gate and the chat tool picker, not through
-`apollia-os tools disable`.
+On the conversation path, `file_write`, `file_edit`, `notebook_edit`,
+`bash_executor`, `python_executor` and `http_fetch` are built apart, rooted at
+the folders granted to the agent, and a disabled one is not built at all. The
+state is read at each message, so a tool disabled during a conversation is gone
+from the next message on, without a restart.
 
 ## Availability and credentials
 
@@ -68,12 +65,11 @@ credential.
 | `http_fetch` | `http` | none |
 | `web_search` | `web-search` | `brave.api_key` (optional; falls back to DuckDuckGo) |
 | `web_read` | `web-read` | none |
-| `memory_search` | `memory-search` | none |
+| `memory_search`, `memory_write`, `profile_propose` | `memory-search` | none |
 | all other native tools | always compiled | none |
 
-The `permission_rule_*` tools additionally require a governance database to be
-configured; when it is absent, they are not registered. `python_executor`
-requires a system Python 3 on the host (see the platform notes below).
+`python_executor` requires a system Python 3 on the host (see the platform
+notes below).
 
 Store the optional Brave key with:
 
@@ -140,19 +136,19 @@ in-root path (macOS `/var` vs `/private/var`, Windows `\\?\` verbatim
 prefixes) resolve instead of being refused. Symlink escapes and any path
 whose real target leaves the root are rejected.
 
-<!-- claim:chat-file-root-is-home-without-project -->
-Which directory is the root depends on the session. With a project open, it is
-the project directory. In a chat with no project, it is the `default_workspace`
-of `[chat]` when the operator configured one that exists, and `~/.apollia`
-otherwise; the barrier on that path is the approval you are asked for before a
-write, not a narrower root. Your home directory is the fallback when neither of
-those resolves, and the system temporary directory only when the home directory
-cannot be resolved at all. In practice `~/.apollia` exists after the first
-start, so a free chat is rooted there and not at your home directory.
+<!-- claim:file-tools-root-is-the-granted-folders -->
+The roots are the folders granted to the agent, the built-in chat agent
+included, in a conversation as in a task. A folder of the machine is a
+connection, and its tools are granted to an agent on its sheet: the reading
+tools reach every folder granted, the writing tools only the folders granted
+for writing. The first folder granted, by the date it was added, is where a
+relative path lands. Neither the home folder, the data directory nor the folder
+of a former project is a root. An agent granted no folder has file tools that refuse,
+saying how to grant one.
 
 | Tool | Purpose | Key parameters |
 |---|---|---|
-| `file_read` | Read a file, with optional offset and limit for large files. Returns UTF-8 text with line numbers. | `path`, `offset`, `limit` |
+| `file_read` | Read a file, with optional offset and limit for large files. Returns UTF-8 text with line numbers. A PDF, Word (`.docx`), PowerPoint (`.pptx`) or Excel (`.xlsx`, `.xlsm`, `.xls`, `.ods`) document is read as the text it holds, whole or one page, slide or sheet at a time. | `path`, `offset`, `limit`, `page`, `sheet` |
 | `file_write` | Write content to a file, creating intermediate directories and overwriting if it exists. | `path`, `content` |
 | `file_list` | List files and directories with type and size, optionally recursive. | `dir`, `recursive` |
 | `file_edit` | Replace exact text in a file. Fails if `old_text` is not found or is not unique (unless `replace_all`). | `path`, `old_text`, `new_text`, `replace_all` |
@@ -187,6 +183,18 @@ and is treated as data, not instructions.
 | Tool | Purpose | Key parameters |
 |---|---|---|
 | `memory_search` | Full-text search (FTS5, BM25 ranking) over the agent's own namespace and declared shared namespaces. FTS5 operators are escaped automatically. | `query`, `namespace`, `limit`, `source` |
+| `memory_write` | Keeps a note in the agent's own memory under a key (`remember`), replacing what the key held, or drops it (`forget`). Only the agent's own namespace is written. | `action`, `key`, `value` |
+| `profile_propose` | Proposes one lasting fact about the person for their profile. The call is put to the person every time, with the fact shown; nothing is written before they accept. A field of the profile form is refused. | `key`, `fact` |
+| `source_search` | Search of the indexed folders and files checked for the agent, by keywords, and by meaning when an embeddings model is installed. Each result carries its excerpt, document, location, score and source, and the answer says how it was ranked. A source that is not checked is refused. | `query`, `sources`, `limit` (1 to 50) |
+| `code_context` | Reads the state of a code folder checked for the agent, at the moment of the call: its git branch, status and recent commits, its rules file (`APOLLIA.md`) and its file tree. Nothing of the folder reaches the prompt otherwise. | `folder`, `parts` (`git`, `rules`, `tree`) |
+
+Each of these tools is offered to an agent only when its source is checked
+for it, whatever its access lists: `memory_search` and `memory_write` when its
+memory is, `profile_propose` when the profile is, `source_search` when at least
+one indexed folder or file is, `code_context` when a code folder is. Checking Memory on the sheet of an agent is what
+opens its memory, to read and to write, and neither memory tool asks for
+consent: they act on the agent's own space. The memory of an agent is one
+space, named after the agent and kept across its conversations and its tasks.
 
 Memory retrieval is always agent-initiated: the runtime never injects memory into
 an agent's prompt. The built-in conversational assistant is the exception, and
@@ -204,14 +212,9 @@ these tools are not how it does it. See
 
 ## Permission governance
 
-Agent-driven management of the permission rules in the governance database. Each
-of these is subject to human-in-the-loop approval before it takes effect.
-
-| Tool | Purpose | Key parameters |
-|---|---|---|
-| `permission_rule_add` | Persist a new permission rule, tagged with the calling agent's identity. `arg_prefix` scopes the rule to arguments starting with that prefix, evaluated on every invocation; for a code executor it only ever covers a single simple command. | `tool_name`, `action` (`allow`/`deny`), `scope` (`global`/`project`/`agent`), `arg_prefix`, `project_path`, `agent_id`, `expires_at` |
-| `permission_rule_remove` | Remove a rule by id. | `rule_id` |
-| `permission_rule_list` | List rules, optionally filtered. Read-only. | `tool_name`, `created_by`, `scope` |
+No native tool reads or writes the permission rules in the governance
+database, so an agent cannot grant itself access. The rules are managed by the
+user, from the desktop or with `apollia-os permissions`.
 
 For how permission rules and autonomy tiers shape what runs without asking, see
 [Autonomy tiers](/explanation/autonomy-tiers) and

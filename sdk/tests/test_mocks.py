@@ -16,7 +16,8 @@ async def test_mock_context_wires_all_surfaces():
     assert ctx.tools is not None
     assert ctx.llm is not None
     assert ctx.memory is not None
-    assert ctx.a2a is not None
+    assert ctx.agents is not None
+    assert ctx.workflows is not None
     assert ctx.datasources is not None
     assert ctx.templates is not None
     assert ctx.secrets is not None
@@ -180,6 +181,45 @@ async def test_mock_llm_proxy_chat_accepts_sampling_overrides():
     # THEN the signature is accepted, so a test written against the mock ports over
     assert result.content == "ok"
     assert proxy.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_mock_llm_proxy_complete_accepts_every_request_sampling_setting():
+    """complete() takes the request sampling settings of the real proxy."""
+    # GIVEN a proxy with two queued responses
+    proxy = MockLlmProxy([{"content": "tuned"}, {"content": "plain"}])
+
+    # WHEN complete() fixes every request sampling setting, then none
+    tuned = await proxy.complete(
+        [{"role": "user", "content": "x"}],
+        top_p=0.5,
+        top_k=40,
+        min_p=0.25,
+        presence_penalty=0.75,
+        frequency_penalty=-0.5,
+        repeat_penalty=1.125,
+        stop=["END"],
+        thinking=False,
+    )
+    plain = await proxy.complete([{"role": "user", "content": "x"}])
+
+    # THEN the keywords are accepted, and the mock records exactly the
+    # settings fixed, the ones the real proxy would send
+    assert tuned.content == "tuned"
+    assert plain.content == "plain"
+    assert proxy.sampling == [
+        {
+            "top_p": 0.5,
+            "top_k": 40,
+            "min_p": 0.25,
+            "presence_penalty": 0.75,
+            "frequency_penalty": -0.5,
+            "repeat_penalty": 1.125,
+            "stop": ["END"],
+            "thinking": False,
+        },
+        {},
+    ]
 
 
 @pytest.mark.asyncio

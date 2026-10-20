@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "whisper-medium",
+  "kind": "dictation",
+  "label": "Whisper Medium",
+  "publisher": "OpenAI",
+  "license": {
+    "id": "mit",
+    "source": "https://huggingface.co/ggerganov/whisper.cpp"
+  },
+  "source_url": "https://huggingface.co/openai/whisper-medium",
+  "description": {
+    "fr": "Modèle Whisper d'OpenAI de la génération précédant Large-v3 : précis, mais plus lent que Large-v3 Turbo pour une qualité voisine. Il reste utile sur une machine où Turbo ne tient pas en version complète. Compter de 0,6 à 1,6 Go de mémoire selon la quantification.",
+    "en": "A Whisper model from OpenAI of the generation before Large-v3: precise, but slower than Large-v3 Turbo for a similar quality. It stays useful on a machine where the full Turbo file does not fit. Plan for 0.6 to 1.6 GB of memory depending on the quantization."
+  },
+  "capabilities": {
+    "tools": false,
+    "reasoning": false,
+    "vision": false,
+    "source": "https://huggingface.co/openai/whisper-medium"
+  },
+  "memory": {
+    "min_gb": 0.6,
+    "source": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-medium-q5_0.bin"
+  },
+  "defaults": {
+    "source": ""
+  },
+  "author_fields": [],
+  "repos": [
+    "openai/whisper-medium"
+  ],
+  "selection_files": [
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q8_0.bin"
+  ]
+}

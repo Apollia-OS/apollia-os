@@ -306,6 +306,17 @@ Rules :
 - Namespace by key prefix : `transcriptions.*`, `agents.*`, `settings.*`.
 - Pluralization via ICU MessageFormat where Svelte-i18n supports it,
   otherwise compose at the call site.
+- The interface vocabulary is data, in `src/lib/i18n/glossary.json`: one object
+  per locale (`fr`, `en`), each with `objects` and `screens` (the official word
+  per id, same ids in both), `developer_mode`, `chat_steps_panel`,
+  `search_by_meaning` and `search_by_meaning_model` (the words for the
+  embeddings model and what it serves), `banned` (terms
+  kept out outside developer mode), `banned_synonyms` (`assistant` for agent),
+  `permitted_formats` and `exemptions`. Use those words; never ban a word inline.
+- `scripts/check_ui_vocabulary.py` holds both catalogues to that list. A text
+  of the developer mode goes under the `dev.` namespace, rendered from a file
+  that reads `developerMode`; `exemptions` only descends, so remove a key from
+  it in the change that rewrites its text.
 
 ---
 
@@ -321,15 +332,30 @@ Rules :
 
 ---
 
-## 10. Operator vs Builder modes
+## 10. The developer mode
 
-Apollia has two distinct UX modes : **Operator** (autonomy, ease of use,
-guided flows) and **Builder** (exhaustive observability, every event, every
-field exposed). When fusing duplicated screens or features :
+Apollia has one switch, **developer mode**, off by default, in Settings >
+Developer (`crates/apollia-desktop/ui/src/routes/settings/Developer.svelte`).
+Its value lives in `[desktop] developer_mode` of `apollia.toml`, read and
+written through the shell by
+`crates/apollia-desktop/ui/src/lib/stores/developerMode.ts`, so the
+organization policy can impose it and Rust readers see the same value.
 
-- Preserve the wording and structure of each mode. Do not collapse Operator
-  flows into Builder views or vice versa.
-- The mode selector is a top-level switch, never per-screen.
+- **One switch, never per screen.** No screen, panel or tab carries its own
+  mode selector; a screen reads `developerMode` and renders its branch.
+- **The default branch comes from Operator** (autonomy, ease of use, guided
+  flows): it is what every user sees with the switch off.
+- **The developer branch comes from Builder** (exhaustive observability, every
+  event, every field exposed): it is shown only with the switch on.
+- **Both vocabularies stay.** The Operator wording is the default wording, the
+  Builder wording the developer wording. Do not collapse one branch into the
+  other when fusing duplicated screens; the paired components stay two
+  components, chosen by the switch.
+- **No second store.** The adapter that named the former modes is gone:
+  `developerMode` is the only store a screen reads. A component that still
+  takes a `"builder" | "operator"` skin derives it from `$developerMode` at
+  its call site. The runtime follows the same value: the next steps request
+  carries `developerMode`, never a mode name.
 
 ---
 
@@ -378,7 +404,7 @@ field exposed). When fusing duplicated screens or features :
   app and a real backend. It is gated behind `debug_assertions` /
   `import.meta.env.DEV` and tree-shaken out of release builds, so it is not a
   packaged end-to-end suite; it is the only thing in the tree that drives the
-  shell. Run it with `just desktop-dev-automation-seeded
+  shell. Run it with `just automation-seeded
   scripts/automation/master-det.json` (deterministic, no model) and read the
   verdict from `.apollia-automation/report.json`. Read
   `scripts/automation/README.md` before touching a script or a `data-testid`

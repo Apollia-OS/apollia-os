@@ -5,15 +5,833 @@ All notable changes to Apollia OS are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-10-20
 
-Nothing yet. Every change made so far lands in the initial preview below.
+The desktop application is named Apollia Desktop from this version on.
+Apollia OS keeps naming the engine under it, the `apollia-os` command line and
+the SDK.
 
-## [0.2.0-preview] - Unreleased
+Changes since `0.2.0-preview`. This release does not chase new capabilities: it
+makes the product readable and usable without opening a file of code or of
+configuration. An agent becomes a sheet anyone can read, the places where the
+AI runs come down to "on this machine" or "on a server", and every access an
+agent holds is granted, shown and journaled the same way.
 
-Changes since `0.1.0-preview`: schema-constrained LLM output, typed
-human-in-the-loop pauses, and the defects found by driving those paths against a
-real daemon. The date and the tag land when the release is published.
+The version is a minor bump with breaking changes, listed with their migration
+at the end of this entry. From this version on, tags no longer carry the
+`-preview` suffix.
+
+### Highlights
+
+- **An agent reads without code.** Each agent has a sheet that states its
+  mission, its model, the accesses it was granted, the sources it may consult
+  and its rights. Everything on the sheet is adjusted in place and goes back to
+  the defaults in one gesture.
+- **Agents ship as one file.** A `.apo` package carries any combination of
+  agents, workflows and Python tools, signed or not. Installing is opening the
+  file: a preview shows what the package contains and who published it before
+  anything is installed.
+- **Run an agent on a whole folder, a workbook or a mailbox.** A batch is told
+  once what to do with each item and which columns to answer in; its results
+  read as a table that sorts and filters, open in a spreadsheet, end on a
+  synthesis when asked, and continue in a conversation with the agent. It can
+  be paused, stopped, retried, survives a restart, and runs again on another
+  source with what it asked.
+- **One question for inference: where does the AI run?** On this machine,
+  Apollia picks the engine (llama.cpp, or MLX on Apple Silicon), checks that
+  the model fits and loads it on demand. On a server, any OpenAI-compatible
+  address is declared, tested and lists its models. Changing the answer
+  changes no agent.
+- **One list of connections.** Mailboxes, folders, connectors, the built-in
+  tools and MCP servers read as one list. A connection is added in two clicks
+  from a curated selection and granted to an agent family of action by family
+  of action.
+- **Free by default, governed when the organisation asks.** An agent calls
+  only what it was granted, and asks for consent on first sensitive use. An
+  organisation may add a signed policy that fixes settings and decides which
+  connections, servers, models and packages are allowed; it shows only when it
+  blocks.
+- **One developer mode, and a runtime that outlives the window.** A single
+  switch, off by default, replaces the Operator and Builder profiles and
+  reveals the technical surfaces: the OpenAI-compatible local server, where
+  agents can be exposed as models, Apollia as an MCP server, the logs and the
+  embedded documentation. The runtime installs as a service of the user
+  session, and the desktop attaches to it and drives the same agents, tasks,
+  approvals and models.
+
+### Added
+
+#### Agents, workflows and packages
+
+- `.apo` package archives are built, read and verified. A package holds any
+  combination of agents, workflows and Python tools; a package with no agent is
+  valid.
+- A package is previewed before it is installed, and its publisher key can be
+  trusted from the preview. Packages and distribution metadata carry a
+  verifiable signature.
+- An agent created in the interface is exported as a `.apo` package, signed or
+  not.
+- `apollia-os package build <folder> [--sign]`, `package inspect`, `package
+  preview`, `package install` and `package trust import|list|remove` build,
+  read, install and trust packages from the command line.
+- A Library screen lists the installed packages with their publisher, version,
+  content and signature. A package is opened, updated from a file through its
+  preview, or uninstalled from it, and the uninstall says what goes and what
+  stays. The packages shipped inside Apollia read as one entry that cannot be
+  uninstalled.
+- A package installed while the runtime runs brings its Python tools and
+  workflows at once, with no restart, and an uninstall removes them, with the
+  triggers of its workflows.
+- A package or an agent is uninstalled while keeping or erasing its memory and
+  history.
+- `@tool` and `@workflow` in the SDK declare the tools and workflows a package
+  ships. `python -m apollia describe <folder>` writes them into the package's
+  `apollia.toml`, which is read with a strict schema that names the offending
+  key by its full path.
+- A workflow of a package runs step by step, with nested agent and workflow
+  calls stopped at three levels, and takes a date, a long text or a file among
+  its inputs. `apollia-os workflow run|status|logs|cancel` drive it from the
+  command line, and a new `[workflows]` section of `apollia.toml` sets the
+  budget of a run started on its own.
+- The Agents screen lists agents and workflows together. A workflow has a
+  sheet of its own (steps, action family, connections it needs, run history),
+  and "Launch" opens a form built from its declared inputs, checks every field
+  before the run, shows each step live, stops it, and launches it again with
+  the same inputs.
+- An agent without code runs on one request, outside any conversation.
+- An agent runs on every item of a source as a batch that survives a restart.
+  A batch is paused, resumed, stopped and retried, is granted its accesses for
+  the run, and exports its results as Excel, CSV or JSON. It is launched from
+  an agent's sheet ("Process a batch"), by dropping a workbook or a CSV file in
+  the chat ("Process each row"), or with `apollia-os batch run`;
+  `batch status|list|accesses|pause|resume|stop|retry|export` follow it, each
+  with `--json`.
+- A batch reads a workbook or a CSV file from a proposed sheet and header row,
+  previewed on its first twenty rows, and sends the agent only the columns
+  checked. It reads a folder, one item per file with its full path and the
+  text a reader extracts (PDF, Word, PowerPoint, workbooks, CSV, plain text),
+  its sub-folders on request, and never writes into it. It also reads a
+  mailbox, one item per message, over IMAP or on Outlook, filtered by folder,
+  period and unread state, and never writes back to it. The launch dialog
+  offers the connected folders and mailboxes, a folder picked on this
+  computer, and a way to add a mailbox.
+- A batch is told at launch what the agent does with each item, and the
+  fields its answer gives, each with what it holds: the final answer of an
+  item is held to those fields by a JSON schema, which a local engine turns
+  into a grammar, and each field is a column of the results, of the copy of a
+  workbook and of every export. On request, once the last item has run, the
+  agent writes a synthesis of the table of results, kept with the batch and
+  written beside a file or a folder source.
+- A batch runs one item at a time by default and up to sixteen, and is
+  interrupted once a set number of items have failed (ten by default, five to
+  fifty, or never). An item that needs an access not granted at launch waits
+  for a decision, answered once or refused from the list of waiting
+  decisions, while the other items go on.
+- The results of a batch go by default to a dated copy beside its file, named
+  in the language of the interface (`<name> (résultats YYYY-MM-DD).xlsx` in
+  French, `(results …)` in English). On request, and for `.xlsx` and
+  `.xlsm` only, they go into the original after a dated backup, under a write
+  grant that is journaled. A CSV file gets a copy with the new column, and a
+  `.xls`, `.xlsb` or `.ods` file a new `.xlsx` copy of its values.
+- Batches have their own entry in the sidebar, in the command palette and
+  behind the "agents at work" pill. A batch opens on its own view: one row per
+  item, live progress, the commands, and each item in full in the side panel.
+  A running item says what its agent is doing (the tool it uses and on what,
+  thinking or writing) and for how long. A history lists every batch, filtered
+  by agent, outcome and file, and an ended batch is deleted from it or from
+  its view, with its items; the tasks that ran them are kept.
+- The end of a batch, and an item waiting for an access, raise a system
+  notification.
+- A finished batch opens on what was asked at launch (the instruction, the
+  columns, the synthesis) and on the files it wrote, each opened in its
+  application or shown in its folder. Its results read as a table, one row per
+  item and one column per field: a header sorts (amounts read as numbers), the
+  fields of few values are filters with their counts, and a cell an answer
+  left empty is marked to be read again. "Continue in the Chat" opens a
+  conversation with its agent, the table joined, and "Run this batch again"
+  opens the launch dialog on what it asked.
+- The creation of an agent is a draft that outlives its screen and the
+  application: the form, the workshop that prepares the sheet, which goes on
+  while the screen is away, and the sheet under review with its edits. The
+  list of agents offers to resume or discard it.
+- A file added as a source of an agent offers to let it open the file, by the
+  reading of the connected folder that holds it, or by connecting that folder
+  on the spot; the sources of a sheet connect a folder of this computer
+  directly.
+- A trigger starts an agent or a workflow, set from the agent sheet.
+- An agent carries its own autonomy tier, declared by its package and
+  overridable by the user; `apollia-os run --autonomy` overrides it for one
+  run.
+- An agent has a planning mode, never, auto (the default) or always, declared
+  under `[agents.defaults] planning` and overridable. When it plans, every step
+  of the plan uses the agent's model and only the tools it was granted.
+- `apollia-os agent set`, `agent reset` and `agent list --definitions` change
+  an agent, put one field or the whole agent back to its defaults, and list the
+  agents as resolved; `agent show` prints the resolved definition.
+- An agent is always available: loaded on demand and unloaded when idle,
+  after `[runtime] agent_idle_unload_secs` (600 by default). It reads as
+  available, degraded or unavailable.
+- A tool output too long for the context is kept whole on disk, and the model
+  receives its beginning and the path instead of a cut output.
+- An agent reaches another agent or a workflow only through an `agent:<id>` or
+  `workflow:<package>/<name>` access.
+- Agents without code and installed workflows are listed on the A2A card,
+  each with its kind and input schema, and invoked through
+  `POST /api/v1/a2a/invoke`. A client names an invocation with `invocation_id`
+  and cancels it with `DELETE /api/v1/tasks/{invocation_id}`.
+- The guide and the first-launch assistant ship as declarative agents, each
+  in an embedded package.
+- An agent is created from a short form: what it is for, what it gives back,
+  what it never does, what it may consult. The agent workshop, a workflow
+  shipped in a third embedded package, asks up to three questions about what
+  the form leaves unsaid, each with answers to pick, and writes the sheet for
+  review.
+- An agent whose Memory is checked keeps notes of its own with `memory_write`
+  and finds them again with `memory_search`, across its conversations. An
+  agent whose Profile is checked may propose a fact for the profile; each
+  proposal is put to the person.
+- The steps of a package workflow call the model through `ctx.llm`, each run
+  within a budget of calls, and `ctx.llm.complete` says whether the model
+  reasons before it answers.
+- A help icon on every screen opens the guide on that screen, in a side panel.
+- A workflow stops on a question to the user and goes on with the answer.
+- Example agents are proposed in the Agents screen and installed on demand:
+  web watch, mail triage, document analysis and request qualification. The
+  request qualification example comes with a demonstration workbook and three
+  reference documents, which "Try with the example" copies to a folder and
+  opens as a source and as a batch.
+
+#### Inference and models
+
+- An OpenAI-compatible server is declared by its address, tested, and lists
+  its models with the context window each one really serves.
+- The macOS arm64 bundle ships an MLX engine, vllm-mlx 0.5.0, run on the
+  embedded interpreter. The format of a model picks the local engine: GGUF on
+  llama.cpp, MLX on vllm-mlx. System > Engines picks the engine of each format
+  (`[engines] gguf`, `[engines] mlx`), shows the channel, version and update of
+  each, keeps them updated (`[engines] auto_update`, on by default) and purges
+  old builds on request.
+- Inference engines get an update channel of their own. Engines are downloaded
+  on demand, or imported from a disk, against a signed manifest; the
+  accelerated NVIDIA build is fetched when a card is detected instead of
+  coming in a separate installer.
+- Installed models come from an index that covers GGUF and MLX. The model
+  registry holds about two hundred cards across the main open model families
+  (Qwen, Gemma, Llama, Mistral AI, Microsoft, DeepSeek, IBM, NVIDIA, OpenAI,
+  Cohere and others), embeddings models (BGE-M3 recommended when it fits) and
+  a distilled French Whisper dictation model. The cards ship inside the
+  application and read offline; a signed online index, when reachable, takes
+  precedence. `[models] registry_url` and `registry_enabled` change or turn off
+  that index.
+- The discovery window groups models by maker, searches every repository and
+  format, and gives each model a card with its download options, a verdict for
+  this computer, one recommended variant, the author's README and "Use in a new
+  conversation".
+- A model shows what it can do and a short list of its variants. A variant
+  downloads whole, and its vision projector reaches the engine.
+- A model imported from a disk is checked, and an unverified origin is
+  marked; `models.import.require_verified` refuses it.
+- Embeddings and dictation models join the registry, sized for the machine and
+  verified on download.
+- Model presets, the model of each agent and the default model are stored. An
+  agent's request settings (temperature, top-p, top-k, min-p, penalties, stop
+  words, token limit) resolve over the model, its package and its preset, and
+  reach any engine as well as `ctx.llm.complete`.
+- A model's default preset carries its load settings to the engine, and the
+  reasoning setting of a model is read from its chat template.
+- A local model is loaded by hand after an estimate, the last one is reloaded
+  in one gesture, the resident models are listed and unloaded, and a model
+  unloads itself when idle unless it is pinned.
+- The local engine serves several requests at once when the machine has room.
+- Embeddings are served by an instance that never evicts the chat model.
+- Images attached to a chat message reach a model that reads them.
+- Every model call of a chat turn is measured and totalled under its answer.
+- One AI screen gathers the loaded models, the connected servers, the
+  catalogue and the detail of a model, and says on a gauge whether a model
+  fits this computer before it is loaded. A model opens a panel with its
+  information and, in developer mode, its loading and inference settings,
+  saved as presets of the model.
+- Settings > Model defaults sets the default context window, the load
+  guardrails, model unloading and a maximum image size (`[llm.defaults]`,
+  `[llm.images] max_side_px`); a larger image is scaled down before it is
+  sent. An option unloads the loaded models before another one loads
+  (`[llm.residency] unload_before_load`).
+- System > Hardware lists each GPU, each of which can be held back
+  (`llm.devices.disabled`), and monitors memory, video memory and processor,
+  also served by `GET /api/v1/llm/hardware/usage`. `GET /api/v1/llm/hardware`
+  reports what a model can occupy on the machine.
+- A conversation shows the models that are loading.
+- A model can be loaded with a draft model of its vocabulary.
+- The AI screen offers the accelerated engine when an NVIDIA card is detected.
+
+#### Connections and tools
+
+- Every connection of the machine reads as one list, and the built-in tools
+  join it as the Apollia source.
+- A connection from the curated selection is added in two clicks, with a
+  single warning. The public catalogue is queried only on "Explore all", with
+  a search and an accurate "official" badge.
+- A mailbox is added with its address and an application password, over IMAP,
+  read-only, from the window or with `apollia-os connector imap test|add|list`
+  (the password is read from standard input or `APOLLIA_IMAP_PASSWORD`).
+- A folder of the machine is added as a connection, and the addition offers,
+  checked by default, to let Apollia read it.
+- Each connected account publishes its own connector tools, named after it
+  (`conn:<provider>:<account>/<operation>`), so two accounts of one provider
+  publish two sets of tools.
+- Every tool carries its action family. An MCP tool arrives classified by its
+  hints or by the curated selection.
+- A connection is granted to an agent family by family, and a remote
+  connection is marked on the agent sheet.
+- Python MCP servers run on the embedded interpreter, with no `uv` to install.
+  Node.js is installed through the signed engine manifest when a server needs
+  it, and npm servers are pinned and installed once from an integrity lock.
+- The Google OAuth client is set on its connection page, with its secret in
+  the secret store.
+- A "Try" action on every connection, at the end of the addition and from its
+  page, opens a conversation limited to the tools of that connection.
+
+#### Sources and memory
+
+- What an agent may consult is a source of one registry, and each source has a
+  hybrid search index of its own that follows the files and is dropped with
+  its source.
+- An agent searches the sources checked for it through a tool it calls;
+  nothing is injected into its prompt.
+- The text of PDF, Word and PowerPoint documents is read, and a workbook or a
+  CSV file is read as cells of text. `file_read` reads these formats too,
+  whole or one page, slide or sheet.
+- A chat message carries up to four PDF, Word, PowerPoint or Excel files of
+  20 MiB each, and their text reaches the model.
+- A code folder checked for an agent gives it code context, read on demand.
+- The memory of the agents is searched by meaning as well as by words.
+- The memory of an agent lives on its sheet and in the profile.
+- Several profiles are stored side by side, one by default, each with its own
+  facts. The profile of a conversation is chosen in its panel.
+
+#### Governance
+
+- An agent calls only the tools, agents and workflows its access list grants.
+  The Python tools of a package are granted like any other tool.
+- Agents state a governance contract, and every access change is journaled.
+- A consent request has three answers, and a write asks on the same card. An
+  "always" holds for one agent and one action family.
+- Every decision waiting for the user is listed in one place, To review, and
+  answered on the same card as in the chat, with a short delay to cancel.
+- An Authorizations screen shows, agent by agent, the families granted, the
+  standing consents and the fine rules, each withdrawn in one click with an
+  undo, or all at once. Writing a fine rule takes the developer mode.
+- A signed organisation policy is read once at boot. It governs connections,
+  inference servers, model imports, the model registry, the packages that may
+  install and the settings it fixes. A setting the policy imposes reads as
+  locked. The organisation key, the policy file and its signature are created
+  and checked from the command line, and a screen shows what is allowed and
+  why.
+- The journal records consents, refusals, rules, batches, policy, every
+  change of `apollia.toml` (the keys changed, their origin and the digest of
+  the file before and after, never the values) and every call to the
+  compatible server (never its content). Its entries read as summaries with
+  their detail on demand, filtered by agent, family, nature, result and
+  period, in the window and with `apollia-os audit journal`.
+- The organisation policy can make the journal required, keep its entries for
+  a set number of days, force or forbid the detail in its exports, and write a
+  daily summary file. It can only close the compatible server, never open it.
+
+#### Developer mode and local server
+
+- A compatible server listens on its own port, off by default, switched on and
+  off while the runtime runs. It serves the loaded local models in the OpenAI
+  and Anthropic formats, loads models on demand, answers CORS preflights when
+  asked to, keeps and streams its recent logs, and can be opened to the local
+  network.
+- The compatible server gets named tokens, shown once and revocable.
+- An agent or a workflow marked as exposed is served by the compatible server
+  as the model `apollia/<id>`, on chat completions, responses and messages,
+  with its steps in `reasoning_content`. An access nobody granted answers 409
+  `approval_pending`.
+- A request to the compatible server may bring its own MCP server over HTTP
+  when `[server] allow_request_mcp` is on (off by default); it runs governed,
+  and the organisation policy can refuse it.
+- `server.separate_reasoning_content` (on by default) keeps the reasoning out
+  of `content` in the answers of the compatible server.
+- Apollia acts as an MCP server, and an MCP client reaches only the agents and
+  workflows the user exposes.
+- The documentation site is embedded in the desktop and readable offline.
+- The desktop keeps a log file, and the engine log level is set from the
+  settings.
+- The System page shows the engines and the hardware.
+- The configuration file can be edited in the settings.
+- A Developer screen gathers the server, its tokens, call examples to copy,
+  the logs, the HTTP reference of the native API and the documentation.
+- A switch in Settings > Developer keeps Apollia running without the window:
+  it installs the session service and relaunches the desktop attached to it.
+  The organisation policy can forbid it.
+- The native API covers what only the desktop did before, among them:
+  connecting a Google or Microsoft account for a hosted caller with its own
+  redirect address, browsing the MCP registry, setting an MCP server secret
+  (never answered back), streaming the event bus (`GET /api/v1/events`),
+  pausing a chat turn, the profile, the pending questions, governance, memory
+  export and import, and new families for loaded models, engines, inference
+  servers, presets, agent definitions and drafts, batches, workflows and
+  their runs, packages, connections, embeddings and dictation. The OpenAPI
+  document and the TypeScript and Python clients carry them.
+- The LLM chat and complete routes take `schema`, `temperature` and `seed`,
+  and return the validated answer under `value`. `GET /api/v1/llm/status` says
+  whether each backend carries a seed.
+
+#### Runtime and daemon
+
+- `apollia-os service install`, `uninstall` and `status` run the runtime at
+  logon without administrator rights, on macOS, Linux and Windows.
+- The desktop decides at startup whether to start its own runtime, attach to a
+  running one, or refuse with a reason. Attached, it serves the same surfaces:
+  agents, tasks, approvals, questions, conversations, models, connections,
+  memory, dictation, onboarding and packages.
+- Every write of `apollia.toml` goes through one writer, served under
+  `/api/v1/config`. A saved or hand-edited file applies without a restart, or
+  says that it waits for one.
+- `[api].port` sets the port of the native API, for the daemon and the
+  desktop.
+- The update channel chooses between stable and preview.
+
+#### Chat and settings
+
+- The chat picks its agent and its model from one selector.
+- The chat appearance settings set the font, the width, the density and the
+  reasoning card.
+- The onboarding reminders are listed in the settings, and each one can be
+  shown again.
+- The models folder is chosen in General, and the Hugging Face token is kept
+  in the secret store.
+- A top bar icon with a counter opens the downloads panel, and an option
+  opens it when a download starts.
+- The chat shows up to four conversations side by side.
+- Conversations are filed in folders, dragged in and out of them, and found by
+  what their messages say. `apollia-os chat list` shows the folder of each.
+- A deleted conversation goes to a trash and can be restored, unless a setting
+  makes deletion final. `apollia-os chat delete` stays final.
+- The composer shows what the model can do (reasoning, vision) and a compact
+  context gauge.
+- The Integrations tab of a conversation lists what its agent reaches; an
+  access is switched off or proposed for that conversation only, and "Apply to
+  the agent" copies the conversation's model, preset and instructions to the
+  agent.
+- The chat settings add the sort order of the list, the send key, automatic
+  naming (`[desktop] chat_auto_naming`), one empty conversation at a time, the
+  token counts and a shortcut to regenerate the last answer. The appearance
+  settings add the side of the navigation, Markdown or raw answers, generation
+  figures, scrolling, and bubbles or blocks.
+- `apollia-os profile list|show|create|rename|set|set-default|delete` manage
+  the profiles, each with `--json`.
+- Settings > Integrations sets what Apollia grants when nobody chose: the
+  accesses of a new agent (`[tools.new_agent]`) and the profile switch of a new
+  conversation (`chat.share_profile_default`).
+- The notification channels (desktop or web call) are set in the settings,
+  each with a test.
+- A conversation carries its own settings and notes, shows its prompt
+  template, and can keep the reasoning of its earlier answers.
+- An answer is continued, branched off, rewritten or removed from the row
+  under it.
+- The first launch can be replayed from the danger zone of the settings.
+- The first launch is a sequence of steps: the language, the AI (the one step
+  that cannot be skipped, where a local model is picked or a server declared,
+  its download going on through the next steps), the search and dictation
+  models, a test question answered by the chosen model, the profile, a first
+  agent (from a file, created or taken from an example) and the connections
+  that agent still needs.
+
+### Changed
+
+- The built-in chat becomes the Apollia agent: an agent like any other, with a
+  sheet, that cannot be uninstalled. Its former settings (system prompt,
+  allowed tools, backend) are carried over at startup and journaled.
+- Every agent runs through one executor, whether it comes from a package, from
+  the interface or from the chat.
+- An agent's model is resolved at each call, with a signalled fallback.
+- A new agent created without code is granted the reading family by default,
+  and nothing more.
+- The file tools reach only the folders granted to the agent. The home folder,
+  the data directory and the working volume are no longer roots.
+- One governance actor decides every tool call by action family.
+- Ollama is reached as any OpenAI-compatible server. Its context window is
+  read, never set by Apollia.
+- One memory estimator decides whether a model fits, and a local model that
+  would saturate the machine is refused before launch.
+- Model search is bounded to official publishers and recognised converters.
+- Every surface (CLI, daemon, desktop) reads and writes the one `apollia.toml`
+  under `~/.apollia`, written with its documentation on a first start. The
+  file has one strict schema: an invalid file is refused at the line of its
+  fault, and every key has an effect or is withdrawn.
+- The settings open in a window above the current screen and are ranked by use
+  in two groups, Settings and System.
+- The OAuth integrations leave the settings: each client and account is set on
+  the page of its connection.
+- MCP is named in developer mode only; elsewhere a server is a connection.
+- Transcriptions and Observability move to a developer group of the sidebar,
+  and the full Memory screen shows in developer mode.
+- The first launch no longer asks for a usage profile and leads to a working
+  agent (see Added).
+- The Inbox becomes To review, the list of what waits; the history of the
+  decisions already taken is no longer kept there.
+- The Tools and Permissions sections leave the settings: the tools live under
+  Connections and the rules on the Authorizations screen. Notifications move
+  from the sidebar into the settings, and the Model Hub page becomes the
+  "Discover models" window of the AI screen.
+- Most screens are redone on one surface, one row per item: the connections,
+  the agent sheet in tabs (what it is, what it did, what it keeps), the chat in
+  one column, the models as cards.
+- Tool steps and reasoning are shown plainly in the chat, each tool card is
+  redone, and the code card shows the whole command.
+- The interface texts follow one vocabulary, held free of banned technical
+  terms.
+- Cancelling a task stops its execution instead of relabelling it.
+- `GET /api/v1/health` answers without a token on the TCP listener and reveals
+  the product marker and the version, nothing else.
+- `apollia-os audit export` exports the hash-chained journal, with the filters
+  of `audit journal`, as CSV or JSON; `--detail` adds the content, with a
+  warning.
+- On the LLM chat routes, a schema the engine cannot express, a backend with
+  no structured mode, or an answer the schema refuses gets a 422 naming the
+  offending path, instead of a 503.
+- A reload of the configuration keeps `[llm.routing]` and reaches the agents
+  already running.
+- The embedded llama.cpp engine moves to build b11541.
+- A file access an agent is refused says how to grant it: a folder already
+  connected is granted on the agent's sheet, a new one is added in
+  Connections first.
+- The sidebar has two ranks. The Home screen and the task list screen are
+  retired: the application opens on the chat, and a run is read where its
+  agent is.
+- The journal is the one audit register. Its screen exports it and verifies
+  its integrity.
+- A step of a plan is decided by governance, like any other tool call.
+
+### Removed
+
+- The dedicated cloud LLM providers (`anthropic`, `mistral`, and `openai`
+  pointed at the OpenAI cloud), and the Anthropic and Vertex clients.
+- The Projects screen, the `apollia-os project` noun, the project routes of
+  the API and the "always for this project" consent scope.
+- The Operator and Builder selectors, in the top bar, in Appearance and in the
+  onboarding.
+- The guided tours and the "Getting started" band.
+- The native tools that let an agent write its own permission rules.
+- `ctx.user_context` in the SDK.
+- The `dangerous` flag of `@tool`: sensitivity follows the action family.
+- The configuration keys that nothing read, among them `[llm.runner]`,
+  `[llm.vertex]`, the pricing overrides and the cost alert threshold with its
+  CLI flags and its strip on the LLM page, `[filesystem]` and
+  `[chat] default_workspace`.
+- The native Ollama client and the `num_ctx` it sent on each call.
+- The separate CUDA installers. Their update manifest is still published, as
+  a copy of the standard one, so that the copies already installed keep
+  updating.
+- Every way of writing an agent in Python, in the SDK and in the runtime: an
+  agent is a record of a package, and code brings tools and workflows.
+- The approval level of an MCP server: an MCP tool is decided on its action
+  family, like any other tool.
+- The audit stores and views the journal made redundant.
+- `apollia-os run --alternatives` (nothing offered the plans to choose from),
+  and `--allowed-tools` and `--disallowed-tools`, replaced by the access list
+  of the agent.
+- The Start, Stop, Enable and Disable actions of agents in the desktop, and
+  the stopped and stopping states; the command line keeps `agent enable` and
+  `agent disable`.
+- `apollia-os tools approvals resolved`, the route of the resolved approvals,
+  and the resolved listing of `task approvals`, which lists what waits.
+- The session authorizations, chat rules and audit sections of the
+  Permissions settings.
+
+### Fixed
+
+- A batch on a folder failed on every item: the item named its file by its
+  path in the folder, which no file tool resolves, and the replans that
+  followed were built without the tools of the agent, so they invented tools
+  it did not hold and ended on `MAX_REPLAN_EXCEEDED`. A replan is now held to
+  the tools the agent is granted, like the first plan.
+- On a model served by MLX, a conversation was named by the reasoning of the
+  model ("Here's a thinking process"); its title is now asked with reasoning
+  off, and a line that opens as reasoning is refused.
+- Leaving the creation of an agent lost the form, the answers given to the
+  workshop and the sheet under review, and stopped the workshop.
+- The export of a batch wrote the whole answer of an item, as JSON, in one
+  column, and the full text of every file of a folder.
+
+- A tool call whose argument a local model wrote as text, a list, an object, a
+  boolean or a number, was refused ("invalid type: string, expected a
+  sequence", "expected a boolean"). The value is read as what the schema of the
+  tool asks for.
+- On a machine whose data folder does not exist yet, a TLS certificate left
+  without its key in `apollia.toml` was not reported.
+- In plan mode, a local model could repeat itself inside a text field of the
+  plan it was proposing and never finish: the conversation showed it thinking
+  for as long as it was left. The fields of a plan step are described and
+  bounded, and a short length bound of a tool schema now reaches the grammar of
+  the local engine, which ends the string.
+- A turn that ends by proposing a plan no longer reads as an answer that could
+  not be produced.
+- When a step of a plan failed, the request for a new plan carried a system
+  message alone, which the chat template of the Qwen models refuses: the
+  engine answered 500 on every attempt and the task ended on `REPLAN_FAILED`.
+  It now carries a user turn.
+- A plan answer had no token limit, and a reasoning that looped ran until the
+  engine gave up at 300 seconds. Plans are capped, so a loop ends in about a
+  minute and the planner tries again.
+- A server error from an engine was retried for fifteen minutes before it was
+  reported. It is retried for one minute at most.
+- The cause of a failed plan step, and an MLX engine line that reports a
+  failure, were written nowhere. Both reach the log.
+- An engine that closes an answer without generating anything is reported as
+  a failure instead of an empty answer said to have finished normally.
+- A structured answer from a reasoning model behind a server with no
+  template-aware parser failed with "the answer is not JSON": the reasoning
+  block is now skipped before the answer is read.
+- A `schema` sent to the LLM chat routes of the HTTP API was ignored, and a
+  `seed` asked of the local engine or of an OpenAI-compatible server was
+  dropped without a word.
+- The free chat ignored the backend it stored as preferred.
+- The model list missed models stored in a sub-folder, showed each part of a
+  split GGUF and the vision projector as models of their own, and filed a
+  dictation model saved as `.gguf` as a language model. A model downloaded
+  into its own folder was not found at first launch, and wiring it copied the
+  weights.
+- Deleting a model a configuration still names says why it is refused, and
+  deleting a model removes its card, projector, other parts and empty folder.
+- An unreachable server is reported with its address, not as "HTTP error 0".
+- Transcribing a file worked only after something had been dictated.
+- "Install and restart" on an update did not restart the application.
+- MCP OAuth on a server that publishes client metadata documents could fail in
+  the browser with "Unknown OAuth client": dynamic client registration is tried
+  first.
+- A call that asked the local engine for a structured answer never came back
+  on a model whose template opens on a channel marker: the schema was sent as a
+  raw grammar, which binds the first token. It now travels as
+  `response_format`, so the model reasons first and the constraint applies to
+  its answer. `apollia-os do` maps a request through a schema for the same
+  reason, and works on every backend.
+- A standing consent on a code executor covered every later call of the same
+  exchange. It now covers the current call only.
+- Cancelling a task left its Python code running and writing. The running
+  dispatch is now cancelled, and the task is reported cancelled once it has
+  stopped.
+- A tool disabled on an MCP server or a connector was still offered to the
+  agent.
+- A key set by one tool could be read by no engine, because the CLI, the
+  daemon and the desktop resolved the configuration file in different places.
+- Launching the desktop while a daemon was serving removed the daemon's socket
+  and ended without a word.
+- With file-based secret storage, the desktop wrote MCP secrets to the OS
+  keyring while the runtime looked for them in the encrypted files.
+- Keys that had no reader on the daemon now reach it: `[llm.observability]
+  debug_log_prompt`, `[tools] max_output_chars`, `[observability]` and
+  `[runtime] startup_timeout_secs`.
+
+### Security
+
+- An agent can no longer grant itself a permission: the tools that wrote
+  permission rules are gone, and rules stay the user's, from the desktop and
+  `apollia-os permissions`.
+- An agent calls only the tools, agents and workflows it was granted, and its
+  file tools reach only the folders granted to it.
+- An unreadable governance database or a refused organisation policy fails
+  closed: every sensitive tool call and every new connection is refused,
+  reading continues, and the window says why.
+- A downloaded model is kept only when its SHA-256 matches.
+- Engines, Node.js and packages are installed only after a signature and a
+  digest hold. An older manifest than the last one accepted is refused.
+- Curated Python MCP servers install from a hash lock of their whole
+  dependency closure, and npm servers from an integrity lock; one altered
+  digest refuses the installation.
+- Every connection secret goes through one secret store. A backend key given
+  in clear and the Hugging Face token are moved to it.
+- The profile is no longer pushed to agents through the context. An agent
+  reads it only when its profile source is checked, and each read is traced.
+  The Apollia agent of the chat alone receives the profile of its
+  conversation, under the "Use my preferences" switch of that conversation
+  (on by default).
+- The compatible server listens on the loopback interface unless the user
+  opens it to the local network; agents and workflows called from the network
+  require a token. The native API keeps refusing a non-loopback bind without a
+  token.
+- The organisation policy, not the user profile, forbids cloud connections.
+- Images attached to a message never reach a trace or a log.
+- On Windows, an organisation policy is trusted only when its folder and files
+  belong to Administrators or LocalSystem and nobody else can write to them,
+  and its signature date is a signed field, not the date of a file.
+- A model file stored outside LFS on Hugging Face is checked against its
+  published git blob identifier, and a variant file with neither digest is
+  refused. An imported model is checked before it enters the models folder,
+  and dictation models downloaded from the command line are checked against a
+  digest.
+- A `.apo` archive with an absolute path, a `..`, a symbolic link, a duplicate
+  name, or entries that would inflate past their bounds is refused.
+- The bundled `pypdf` moves to 6.20.1, which clears eight advisories, and the
+  interface's `dompurify` to 3.4.17, which clears two.
+
+### Breaking changes and migration
+
+#### Cloud LLM providers are removed
+
+`--provider anthropic` and `--provider mistral` are refused, and `openai` now
+means any OpenAI-compatible server at an address you designate. An `openai`
+backend with no address is refused instead of defaulting to the OpenAI cloud.
+
+On upgrade, every backend that reaches a cloud API is deleted: every
+`anthropic` or `mistral` backend, and every `openai` backend with no address or
+on `api.openai.com`, `api.mistral.ai` or `api.anthropic.com`. If the default
+backend was one of them, the default moves to the local engine when there is
+one. Self-hosted `openai` backends are kept unchanged.
+
+To migrate: declare an OpenAI-compatible server instead. To keep reaching a
+hosted model, put a gateway you operate (LiteLLM is the recommended one) in
+front of it and declare the gateway's address. A file that still carries
+`[llm.vertex]` loads with a warning and the section does nothing.
+
+#### Projects become sources
+
+The Projects screen and the project concept are gone. At the first start, each
+former project is converted: its documents become file sources grouped under
+the project's name, its instructions become a searchable file of the same
+group (searched, never injected into a prompt), its working folder becomes a
+folder connection granted to no agent, its memory spaces are merged into the
+agent's memory, and its conversations keep their agent. The sources are
+checked for the Apollia agent and for each agent the project linked.
+
+Nothing is dropped in silence: a document or a folder that is gone or
+unreadable, or an agent that is no longer installed, is listed in a report,
+shown once in the desktop and readable with `apollia-os source report`.
+
+To migrate: read the report, then grant the imported folder connections to the
+agents that need them, on their sheets. `apollia-os project`, the `project`
+field of `POST /api/v1/sessions`, `PUT /api/v1/sessions/{id}/project` and
+`GET /api/v1/projects/{id}/sessions` no longer exist; scripts that used them
+move to the source commands and routes. A consent given "always for this
+project" no longer holds beyond its session.
+
+#### Operator and Builder are replaced by the developer mode
+
+There is one switch, in Settings > Developer, off by default, stored as
+`[desktop] developer_mode`. A former Builder choice turns the mode on at the
+first launch. The onboarding no longer asks for a usage profile, and
+`PUT /api/v1/onboarding/profile` is removed. Transcriptions, Observability, the
+full Memory screen, the name "MCP" and the local server show in developer mode
+only.
+
+#### File access and standing consents
+
+An agent with no folder granted no longer reaches the home folder: its file
+tools refuse with a message that says how to grant one. The folders named by
+`[filesystem] trusted_paths` and `[chat] default_workspace` are added once as
+folder connections, granted to no agent (the home folder and the data
+directory excepted). To migrate: grant a folder connection on the agent's
+sheet, for reading or for writing.
+
+Permission rules lose the project and session scopes: a rule targets one agent
+or every agent. Rules written before are upgraded once at startup and each
+conversion is journaled. A blanket allow becomes a standing consent of its
+agent for one action family; a standing allow on a code executor or on a tool
+of unknown family is removed and will be asked again.
+
+#### SDK contract
+
+- `ctx.user_context` no longer exists. Read the profile through `ctx.profile`,
+  which answers only when the agent's profile source is checked.
+- `@tool` no longer takes `dangerous`; declare the action family that says
+  what the tool does.
+- A package manifest (`apollia.toml` of a package) refuses any key it does not
+  know. Fix the key the error names.
+- An agent's tools, agents and workflows are an access list: a tool the agent
+  was not granted is not offered to it. Declare the defaults in the package,
+  or grant them on the agent sheet.
+- Rust embedders: `RuntimeContext::new_with_llm` takes one argument less, and
+  `AIPTask.project_id` is removed.
+- An agent is no longer written in Python. It is a record of a package
+  (`[[agents]]` in `apollia.toml`), and code brings tools and workflows,
+  declared with `@tool` and `@workflow`. An existing Python agent is rewritten
+  as a package: its mission and accesses as a record, its code as tools and
+  workflows. The "Your first agent" tutorial builds one end to end.
+
+#### Command line and API
+
+- `apollia-os run` no longer takes `--alternatives`, `--allowed-tools` or
+  `--disallowed-tools`: remove them, and grant tools on the agent's sheet.
+- `apollia-os audit export` requires `--format` and `--output`, and exports the
+  journal instead of the trail of tool invocations.
+- `apollia-os tools approvals resolved` and the route of resolved approvals are
+  removed; `task approvals` lists what waits.
+- An agent no longer reaches the A2A skills of every loaded agent: grant
+  `agent:<id>` or `workflow:<package>/<name>` on its sheet or in its package.
+- An access list that names a bare connector operation stops granting it once
+  the provider has two accounts connected: name the tool
+  `conn:<provider>:<account>/<operation>`.
+
+#### Configuration file and withdrawn keys
+
+The only configuration file read is `~/.apollia/apollia.toml` (or an explicit
+`--file` on the config commands, or `--config` on `apollia-os start`). A file
+left in the working directory, under `$XDG_CONFIG_HOME/apollia` or under
+`~/.config/apollia` is neither read nor imported: `apollia-os doctor` names it
+with the command that moves it.
+
+The file has a strict schema. The daemon refuses to start on an unknown key or
+an invalid value and prints each fault at its line; the desktop starts on the
+defaults and reports the fault. `apollia-os config validate` lists every
+fault.
+
+Withdrawn keys still load, with a `config.key.retired` warning, and do
+nothing. Remove them:
+
+- `[llm.runner]`, `[llm.vertex]`, `[llm.pricing_overrides]`,
+  `llm.cost_alert_threshold_usd`
+- `llm.observability.log_token_usage`, `log_latency`, `log_cost` (tokens and
+  latency are always logged)
+- `tools.file_path_extraction_pattern`
+- `[filesystem]` and `chat.default_workspace` (replaced by folder connections)
+- `[memory]`, `[budget]`, `[a2a]`, `[oria]`, `[registry]`, `[permissions]`
+- `[triggers]`, `[notifications]`, `[stt]` (managed from the desktop or the
+  API)
+- `[ui] link_preview_enabled` moves to `[desktop] link_preview_enabled`; the
+  former key is still read while the new one is absent.
+
+#### CUDA installers
+
+The separate `-cuda` installers are no longer built. The standard installer
+offers the accelerated NVIDIA engine on the AI screen when a card is detected,
+downloads it against the signed engine manifest, and can import it from a disk
+on a machine with no network.
+
+An installation made from a `-cuda` installer keeps updating: its manifest,
+`latest-cuda.json`, is still published as a copy of `latest.json` and brings
+it to the standard installer of its system, which then offers the accelerated
+engine. Nothing has to be reinstalled by hand.
+
+### Compatibility
+
+- Published builds: the desktop for macOS arm64 (`.dmg`), Linux x86_64
+  (`.deb`, `.AppImage`) and Windows x86_64 (`.msi`, `.exe`), and the
+  `apollia-os` command line for the same systems, with Vulkan and Linux arm64
+  variants built when their runners allow.
+- The desktop runs on macOS 13 or later; the MLX engine needs macOS 14 or
+  later on Apple Silicon, and GGUF models run on llama.cpp everywhere.
+- The installers and the installed application keep the name Apollia OS, so an
+  installation of 0.2.0 is updated in place rather than installed beside; the
+  window and the interface say Apollia Desktop.
+- The runtime embeds CPython 3.13.13. The SDK supports Python 3.10 and later
+  for authoring and tests; building from source takes Rust 1.89 or later.
+- The databases under `~/.apollia` are migrated at the first start of 0.3.0,
+  and 0.2.0 refuses to open a database whose schema is newer than its own.
+  Keep a copy of the folder before upgrading if you may go back to 0.2.0.
+- New third-party components users get: `async-imap`, `mail-parser` and
+  `rustls-native-certs` (mailboxes), `rust_xlsxwriter` (Excel export), `zip`
+  (packages), `pdf_oxide` and `office_oxide` (documents) and vllm-mlx with MLX
+  (the macOS arm64 engine). Each is stated in the decisions chapter of the
+  documentation. `hf-hub` is no longer used.
+
+## [0.2.0-preview]
+
+Second preview, superseded by 0.3.0. Changes since `0.1.0-preview`:
+schema-constrained LLM output, typed human-in-the-loop pauses, and the defects
+found by driving those paths against a real daemon.
 
 The version is a minor bump: the preview adds public surface (`schema=` on
 `ctx.llm`, the typed pause and its answer, new API parameters and CLI flags) and
@@ -51,7 +869,7 @@ moves `hitl.db` to schema v2. Nothing is removed from the public API.
   takes an optional `skill_id`. `GET /api/v1/tasks` finds `input_required` tasks
   and lists agent, skill, `created_at`, prompt and payload, and
   `GET /api/v1/approvals/pending` carries `payload` and `skill_id`.
-  `just hitl-e2e` proves the path on a real daemon.
+  `just test-hitl` proves the path on a real daemon.
 - A structured MCP tool result reaches the agent with a `structured` key holding
   the object as the server built it; `content` is unchanged.
 - `GET /api/v1/audit/journal?agents=<name>,<name>` and `apollia-os audit journal
@@ -206,8 +1024,8 @@ moves `hitl.db` to schema v2. Nothing is removed from the public API.
 
 ## [0.1.0-preview]
 
-Initial public preview. Local-first Rust runtime for autonomous AI agents,
-single-maintainer. The date and the tag land when the release is published.
+First public preview, superseded by 0.3.0. Local-first Rust runtime for
+autonomous AI agents.
 
 The whole tree carries this version: the twenty-one Rust crates, the Python
 SDK, the built-in agents, and the desktop bundle. The desktop bundle files are
@@ -351,7 +1169,7 @@ cycle, before anything was published.
 
 ### Fixed
 
-- Mailbox lease exclusivity (C9-F4): `ack`/`nack` are now fenced on the leasing
+- Mailbox lease exclusivity: `ack`/`nack` are now fenced on the leasing
   `run_id` via a new `lease_owner` column, so a stale consumer whose lease was
   re-leased to another run can no longer delete or requeue the message the new
   owner is processing.
@@ -370,6 +1188,6 @@ cycle, before anything was published.
   are on no Apollia code path. Lift condition: the pyo3 0.29 migration.
 - Private vulnerability reporting via GitHub Security Advisories.
 
-[Unreleased]: https://github.com/Apollia-OS/apollia-os/commits/main
-[0.2.0-preview]: https://github.com/Apollia-OS/apollia-os/compare/v0.1.0-preview...main
+[0.3.0]: https://github.com/Apollia-OS/apollia-os/compare/v0.2.0-preview...main
+[0.2.0-preview]: https://github.com/Apollia-OS/apollia-os/compare/v0.1.0-preview...v0.2.0-preview
 [0.1.0-preview]: https://github.com/Apollia-OS/apollia-os/releases/tag/v0.1.0-preview

@@ -19,7 +19,7 @@ Every command runs from the repository root unless stated otherwise.
 
 ## Prerequisites
 
-The runtime needs a Rust toolchain, Python, and Git on every platform. The
+The build needs a Rust toolchain, Python, and Git on every platform. The
 desktop app adds Node.js, the `cargo tauri` CLI, and a per-OS webview toolchain.
 Install the shared tools first, then the OS-specific section for your machine.
 
@@ -30,11 +30,10 @@ Install the shared tools first, then the OS-specific section for your machine.
   `rust-toolchain.toml`; `rustup` reads that pin and installs the matching
   toolchain automatically the first time you build inside the checkout, so you do
   not select a version by hand.
-- **Python 3.13**, available as `python3`. The runtime embeds Python to load
-  agents, and the SDK installs into it. The checkout declares the exact version in
+- **Python 3.13**, available as `python3`. The runtime embeds Python to run
+  the tools and workflows of packages, and the SDK installs into it. The checkout declares the exact version in
   `.python-version`.
-- **Git.** Required to clone the repository and to install agents from a Git URL
-  later.
+- **Git.** Required to clone the repository.
 - **For the desktop app only: Node.js 20 or newer** (the project builds the UI on
   Node 22) with `npm`, and the `cargo tauri` CLI:
 
@@ -154,18 +153,20 @@ export PATH="$PWD/target/debug:$PATH"
 On Windows the binary is `target\debug\apollia-os.exe`; add `target\debug` to your
 `PATH` the equivalent way.
 
-This build talks to Anthropic, OpenAI-compatible, or Vertex cloud backends, and
+This build talks to OpenAI-compatible servers, Ollama among them, and
 serves local GGUF models through the embedded `llama-server`. On a source build
 that engine has to be on your `PATH`, covered in the last section.
 
 ## Step 2: install the SDK
 
-Agents are Python. Install the `apollia` package in editable mode into the same
-interpreter the runtime uses.
+An agent is a record declared in the `apollia.toml` of a package; the Python a
+package brings is its tools and its workflows, written with the SDK. Install
+the `apollia` package in editable mode into the same interpreter the runtime
+uses.
 
 Create a virtual environment first. Homebrew, Debian and Fedora ship Python as an
 externally managed environment (PEP 668): installing into it directly stops with
-`error: externally-managed-environment`, and the runtime loads agents from the
+`error: externally-managed-environment`, and the runtime runs the Python of packages with the
 interpreter it finds on `PATH`, so the environment you activate here is the one it
 will use.
 
@@ -187,22 +188,27 @@ An agent that generates text needs a backend. Pick one path.
 
 `llm setup --local` writes straight to the local database and works offline.
 Every other `llm` subcommand, including `backends create`, `reload` and `status`,
-talks to the daemon. If you take the cloud path, or want to check with `llm
+talks to the daemon. If you take the server path, or want to check with `llm
 status`, start the daemon first with step 4 and come back here.
 
 <!-- claim:cloud-llm-auth-is-api-key-only -->
-Cloud: register a backend with an API key. That is the only way a cloud provider
-authenticates; there is no OAuth flow for one.
+Server: register an OpenAI-compatible server (a self-hosted vLLM or LM Studio,
+or a LiteLLM gateway) with its address and, when it requires one, an API key.
+That is the only way such a server authenticates; there is no OAuth flow for
+one.
 
 ```sh
-apollia-os llm backends create prod --provider anthropic \
-  --model claude-sonnet-4-20250514 --api-key "$ANTHROPIC_API_KEY" --default
+apollia-os llm backends create prod --provider openai \
+  --base-url http://10.0.0.5:8000/v1 --model qwen3-32b \
+  --api-key "$VLLM_API_KEY" --default
 ```
 
-`--api-key` also accepts a `${VAR}` form, resolved from the environment at
-startup, so the key need not sit in `apollia.toml`.
+A key given as is moves to the secret store before the backend is saved, and the
+backend database keeps only the fact that the store holds it. `--api-key` also
+accepts a `${VAR}` form, which names an environment variable resolved at
+startup instead.
 
-Use your provider's current model id for `--model`; the value above is only an
+Use the model id your server serves for `--model`; the value above is only an
 example.
 
 Local: point the runtime at a `.gguf` file on your machine. This registers the
@@ -232,8 +238,8 @@ On its first run the runtime creates its data directory at `~/.apollia`. It
 listens on a Unix socket (`~/.apollia/runtime.sock` by default, set to `0600`
 after binding) and on
 `127.0.0.1:7771`. `apollia-os start` always binds TCP; `--port` chooses the
-number, and omitting it takes the default 7771 rather than leaving the port
-closed. On first boot it writes an API token to `~/.apollia/api-token`;
+number, and omitting it takes `[api].port` of `apollia.toml` (7771 by default)
+rather than leaving the port closed. On first boot it writes an API token to `~/.apollia/api-token`;
 TCP callers must present it as a bearer credential, while the Unix socket is
 local-trust and needs none. Leave this terminal running and open a second one for
 the next steps.
@@ -246,18 +252,26 @@ descriptor rather than the socket's `0600`.
 
 ## Step 5: run an agent
 
-The repository ships a no-LLM `echo` agent that runs on any machine. Install it,
-enable it so the runtime loads it, then send it a task:
+An agent ships in a package. Write the starting package, build it and install
+it:
 
 ```sh
-apollia-os agent install clients/examples/echo_agent.py --skip-tests
-apollia-os agent enable echo
-apollia-os run echo "hello from Apollia"
+apollia-os package new hello
+apollia-os package build hello
+apollia-os package install hello-0.1.0.apo
 ```
 
-Without the `enable` step, `run` fails with `agent not found: echo` and a hint listing the install, enable and load sequence.
+The starting package brings one agent and one Python tool. Then send the agent
+a task:
 
-You should see the echoed result. To write your own agent from scratch, follow
+```sh
+apollia-os run hello "hello from Apollia"
+```
+
+The agent answers with the model backend configured in step 3: an agent is a
+mission the model carries out, so `run` needs one.
+
+You should see its answer. To write your own agent from scratch, follow
 [Your first agent](/tutorials/your-first-agent).
 
 ## Step 6: stop the daemon
@@ -309,7 +323,7 @@ Each recipe accepts two optional arguments:
 | Argument | Role | Default (macOS / Linux / Windows) |
 |---|---|---|
 | `target` | Rust triple passed to `cargo tauri build` | `aarch64-apple-darwin` / `x86_64-unknown-linux-gnu` / `x86_64-pc-windows-msvc` |
-| `runners` | Space-separated list of runner backends to build and bundle | `cpu metal` / `cpu` / `cpu vulkan` |
+| `runners` | Space-separated list of runner backends to build and bundle | `cpu metal` / `cpu` / `cpu` |
 
 The `runners` value controls two things:
 
@@ -319,8 +333,8 @@ The `runners` value controls two things:
    first GPU backend in the list (`metal`, `cuda`, `rocm`, or `vulkan`); if
    none is present it falls back to CPU. Setting
    `APOLLIA_DESKTOP_LLAMA_BACKEND` overrides that choice and the list is not
-   consulted, which is how the release pipeline builds a CUDA engine next to
-   CPU speech-to-text runners.
+   consulted, which is how the `just` recipes and the release pipeline bundle
+   a Vulkan engine on Windows and Linux whatever the speech-to-text runners.
 
 `cpu` is always included as a universal fallback. Add one GPU backend that
 matches your hardware:
@@ -328,7 +342,7 @@ matches your hardware:
 | Hardware | Typical `runners` value | Notes |
 |---|---|---|
 | Apple Silicon | `cpu metal` | Default macOS preset |
-| NVIDIA (CUDA 12+) | `cpu cuda` | On Windows, LLM and STT both use CUDA. On Linux this value fails the bundle: the pinned upstream release ships no Linux CUDA `llama-server`, the fetch exits and the script stops on `could not bundle llama-server (cuda)`. Build one and pass `LLAMA_SERVER_DIR`, which is what the release pipeline does for the Linux `-cuda` bundle |
+| NVIDIA (CUDA 12+) | `cpu cuda` | Builds the CUDA speech-to-text runner. The bundled LLM engine stays Vulkan: no bundle carries a CUDA `llama-server`, on any platform, and asking for one (`APOLLIA_DESKTOP_LLAMA_BACKEND=cuda`) stops the script on `could not bundle llama-server (cuda)`. The installed application downloads the CUDA engine on demand from the engine channel; to bundle a build of your own, pass `LLAMA_SERVER_DIR` |
 | AMD Radeon / Intel Arc | `cpu vulkan` | LLM and STT on GPU through Vulkan; the STT runner needs the Vulkan SDK (`VULKAN_SDK`) at build time |
 | AMD Pro / Instinct + HIP SDK | `cpu rocm` | LLM and STT on ROCm where supported |
 
@@ -345,20 +359,20 @@ just release-linux
 just release-windows
 ```
 
-Override the target and/or runners on any preset:
+Each preset takes the runner set as its one argument:
 
 ```sh
 # Windows with Vulkan LLM (AMD / Intel / fallback NVIDIA)
-just release-windows runners="cpu vulkan"
+just release-windows "cpu vulkan"
 
-# Windows with CUDA (NVIDIA)
-just release-windows runners="cpu cuda"
+# Windows with the CUDA speech-to-text runner (NVIDIA); the engine stays Vulkan
+just release-windows "cpu cuda"
 
 # Linux with Vulkan
-just release-linux runners="cpu vulkan"
+just release-linux "cpu vulkan"
 
 # macOS with a custom runner set
-just release-macos runners="cpu metal"
+just release-macos "cpu metal"
 ```
 
 For a triple and runner set not covered by a preset, use the generic recipe:
@@ -371,9 +385,11 @@ just release-desktop aarch64-apple-darwin "cpu metal"
 
 The bundled `llama-server` engine is fetched from the pinned upstream
 llama.cpp release, which publishes builds for macOS (arm64 and x86-64), Linux
-x86-64 (CPU, Vulkan, ROCm), Linux arm64 (CPU) and Windows x86-64 (CPU, CUDA,
+x86-64 (CPU, Vulkan, ROCm), Linux arm64 (CPU) and Windows x86-64 (CPU,
 Vulkan). For any other couple, build llama.cpp yourself and pass
-`LLAMA_SERVER_DIR=<bin dir>`; the recipe then bundles your build.
+`LLAMA_SERVER_DIR=<bin dir>`; the recipe then bundles your build. The CUDA
+engine is never bundled: it is published on the engine channel and downloaded
+by the installed application.
 
 On Windows, export `LIBCLANG_PATH` in the same shell before running any of
 these recipes (see the Windows prerequisites above). On Linux, the speech-to-text runner additionally needs `clang` and
@@ -407,8 +423,10 @@ engine on your `PATH` to resolve it.
 There is no download command for models. Obtain a `.gguf` file yourself (for
 example from a model hub) and place it in `~/.apollia/models/`, then point a local
 backend at it with `apollia-os llm setup --local --model <path.gguf>`. The `model`
-subcommands (`list`, `search`, `show`, `hardware`, `delete`) inspect and manage the
-models already present; see the [CLI reference](/reference/cli).
+subcommands list and delete the files already present (`list`, `delete`),
+query the Hugging Face registry (`search`, `show`), report the hardware and
+rank the models this machine should run (`hardware`, `recommend`), and choose
+the embeddings model (`embeddings`); see the [CLI reference](/reference/cli).
 
 Speech-to-text is a separate, optional component. The `apollia-runner` sidecar,
 built with a `local-*` feature (`local-metal`, `local-cpu`, `local-cuda`,
@@ -419,5 +437,8 @@ you want local dictation.
 ## Next steps
 
 - Write and run your own agent: [Your first agent](/tutorials/your-first-agent).
+- Start the runtime at logon, without a terminal and without administrator
+  rights: `apollia-os service install` (then `service status`, and
+  `service uninstall` to remove it), on macOS, Linux and Windows.
 - Run Apollia as a managed service: [Deploy in production](/how-to/deploy-in-production).
 - Every flag on every command is in the [CLI reference](/reference/cli).

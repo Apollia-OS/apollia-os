@@ -136,12 +136,24 @@ where
 /// history to preserve context from older messages.
 ///
 /// Message order: system prompt, [summary], windowed history, user message.
+///
+/// A user message that carried images, earlier in the history or the one
+/// answered, is rebuilt with them after its text, so a follow-up question
+/// still sees them.
+///
+/// With `keep_reasoning`, an earlier answer carries the reasoning stored
+/// beside it; without, it travels as its content alone.
+// REASON: each argument is one part of the prompt, in the order it is laid
+// out; a struct would carry the same six values one call further.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::chat::builtin_agent) fn build_llm_messages(
     system_prompt: &str,
     history: &[ChatMessage],
     user_message: &str,
     summary: Option<&str>,
     context_window_size: usize,
+    images: &crate::chat::images::TurnImages,
+    keep_reasoning: bool,
 ) -> Vec<LlmChatMessage> {
     let window_size = if context_window_size == 0 {
         DEFAULT_CONTEXT_WINDOW_SIZE
@@ -170,8 +182,17 @@ pub(in crate::chat::builtin_agent) fn build_llm_messages(
 
     for msg in windowed_history {
         match msg.role {
-            ChatRole::User => messages.push(LlmChatMessage::user(&msg.content)),
-            ChatRole::Assistant => messages.push(LlmChatMessage::assistant(&msg.content)),
+            ChatRole::User => messages.push(match images.history.get(&msg.id) {
+                Some(found) => LlmChatMessage::user_with_images(&msg.content, found.clone()),
+                None => LlmChatMessage::user(&msg.content),
+            }),
+            ChatRole::Assistant => {
+                let answer = LlmChatMessage::assistant(&msg.content);
+                messages.push(match stored_reasoning(msg).filter(|_| keep_reasoning) {
+                    Some(reasoning) => answer.with_reasoning(reasoning),
+                    None => answer,
+                });
+            }
             ChatRole::Tool => {
                 let call_id = msg.tool_name.as_deref().unwrap_or("unknown");
                 messages.push(LlmChatMessage::tool_result(call_id, &msg.content));
@@ -182,8 +203,21 @@ pub(in crate::chat::builtin_agent) fn build_llm_messages(
         }
     }
 
-    messages.push(LlmChatMessage::user(user_message));
+    messages.push(LlmChatMessage::user_with_images(
+        user_message,
+        images.current.clone(),
+    ));
     messages
+}
+
+/// The reasoning stored beside an answer, `None` when it has none.
+fn stored_reasoning(message: &ChatMessage) -> Option<&str> {
+    message
+        .metadata
+        .as_ref()?
+        .get(crate::chat::types::THINKING_TRACE_KEY)?
+        .as_str()
+        .filter(|reasoning| !reasoning.trim().is_empty())
 }
 
 /// Extract the hostname from a URL string for use as an http_fetch allowlist entry.
@@ -378,6 +412,58 @@ pub(in crate::chat::builtin_agent) fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Advertise, as real tool specs, the tools `tool_search` has returned this turn.
+///
+/// An index too large to advertise leaves `tool_search` as the only declared
+/// function, and a backend that constrains tool calls to the declared names
+/// cannot emit any other: the model finds the tool it needs, then can only
+/// search again until the step budget is spent. Once a search names a tool, that
+/// tool is declared from the next iteration on, with the schema the search
+/// carried. Idempotent: a tool already declared is not added twice.
+pub(in crate::chat::builtin_agent) fn promote_discovered_tools(
+    specs: &mut Vec<ToolSpec>,
+    calls: &[ToolCallRecord],
+) {
+    for call in calls {
+        if call.tool_name != apollia_mcp::tool_search::TOOL_SEARCH_NAME
+            || !matches!(call.status, ToolCallStatus::Executed)
+        {
+            continue;
+        }
+        let Some(output) = call.output.as_deref() else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output) else {
+            continue;
+        };
+        let Some(matches) = parsed.get("matches").and_then(|m| m.as_array()) else {
+            continue;
+        };
+        for found in matches {
+            let Some(name) = found.get("full_name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            if specs.iter().any(|spec| spec.name == name) {
+                continue;
+            }
+            let description = found
+                .get("description")
+                .and_then(|d| d.as_str())
+                .map_or_else(|| format!("MCP tool `{name}`."), str::to_string);
+            let parameters = found
+                .get("input_schema")
+                .filter(|schema| schema.is_object())
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+            specs.push(ToolSpec {
+                name: name.to_string(),
+                description,
+                parameters,
+            });
+        }
+    }
+}
+
 pub(in crate::chat::builtin_agent) async fn build_tool_specs(
     available_tools: &[String],
     tool_registry: &ToolRegistryHandle,
@@ -388,7 +474,7 @@ pub(in crate::chat::builtin_agent) async fn build_tool_specs(
     // A connector's tools are only worth their schema while its account is
     // connected: see `connectors_bridge::availability` for what advertising all
     // of them cost. Asked per turn, so a newly connected account counts at once.
-    let connected = crate::connectors_bridge::availability::connected_providers().await;
+    let connected = crate::connectors_bridge::connected_accounts().await;
     let mut specs = Vec::with_capacity(available_tools.len());
     for name in available_tools {
         if !crate::connectors_bridge::availability::is_advertisable(name, &connected) {

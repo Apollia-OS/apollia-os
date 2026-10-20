@@ -1,0 +1,103 @@
+# The HuggingFace organisations whose repositories Apollia names, and how.
+#
+# Two kinds, kept apart because they answer different questions:
+#
+#   official     the organisation that trained the model. A repository under
+#                one of these orgs is the publisher's own release.
+#   converter    an organisation or user that republishes someone else's model
+#                in a format the runtime loads (GGUF, MLX). A short list on
+#                purpose: these are the converters whose files load cleanly and
+#                whose repositories the registry cards already name.
+#
+# Anything else on the Hub carries no kind at all.
+#
+# Every name below is the exact HuggingFace handle, checked against
+# `https://huggingface.co/api/organizations/<name>/overview` (or `users/` for a
+# personal account). The Hub matches handles without regard to case and
+# redirects, so the spelling here is the canonical one, not merely one that
+# resolves.
+#
+# `scripts/check-model-families.py` holds this file: both lists are non-empty,
+# no handle sits in both, the `publisher` of every language card of the registry
+# is listed below as an official publisher, and every repository such a card
+# names is owned by a handle of one of the two lists.
+
+schema_version = 1
+
+converters = ["lmstudio-community", "mlx-community", "unsloth", "bartowski", "ggml-org"]
+
+[[official]]
+publisher = "Qwen"
+orgs = ["Qwen"]
+
+[[official]]
+publisher = "Mistral AI"
+orgs = ["mistralai"]
+
+[[official]]
+publisher = "Google"
+orgs = ["google"]
+
+[[official]]
+publisher = "Meta"
+orgs = ["meta-llama", "meta-models"]
+
+[[official]]
+publisher = "Microsoft"
+orgs = ["microsoft"]
+
+[[official]]
+publisher = "NVIDIA"
+orgs = ["nvidia"]
+
+[[official]]
+publisher = "IBM"
+orgs = ["ibm-granite"]
+
+[[official]]
+publisher = "DeepSeek"
+orgs = ["deepseek-ai"]
+
+[[official]]
+publisher = "OpenAI"
+orgs = ["openai"]
+
+[[official]]
+publisher = "Cohere"
+orgs = ["CohereLabs"]
+
+[[official]]
+publisher = "Zhipu AI"
+orgs = ["zai-org"]
+
+[[official]]
+publisher = "Moonshot AI"
+orgs = ["moonshotai"]
+
+[[official]]
+publisher = "01.AI"
+orgs = ["01-ai"]
+
+[[official]]
+publisher = "Liquid AI"
+orgs = ["LiquidAI"]
+
+[[official]]
+publisher = "Hugging Face"
+orgs = ["HuggingFaceTB"]
+
+[[official]]
+publisher = "TII"
+orgs = ["tiiuae"]
+
+[[official]]
+publisher = "Ai2"
+orgs = ["allenai"]
+
+[[official]]
+publisher = "OpenBMB"
+orgs = ["openbmb"]
+
+[[official]]
+publisher = "Swiss AI Initiative"
+orgs = ["swiss-ai"]

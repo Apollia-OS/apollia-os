@@ -9,12 +9,18 @@ export interface TriggerResult {
   topic?: string;
 }
 
-/** Seven ordered phases of the onboarding flow. */
+/**
+ * Ordered phases of the onboarding flow: one per step of the first launch,
+ * then the three that close it.
+ */
 export type OnboardingPhase =
   | "welcome"
-  | "profile_choice"
   | "ai_setup"
+  | "embeddings"
   | "acquaintance"
+  | "first_agent"
+  | "connection"
+  | "first_task"
   | "guided_tour"
   | "graduation"
   | "done";
@@ -29,14 +35,10 @@ export interface OnboardingStats {
 /** Full onboarding state returned by get_onboarding_state. */
 export interface OnboardingState {
   phase: OnboardingPhase;
-  profile: string | null;
   llm_configured: boolean;
   stt_configured: boolean;
   topics_covered: string[];
   mandatory_complete: boolean;
-  tour_step_index: number;
-  tour_total_steps: number;
-  tour_completed: boolean;
   companion_session_id: string | null;
   voice_enabled: boolean;
   skipped: boolean;

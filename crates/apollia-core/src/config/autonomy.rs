@@ -127,7 +127,10 @@ pub struct AutonomyLevelConfig {
     pub format_version: u32,
     /// Effective budget for this tier. Always capped by the runtime ceiling.
     pub budget: StepBudgetConfig,
-    /// Inject user memory context into the system prompt for this tier.
+    /// Formerly gated the profile brief of the built-in assistant. Nothing
+    /// reads it any more: the brief follows the profile switch of the
+    /// conversation at every tier. Kept so an existing configuration file
+    /// still parses.
     /// Default: false for all tiers except `long_autonomous`.
     #[serde(default)]
     pub inject_memory: bool,
@@ -196,7 +199,11 @@ fn default_autonomy_level() -> AutonomyLevel {
     AutonomyLevel::Assisted
 }
 
-/// Autonomy tiers configuration (`[autonomy]` section in `apollia.toml`).
+/// Autonomy tiers configuration, a runtime parameter.
+///
+/// Not a section of `apollia.toml`: no loader reads an `[autonomy]` table, and
+/// a file that carries one is refused as an unknown key. The chat takes
+/// [`AutonomyConfig::default`]; a caller may override the tiers in code.
 ///
 /// Absent per-tier fields fall back to [`AutonomyLevelConfig::default_for`].
 /// Each tier is validated against the runtime ceiling in [`AutonomyConfig::validate`]:

@@ -12,7 +12,6 @@ use std::time::Duration;
 use apollia_core::{
     AIPInput, AIPResult, AIPTask, AgentManifest, ProcessState, RuntimeEvent, TaskStatus,
 };
-use apollia_runtime::api::routes_agents::StubAgentLoader;
 use apollia_runtime::{
     api::{APIServer, APIServerConfig, AppState},
     coordinator::{DynBackend, ExecutionBackend, ExecutionCoordinator},
@@ -92,12 +91,11 @@ impl ExecutionBackend for NeverBackend {
 
 fn test_manifest(name: &str) -> AgentManifest {
     AgentManifest {
+        autonomy_level: None,
         format_version: 1,
         name: name.to_string(),
         version: "1.0.0".to_string(),
         description: String::new(),
-        tools_required: vec![],
-        tools_optional: vec![],
         supports_streaming: false,
         supports_a2a: false,
         supports_mailbox: false,
@@ -106,14 +104,11 @@ fn test_manifest(name: &str) -> AgentManifest {
         shared_memory_namespaces: vec![],
         max_concurrent_tasks: 2,
         step_budget: None,
-        network_allowlist: None,
-        dangerous_tools_allowed: false,
         tags: vec![],
         skills: vec![],
         execution_mode: "auto".to_string(),
         system_prompt: None,
-        tools_requiring_approval: vec![],
-        llm_backend: None,
+        model: None,
         packages: vec![],
         memory_config: None,
         agent_type: None,
@@ -179,9 +174,11 @@ async fn test_shutdown_drains_active_tasks() {
         router_handle: router.clone(),
         registry_handle: registry.clone(),
         event_sender: event_sender.clone(),
-        agent_loader: std::sync::Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         backend: MockBackend::slow(Duration::from_millis(300)),
         llm_router: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         trigger_engine: None,
@@ -189,10 +186,9 @@ async fn test_shutdown_drains_active_tasks() {
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -212,11 +208,18 @@ async fn test_shutdown_drains_active_tasks() {
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     };
     let api = APIServer::new(
         APIServerConfig {
             socket_path: socket_path.clone(),
             tcp_port: Some(port),
+            tcp_listener: None,
             bind_addr: "127.0.0.1".to_string(),
             api_token: None,
             tls_cert_path: None,
@@ -242,6 +245,7 @@ async fn test_shutdown_drains_active_tasks() {
         mcp_handle: None,
         runner_supervisor: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
     });
 
     let start = tokio::time::Instant::now();
@@ -289,9 +293,11 @@ async fn test_shutdown_stops_all_agents() {
         router_handle: router.clone(),
         registry_handle: registry.clone(),
         event_sender: event_sender.clone(),
-        agent_loader: std::sync::Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         backend: MockBackend::slow(Duration::ZERO),
         llm_router: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         trigger_engine: None,
@@ -299,10 +305,9 @@ async fn test_shutdown_stops_all_agents() {
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -322,11 +327,18 @@ async fn test_shutdown_stops_all_agents() {
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     };
     let api = APIServer::new(
         APIServerConfig {
             socket_path: socket_path.clone(),
             tcp_port: Some(port),
+            tcp_listener: None,
             bind_addr: "127.0.0.1".to_string(),
             api_token: None,
             tls_cert_path: None,
@@ -354,6 +366,7 @@ async fn test_shutdown_stops_all_agents() {
         mcp_handle: None,
         runner_supervisor: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
     });
     let _ = controller.shutdown().await;
 
@@ -389,9 +402,11 @@ async fn test_shutdown_broadcasts_requested_event() {
         router_handle: router.clone(),
         registry_handle: registry.clone(),
         event_sender: event_sender.clone(),
-        agent_loader: std::sync::Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         backend: MockBackend::slow(Duration::ZERO),
         llm_router: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         trigger_engine: None,
@@ -399,10 +414,9 @@ async fn test_shutdown_broadcasts_requested_event() {
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -422,11 +436,18 @@ async fn test_shutdown_broadcasts_requested_event() {
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     };
     let api = APIServer::new(
         APIServerConfig {
             socket_path: socket_path.clone(),
             tcp_port: Some(port),
+            tcp_listener: None,
             bind_addr: "127.0.0.1".to_string(),
             api_token: None,
             tls_cert_path: None,
@@ -454,6 +475,7 @@ async fn test_shutdown_broadcasts_requested_event() {
         mcp_handle: None,
         runner_supervisor: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
     });
     let _ = controller.shutdown().await;
 
@@ -511,9 +533,11 @@ async fn test_shutdown_drain_timeout_force_cancels() {
         router_handle: router.clone(),
         registry_handle: registry.clone(),
         event_sender: event_sender.clone(),
-        agent_loader: std::sync::Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         backend: NeverBackend,
         llm_router: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         trigger_engine: None,
@@ -521,10 +545,9 @@ async fn test_shutdown_drain_timeout_force_cancels() {
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -544,11 +567,18 @@ async fn test_shutdown_drain_timeout_force_cancels() {
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     };
     let api = APIServer::new(
         APIServerConfig {
             socket_path: socket_path.clone(),
             tcp_port: Some(port),
+            tcp_listener: None,
             bind_addr: "127.0.0.1".to_string(),
             api_token: None,
             tls_cert_path: None,
@@ -574,6 +604,7 @@ async fn test_shutdown_drain_timeout_force_cancels() {
         mcp_handle: None,
         runner_supervisor: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
     });
 
     let result = controller.shutdown().await;

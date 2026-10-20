@@ -1,20 +1,16 @@
 {
   "name": "screenshots-en-llm (operator-help doc captures needing a model turn, English, seeded)",
   "notes": [
-    "Complement de screenshots-en.json. A lancer avec desktop-dev-automation-seeded-llama, pas avec la recette deterministe.",
+    "Complement de screenshots-en.json. A lancer avec automation-seeded-llama, pas avec la recette deterministe.",
     "The inbox cannot be filled by the seed: list_pending_approvals reads the in-memory PendingApprovals set, not the database (seed/fragments/hitl.sql:21-27 documents it). A real suspension has to be provoked.",
     "Prerequis : llama-server demasque et un modele charge.",
     "The two mid-stream captures rely on chat-stop-button, which only exists while generating: waitFor sees it appear, waitGone sees it disappear, and both sleeps fall between the two. That is the only deterministic signal of this state; a bare sleep depends on the speed of the model."
   ],
   "stopOnError": false,
   "dynamicTestids": [
-    "inbox-filter-all",
-    "inbox-filter-approval",
-    "inbox-filter-ask_user",
-    "inbox-tab-pending",
-    "language-en",
-    "settings-nav-appearance",
-    "settings-nav-llm"
+    "review-filter-decisions",
+    "review-filter-questions",
+    "settings-nav-general"
   ],
   "steps": [
     {
@@ -33,17 +29,19 @@
     },
     {
       "kind": "click",
-      "testid": "settings-nav-appearance",
+      "testid": "settings-nav-general",
       "timeoutMs": 8000
     },
     {
       "kind": "waitFor",
-      "testid": "language-toggle",
+      "testid": "language-select",
       "timeoutMs": 5000
     },
     {
-      "kind": "click",
-      "testid": "language-en"
+      "kind": "selectOption",
+      "testid": "language-select",
+      "value": "en",
+      "timeoutMs": 4000
     },
     {
       "kind": "sleep",
@@ -90,7 +88,7 @@
     },
     {
       "kind": "waitFor",
-      "testidPrefix": "approval-card-",
+      "testidPrefix": "operator-approval-",
       "nth": 0,
       "timeoutMs": 8000
     },
@@ -103,15 +101,10 @@
       "label": "controle-approuver-ou-refuser-une-action-1"
     },
     {
-      "kind": "click",
-      "testidPrefix": "approval-refuse-",
+      "kind": "fill",
+      "testidPrefix": "operator-approval-reason-",
       "nth": 0,
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "inbox-reject-dialog",
-      "timeoutMs": 8000
+      "text": "Out of the allowed perimeter for this documentation capture."
     },
     {
       "kind": "sleep",
@@ -122,13 +115,9 @@
       "label": "controle-approuver-ou-refuser-une-action-3"
     },
     {
-      "kind": "fill",
-      "testid": "inbox-reject-reason",
-      "text": "Out of the allowed perimeter for this documentation capture."
-    },
-    {
       "kind": "click",
-      "testid": "inbox-reject-confirm",
+      "testidPrefix": "operator-approval-refuse-",
+      "nth": 0,
       "timeoutMs": 8000
     },
     {
@@ -159,35 +148,20 @@
       "timeoutMs": 15000
     },
     {
-      "kind": "click",
-      "testid": "inbox-tab-pending",
-      "timeoutMs": 5000
-    },
-    {
       "kind": "waitFor",
-      "testid": "inbox-filter-approval",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "inbox-filter-approval",
-      "timeoutMs": 5000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "inbox-row-primary",
+      "testid": "review-item",
       "nth": 0,
       "timeoutMs": 8000
     },
     {
       "kind": "click",
-      "testid": "inbox-row-primary",
-      "nth": 0,
+      "testid": "review-filter-decisions",
       "timeoutMs": 5000
     },
     {
       "kind": "waitFor",
-      "testid": "hitl-always-toggle",
+      "testidPrefix": "operator-approval-always-",
+      "nth": 0,
       "timeoutMs": 8000
     },
     {
@@ -203,50 +177,6 @@
       "label": "troubleshooting-un-agent-est-bloque-1"
     },
     {
-      "kind": "click",
-      "testid": "inbox-row-primary",
-      "nth": 0,
-      "timeoutMs": 5000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "hitl-always-toggle",
-      "timeoutMs": 5000
-    },
-    {
-      "kind": "click",
-      "testid": "inbox-filter-all",
-      "timeoutMs": 5000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "inbox-row-primary",
-      "nth": 0,
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "sleep",
-      "ms": 700
-    },
-    {
-      "kind": "screenshot",
-      "label": "controle-approuver-ou-refuser-une-action-4"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "inbox-row-primary",
-      "nth": 0,
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "sleep",
-      "ms": 700
-    },
-    {
-      "kind": "screenshot",
-      "label": "troubleshooting-une-action-est-refusee-1"
-    },
-    {
       "kind": "goto",
       "route": "chat"
     },
@@ -257,29 +187,20 @@
     },
     {
       "kind": "waitFor",
-      "testidPrefix": "approval-card-",
+      "testidPrefix": "operator-approval-",
       "nth": 0,
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testidPrefix": "approval-refuse-",
-      "nth": 0,
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "inbox-reject-dialog",
       "timeoutMs": 8000
     },
     {
       "kind": "fill",
-      "testid": "inbox-reject-reason",
+      "testidPrefix": "operator-approval-reason-",
+      "nth": 0,
       "text": "Out of the allowed perimeter for this documentation capture."
     },
     {
       "kind": "click",
-      "testid": "inbox-reject-confirm",
+      "testidPrefix": "operator-approval-refuse-",
+      "nth": 0,
       "timeoutMs": 8000
     },
     {
@@ -310,41 +231,19 @@
       "timeoutMs": 15000
     },
     {
-      "kind": "click",
-      "testid": "inbox-tab-pending",
-      "timeoutMs": 5000
-    },
-    {
       "kind": "waitFor",
-      "testid": "inbox-filter-ask_user",
+      "testid": "review-question",
       "timeoutMs": 8000
     },
     {
       "kind": "click",
-      "testid": "inbox-filter-ask_user",
+      "testid": "review-filter-questions",
       "timeoutMs": 5000
     },
     {
       "kind": "waitFor",
-      "testid": "inbox-row-primary",
-      "nth": 0,
+      "testid": "review-question",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "inbox-row-primary",
-      "nth": 0,
-      "timeoutMs": 5000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "ask-user-form",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "ask-user-context",
-      "timeoutMs": 5000
     },
     {
       "kind": "sleep",
@@ -355,54 +254,53 @@
       "label": "transversal-utiliser-l-inbox-2"
     },
     {
-      "kind": "click",
-      "testid": "ask-user-refuse",
-      "timeoutMs": 5000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "inbox-reject-dialog",
-      "timeoutMs": 8000
-    },
-    {
       "kind": "fill",
-      "testid": "inbox-reject-reason",
+      "testid": "review-question-reason",
       "text": "Documentation capture, no answer needed for this question."
     },
     {
       "kind": "click",
-      "testid": "inbox-reject-confirm",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "sleep",
-      "ms": 600
-    },
-    {
-      "kind": "click",
-      "testid": "inbox-filter-all",
+      "testid": "review-question-refuse",
       "timeoutMs": 5000
     },
     {
-      "kind": "goto",
-      "route": "settings"
-    },
-    {
       "kind": "waitFor",
-      "testid": "settings-page"
-    },
-    {
-      "kind": "click",
-      "testid": "settings-nav-llm"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "llm-backends-section",
+      "testid": "review-answered",
       "timeoutMs": 8000
     },
     {
+      "kind": "waitGone",
+      "testid": "review-answered",
+      "timeoutMs": 20000
+    },
+    {
+      "kind": "goto",
+      "route": "llm"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "llm-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "ai-server-entry",
+      "nth": 0,
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "ai-server-entry",
+      "nth": 0
+    },
+    {
+      "kind": "waitFor",
+      "testid": "ai-server-error",
+      "timeoutMs": 20000
+    },
+    {
       "kind": "sleep",
-      "ms": 2000
+      "ms": 400
     },
     {
       "kind": "screenshot",
@@ -410,11 +308,11 @@
     },
     {
       "kind": "click",
-      "testid": "add-backend-btn"
+      "testid": "ai-server-add"
     },
     {
       "kind": "waitFor",
-      "testid": "llm-backend-dialog",
+      "testid": "ai-server-form",
       "timeoutMs": 5000
     },
     {
@@ -424,6 +322,10 @@
     {
       "kind": "screenshot",
       "label": "installation-connecter-un-modele-distant-1"
+    },
+    {
+      "kind": "click",
+      "testid": "ai-server-cancel"
     },
     {
       "kind": "goto",

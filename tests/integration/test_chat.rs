@@ -30,7 +30,6 @@ use apollia_llm::types::{
 };
 use apollia_llm::{CompletionModel, LlmRouter};
 use apollia_runtime::{
-    api::routes_agents::StubAgentLoader,
     api::{APIServer, APIServerConfig, APIServerHandle, AppState},
     chat::ChatSessionManagerHandle,
     coordinator::{DynBackend, ExecutionBackend},
@@ -217,19 +216,28 @@ fn build_chat_app_state(
     let llm_router = Arc::new(LlmRouter::with_backends(backends, "mock-chat"));
 
     let db_path = temp_chat_db();
+    // The governance a booted runtime hands the chat: an "always" answered at a
+    // prompt becomes a standing consent in its database, read on the next call.
+    let governance = apollia_runtime::governance::GovernanceHandle::spawn(
+        apollia_runtime::governance::GovernanceSources {
+            governance_db: db_path.parent().map(|dir| dir.join("governance.db")),
+            config_path: None,
+            policy: Arc::new(apollia_permissions::PolicyVerdict::Absent),
+            journal: None,
+            events: None,
+            forbidden_connections: std::collections::HashSet::new(),
+        },
+    );
     let chat_manager = ChatSessionManagerHandle::spawn(
         &db_path,
         Some(llm_router.clone()),
         tool_registry.clone(),
-        Arc::new(StubAgentLoader),
         None, // no ChatAgentRunner for libre-only tests
         event_sender.clone(),
         budget_config,
         None, // no user memory in tests
         registry_handle.clone(),
         None, // no A2A invoker in tests
-        None, // no project context in tests
-        None, // no project repo in tests
         None, // no MCP handle in tests
         None, // no chat tools config in tests
         apollia_mcp::session::LoadingMode::Eager,
@@ -243,9 +251,11 @@ fn build_chat_app_state(
         router_handle,
         registry_handle,
         event_sender,
-        agent_loader: Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: Some(governance),
+        inference_governance: Default::default(),
         backend: MockBackend,
         llm_router: apollia_runtime::api::server::shared_llm_router_from(Some(llm_router)),
         trigger_engine: None,
@@ -253,10 +263,9 @@ fn build_chat_app_state(
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: Some(tool_registry),
-        audit_trail: None,
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -276,6 +285,12 @@ fn build_chat_app_state(
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     };
 
     (state, event_rx)
@@ -295,9 +310,21 @@ async fn start_chat_server(
     let port = reserved_port.port();
     let socket_path = temp_socket_path();
     let (state, event_rx) = build_chat_app_state(mock_model, budget_config);
+    // `file_write` is described as the built-in writing tool it is, so the
+    // governance reads its family and offers "always" on it.
+    if let Some(registry) = &state.tool_registry_handle {
+        registry
+            .register(apollia_tools::tools::file_write::FileWrite::descriptor())
+            .await
+            .expect("register file_write");
+    }
+    if let (Some(chat), Some(governance)) = (&state.chat_manager, &state.governance) {
+        chat.set_governance(governance.clone()).await;
+    }
     let config = APIServerConfig {
         socket_path: socket_path.clone(),
         tcp_port: Some(port),
+        tcp_listener: None,
         bind_addr: "127.0.0.1".to_string(),
         api_token: None,
         tls_cert_path: None,
@@ -942,8 +969,8 @@ async fn test_chat_budget_exhausted() {
     let mut responses = Vec::new();
     for _ in 0..20 {
         responses.push(tool_call_response(
-            "bash_executor",
-            serde_json::json!({"command": "echo loop"}),
+            "file_write",
+            serde_json::json!({"path": "loop.txt", "content": "loop"}),
         ));
     }
     let model = MockChatModel::new(responses);
@@ -957,16 +984,18 @@ async fn test_chat_budget_exhausted() {
 
     let (handle, port, socket_path, mut event_rx) = start_chat_server(model, budget).await;
 
-    // Create session with bash_executor tool
+    // Create session with file_write tool. A code executor would not do: an
+    // "always" on it covers the current call only, so the loop would stop on
+    // the next prompt instead of reaching the budget.
     let (_, session) = http_post(
         port,
         "/api/v1/sessions",
-        serde_json::json!({ "mode": "libre", "tools": ["bash_executor"] }),
+        serde_json::json!({ "mode": "libre", "tools": ["file_write"] }),
     )
     .await;
     let session_id = session["id"].as_str().expect("session id");
 
-    // Authorize bash_executor via always_accept on the first tool call.
+    // Authorize file_write via always_accept on the first tool call.
     // After that, subsequent calls in this and future exchanges are auto-authorized,
     // allowing the ReAct loop to hit the budget limit without HITL blocking.
 
@@ -1005,7 +1034,7 @@ async fn test_chat_budget_exhausted() {
         serde_json::json!({
             "message_id": msg_id,
             "tool_call_id": tool_call_id,
-            "tool_name": "bash_executor",
+            "tool_name": "file_write",
             "decision": "always_accept"
         }),
     )

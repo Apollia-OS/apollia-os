@@ -6,25 +6,27 @@
 //! module at the end of this file.
 
 mod convert;
+mod sampling;
 mod stream;
 
 use std::sync::Arc;
 
+use apollia_llm::request_defaults::RequestDefaults;
 use convert::{
     inject_temporal_context_into_messages, json_to_py, llm_err_to_py, prepend_context_blocks,
-    py_dict_to_chat_message, py_dict_to_tool_spec, py_object_to_json,
+    py_dict_to_chat_message, py_object_to_json,
 };
+use sampling::{complete_request, RequestSampling};
 use stream::{emit_llm_capture, forward_stream, resolved_model_id, PyTokenStream, StreamForward};
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::IntoPyObjectExt;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use apollia_core::events::EventBusSender;
 use apollia_llm::{
-    ChatMessage, CompletionRequest, LlmError, LlmRouter, ObservabilityConfig, StepBudgetView,
-    ToolCallHelper,
+    AgentModelBinding, ChatMessage, CompletionRequest, LlmError, LlmRouter, ObservabilityConfig,
+    StepBudgetView,
 };
 
 /// Default bound on how many `map` items call the model at once when the caller
@@ -108,13 +110,6 @@ pub struct PyLlmResponse {
 /// async for chunk in await ctx.llm.stream([{"role": "user", "content": "..."}]):
 ///     print(chunk)
 ///
-/// # Case 4: automatic ReAct loop
-/// result = await ctx.llm.run_tools(
-///     messages=[{"role": "user", "content": "Read the file."}],
-///     tools=[{"name": "file_io", "description": "...", "parameters": {}}],
-///     max_iterations=5,
-/// )
-///
 /// # One-off backend override
 /// response = await ctx.llm.chat(
 ///     system="...", user="...", backend="anthropic"
@@ -124,7 +119,6 @@ pub struct PyLlmResponse {
 #[derive(Clone)]
 pub struct LlmProxy {
     router: Arc<LlmRouter>,
-    tool_helper: Arc<ToolCallHelper>,
     budget_view: Arc<StepBudgetView>,
     obs_config: Arc<ObservabilityConfig>,
     event_bus: Option<EventBusSender>,
@@ -136,6 +130,9 @@ pub struct LlmProxy {
     agent_id: Option<String>,
     /// Run this proxy belongs to; tags `LlmCallStarted` for audit correlation.
     run_id: Option<apollia_core::events::RunId>,
+    /// The model the agent asks for, resolved again at each call that names
+    /// no backend. `None` leaves the router's default in force.
+    agent_model: Option<AgentModelBinding>,
 }
 
 impl LlmProxy {
@@ -145,21 +142,49 @@ impl LlmProxy {
     /// `event_bus` is `None` when no Supervisor is active (unit tests).
     pub fn new(
         router: Arc<LlmRouter>,
-        tool_helper: Arc<ToolCallHelper>,
         budget_view: Arc<StepBudgetView>,
         obs_config: Arc<ObservabilityConfig>,
         event_bus: Option<EventBusSender>,
     ) -> Self {
         Self {
             router,
-            tool_helper,
             budget_view,
             obs_config,
             event_bus,
             task_id: None,
             agent_id: None,
             run_id: None,
+            agent_model: None,
         }
+    }
+
+    /// Binds this proxy to the model its agent asks for: the user's
+    /// assignment, else the manifest's backend, read again at each call.
+    pub fn with_agent_model(mut self, binding: AgentModelBinding) -> Self {
+        self.agent_model = Some(binding);
+        self
+    }
+
+    /// The router in force and the backend of one call: the backend the agent
+    /// names, else the agent's own model resolved now (which falls back to
+    /// the default, and says so, when that model is not available).
+    fn route_call(&self, backend: Option<String>) -> (Arc<LlmRouter>, Option<String>) {
+        let router = self.router.latest();
+        let backend = backend.or_else(|| {
+            self.agent_model
+                .as_ref()
+                .and_then(|binding| binding.resolve(&router, self.event_bus.as_ref()))
+        });
+        (router, backend)
+    }
+
+    /// The request settings a call on `backend` starts from: the agent's three
+    /// levels resolved now, or none for a proxy bound to no agent.
+    fn request_defaults(&self, router: &LlmRouter, backend: Option<&str>) -> RequestDefaults {
+        self.agent_model
+            .as_ref()
+            .map(|binding| binding.request_defaults(router, backend))
+            .unwrap_or_default()
     }
 
     /// Binds this proxy to the current execution identity for observability.
@@ -272,7 +297,7 @@ impl LlmProxy {
     /// Returns an empty string if no backend is configured.
     #[getter]
     fn default_backend(&self) -> String {
-        self.router.default_name().to_string()
+        self.router.latest().default_name().to_string()
     }
 
     /// Simplified LLM call: system prompt + user message.
@@ -312,17 +337,19 @@ impl LlmProxy {
         // constrained call is one call to the model, so it costs exactly what an
         // unconstrained one costs: one step, no more and no less.
         self.charge_step()?;
+        let (router, backend) = self.route_call(backend);
+        let defaults = self.request_defaults(&router, backend.as_deref());
 
         // Emit LlmCallStarted before dispatch.
         let prompt_chars = (system.chars().count() + user.chars().count()) as u64;
         let backend_label = backend
             .as_deref()
-            .unwrap_or_else(|| self.router.default_name())
+            .unwrap_or_else(|| router.default_name())
             .to_string();
         // The model the router will dispatch to, read from the backend it
         // resolves: `complete_with_observability` calls that one backend and
         // no other, so this is the model that answers.
-        let model_id = resolved_model_id(&self.router, backend.as_deref());
+        let model_id = resolved_model_id(&router, backend.as_deref());
         self.emit_started(
             &backend_label,
             &model_id,
@@ -331,7 +358,6 @@ impl LlmProxy {
             response_schema.as_ref(),
         );
 
-        let router = Arc::clone(&self.router);
         let obs = Arc::clone(&self.obs_config);
         let bus = self.event_bus.clone();
         let run_id = self.run_id.clone();
@@ -343,7 +369,7 @@ impl LlmProxy {
             // back to its training cutoff for "today"-type queries nor guesses
             // the host OS. Mirrors what Chat Libre's `build_system_prompt` does.
             let system_with_context = prepend_context_blocks(&system);
-            let req = CompletionRequest {
+            let mut req = CompletionRequest {
                 messages: vec![
                     ChatMessage::system(system_with_context),
                     ChatMessage::user(user),
@@ -354,6 +380,7 @@ impl LlmProxy {
                 response_schema: response_schema.clone(),
                 ..Default::default()
             };
+            defaults.apply_to(&mut req);
             let resp = router
                 .complete_with_observability(backend.as_deref(), req, bus.as_ref(), &obs)
                 .await
@@ -405,7 +432,8 @@ impl LlmProxy {
         max_tokens: Option<u32>,
         max_concurrency: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let router = Arc::clone(&self.router);
+        let (router, backend) = self.route_call(backend);
+        let defaults = self.request_defaults(&router, backend.as_deref());
         let obs = Arc::clone(&self.obs_config);
         let budget = Arc::clone(&self.budget_view);
         let bus = self.event_bus.clone();
@@ -425,6 +453,7 @@ impl LlmProxy {
                 let sem = Arc::clone(&sem);
                 let backend = backend.clone();
                 let system_prefix = system_prefix.clone();
+                let defaults = defaults.clone();
                 async move {
                     // Bound in-flight calls; the owned permit (no borrow across
                     // the await) is held for the item's duration. The semaphore is
@@ -437,12 +466,13 @@ impl LlmProxy {
                         return (index, Err("budget exhausted".to_string()));
                     }
                     budget.increment_steps();
-                    let req = CompletionRequest {
+                    let mut req = CompletionRequest {
                         messages: vec![ChatMessage::system(system_prefix), ChatMessage::user(item)],
                         temperature,
                         max_tokens,
                         ..Default::default()
                     };
+                    defaults.apply_to(&mut req);
                     let res = router
                         .complete_with_observability(backend.as_deref(), req, bus.as_ref(), &obs)
                         .await
@@ -488,8 +518,15 @@ impl LlmProxy {
     ///
     /// Returns `PyValueError` if a message dict is invalid (missing or unknown role).
     ///
-    /// `temperature`, `max_tokens`, and `seed` are optional sampling overrides;
-    /// when left `None` the per-model defaults apply.
+    /// `temperature`, `max_tokens`, `seed`, `top_p`, `top_k`, `min_p`,
+    /// `presence_penalty`, `frequency_penalty`, `repeat_penalty` and `stop` are
+    /// optional sampling overrides; each one left `None` is not sent, and the
+    /// engine keeps its own default.
+    ///
+    /// `thinking` says whether the model reasons before it answers. Left
+    /// `None`, the chat template of the model decides. A model that reasons
+    /// spends the token cap on its reasoning first: a short, constrained call
+    /// passes `False`.
     ///
     /// # Structured output
     ///
@@ -511,7 +548,7 @@ impl LlmProxy {
     // Flat parameters mirror the Python-facing signature (see `chat`).
     // REASON: mirrors the Python keyword signature of `ctx.llm.complete`; a params struct has no Python-side constructor.
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (messages, *, backend = None, temperature = None, max_tokens = None, seed = None, schema = None))]
+    #[pyo3(signature = (messages, *, backend = None, temperature = None, max_tokens = None, seed = None, top_p = None, top_k = None, min_p = None, presence_penalty = None, frequency_penalty = None, repeat_penalty = None, stop = None, schema = None, thinking = None))]
     fn complete<'py>(
         &self,
         py: Python<'py>,
@@ -520,8 +557,29 @@ impl LlmProxy {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         seed: Option<u64>,
+        top_p: Option<f32>,
+        top_k: Option<u32>,
+        min_p: Option<f32>,
+        presence_penalty: Option<f32>,
+        frequency_penalty: Option<f32>,
+        repeat_penalty: Option<f32>,
+        stop: Option<Vec<String>>,
         schema: Option<PyObject>,
+        thinking: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let sampling = RequestSampling {
+            temperature,
+            max_tokens,
+            seed,
+            top_p,
+            top_k,
+            min_p,
+            presence_penalty,
+            frequency_penalty,
+            repeat_penalty,
+            stop,
+            thinking,
+        };
         // Synchronous conversion before crossing the async boundary.
         let chat_messages = messages
             .iter()
@@ -541,6 +599,9 @@ impl LlmProxy {
             .iter()
             .map(|m| match &m.content {
                 apollia_llm::types::MessageContent::Text(t) => t.chars().count() as u64,
+                apollia_llm::types::MessageContent::TextWithImages { text, .. } => {
+                    text.chars().count() as u64
+                }
                 apollia_llm::types::MessageContent::ToolResult { content, .. } => {
                     content.chars().count() as u64
                 }
@@ -549,14 +610,16 @@ impl LlmProxy {
                 }
             })
             .sum();
+        let (router, backend) = self.route_call(backend);
+        let defaults = self.request_defaults(&router, backend.as_deref());
         let backend_label = backend
             .as_deref()
-            .unwrap_or_else(|| self.router.default_name())
+            .unwrap_or_else(|| router.default_name())
             .to_string();
         // The model the router will dispatch to, read from the backend it
         // resolves: `complete_with_observability` calls that one backend and
         // no other, so this is the model that answers.
-        let model_id = resolved_model_id(&self.router, backend.as_deref());
+        let model_id = resolved_model_id(&router, backend.as_deref());
         self.emit_started(
             &backend_label,
             &model_id,
@@ -565,7 +628,6 @@ impl LlmProxy {
             response_schema.as_ref(),
         );
 
-        let router = Arc::clone(&self.router);
         let obs = Arc::clone(&self.obs_config);
         let bus = self.event_bus.clone();
         let run_id = self.run_id.clone();
@@ -577,18 +639,7 @@ impl LlmProxy {
             // Otherwise insert a fresh system message at index 0. Keeps
             // multi-turn agent calls grounded on the real wall clock.
             let messages = inject_temporal_context_into_messages(chat_messages);
-            let req = CompletionRequest {
-                messages,
-                temperature,
-                // Default a cap when the agent does not set one: an unbounded
-                // completion lets a local model run to context-fill and appear
-                // to hang forever (the onboarding-agent symptom). An agent that
-                // needs a longer answer passes max_tokens explicitly.
-                max_tokens: max_tokens.or(Some(4096)),
-                seed,
-                response_schema: response_schema.clone(),
-                ..Default::default()
-            };
+            let req = complete_request(messages, sampling, response_schema.clone(), &defaults);
             let resp = router
                 .complete_with_observability(backend.as_deref(), req, bus.as_ref(), &obs)
                 .await
@@ -611,48 +662,6 @@ impl LlmProxy {
                 };
                 Py::new(py, py_resp).map(|p| p.into_any())
             })
-        })
-    }
-
-    /// Automatic ReAct loop: LLM, tool(s), LLM, ..., final answer.
-    ///
-    /// `messages`: list of dicts `{"role": "...", "content": "..."}`.
-    /// `tools`: list of dicts `{"name": "...", "description": "...", "parameters": {...}}`.
-    /// `max_iterations`: guard rail, the maximum number of LLM calls (default: 5).
-    ///
-    /// Returns a Python awaitable resolving to `str` (the LLM's final answer
-    /// after all tool calls have run).
-    ///
-    /// Raises `PyRuntimeError` if the agent budget is exhausted or
-    /// `max_iterations` is reached.
-    #[pyo3(signature = (messages, tools, max_iterations = 5))]
-    fn run_tools<'py>(
-        &self,
-        py: Python<'py>,
-        messages: Vec<PyObject>,
-        tools: Vec<PyObject>,
-        max_iterations: u32,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let chat_messages = messages
-            .iter()
-            .map(|obj| py_dict_to_chat_message(py, obj))
-            .collect::<PyResult<Vec<_>>>()?;
-
-        let tool_specs = tools
-            .iter()
-            .map(|obj| py_dict_to_tool_spec(py, obj))
-            .collect::<PyResult<Vec<_>>>()?;
-
-        let helper = Arc::clone(&self.tool_helper);
-        let budget = Arc::clone(&self.budget_view);
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = helper
-                .run_tools(chat_messages, tool_specs, max_iterations, &budget)
-                .await
-                .map_err(llm_err_to_py)?;
-
-            Python::with_gil(|py| result.into_py_any(py))
         })
     }
 
@@ -690,7 +699,8 @@ impl LlmProxy {
             .map(|obj| py_dict_to_chat_message(py, obj))
             .collect::<PyResult<Vec<_>>>()?;
 
-        let router = Arc::clone(&self.router);
+        let (router, backend) = self.route_call(backend);
+        let defaults = self.request_defaults(&router, backend.as_deref());
         let obs = Arc::clone(&self.obs_config);
         let bus = self.event_bus.clone();
 
@@ -712,6 +722,7 @@ impl LlmProxy {
                     temperature,
                     max_tokens,
                     seed,
+                    defaults,
                     tx,
                 })
                 .await;
@@ -847,25 +858,6 @@ mod tests {
         });
     }
 
-    /// `py_dict_to_tool_spec`: fields extracted correctly.
-    #[test]
-    fn test_py_dict_to_tool_spec() {
-        // GIVEN
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("name", "file_io").unwrap();
-            dict.set_item("description", "reads a file").unwrap();
-            dict.set_item("parameters", pyo3::types::PyDict::new(py))
-                .unwrap();
-            // WHEN
-            let spec = py_dict_to_tool_spec(py, &dict.into()).unwrap();
-            // THEN
-            assert_eq!(spec.name, "file_io");
-            assert_eq!(spec.description, "reads a file");
-        });
-    }
-
     /// Missing "role" key yields `PyValueError`.
     #[test]
     fn test_py_dict_to_chat_message_missing_role() {
@@ -894,21 +886,6 @@ mod tests {
             let msg = py_dict_to_chat_message(py, &dict.into()).unwrap();
             // THEN
             assert_eq!(msg.role, Role::System);
-        });
-    }
-
-    /// Missing "name" key in tool spec yields `PyValueError`.
-    #[test]
-    fn test_py_dict_to_tool_spec_missing_name() {
-        // GIVEN
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("description", "test").unwrap();
-            // WHEN: no "name" key
-            let result = py_dict_to_tool_spec(py, &dict.into());
-            // THEN
-            assert!(result.is_err());
         });
     }
 
@@ -997,82 +974,6 @@ mod tests {
         });
     }
 
-    /// `parameters` absent yields default `{}`.
-    #[test]
-    fn test_py_dict_to_tool_spec_parameters_optional() {
-        // GIVEN
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("name", "echo").unwrap();
-            dict.set_item("description", "echo input").unwrap();
-            // WHEN: no "parameters" key
-            let spec = py_dict_to_tool_spec(py, &dict.into()).unwrap();
-            // THEN
-            assert_eq!(spec.parameters, serde_json::json!({}));
-        });
-    }
-
-    /// A descriptor spelled the Anthropic way, which is what
-    /// `ctx.a2a.skill_as_tool` returns, carries its schema to the model.
-    #[test]
-    fn test_py_dict_to_tool_spec_reads_input_schema() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // GIVEN the descriptor `ctx.a2a.skill_as_tool` emits, whose schema
-            // key is `input_schema` and not `parameters`
-            let props = pyo3::types::PyDict::new(py);
-            let path = pyo3::types::PyDict::new(py);
-            path.set_item("type", "string").unwrap();
-            props.set_item("path", path).unwrap();
-            let schema = pyo3::types::PyDict::new(py);
-            schema.set_item("type", "object").unwrap();
-            schema.set_item("properties", props).unwrap();
-            schema
-                .set_item("required", pyo3::types::PyList::new(py, ["path"]).unwrap())
-                .unwrap();
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("name", "a2a__pdf__read_text").unwrap();
-            dict.set_item("description", "reads a PDF").unwrap();
-            dict.set_item("input_schema", schema).unwrap();
-
-            // WHEN it is converted to a tool spec
-            let spec = py_dict_to_tool_spec(py, &dict.into()).unwrap();
-
-            // THEN the model is told about the argument instead of receiving an
-            // empty schema
-            assert_eq!(spec.parameters["type"], "object");
-            assert_eq!(spec.parameters["properties"]["path"]["type"], "string");
-            assert_eq!(spec.parameters["required"][0], "path");
-        });
-    }
-
-    /// When both spellings are present, `parameters` wins.
-    #[test]
-    fn test_py_dict_to_tool_spec_parameters_wins_over_input_schema() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // GIVEN a descriptor carrying both keys with different schemas
-            let params = pyo3::types::PyDict::new(py);
-            params.set_item("type", "object").unwrap();
-            params.set_item("title", "from-parameters").unwrap();
-            let schema = pyo3::types::PyDict::new(py);
-            schema.set_item("type", "object").unwrap();
-            schema.set_item("title", "from-input-schema").unwrap();
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("name", "echo").unwrap();
-            dict.set_item("description", "echo input").unwrap();
-            dict.set_item("parameters", params).unwrap();
-            dict.set_item("input_schema", schema).unwrap();
-
-            // WHEN it is converted to a tool spec
-            let spec = py_dict_to_tool_spec(py, &dict.into()).unwrap();
-
-            // THEN the OpenAI spelling is the one that reaches the model
-            assert_eq!(spec.parameters["title"], "from-parameters");
-        });
-    }
-
     struct NamedModel(&'static str);
 
     #[async_trait::async_trait]
@@ -1132,5 +1033,83 @@ mod tests {
         assert_eq!(by_default, "qwen3-4b");
         assert_eq!(named, "mistral-medium");
         assert_eq!(unknown, "");
+    }
+
+    fn named_router(names: &[&'static str], default: &str) -> Arc<LlmRouter> {
+        let backends: std::collections::HashMap<String, Arc<dyn apollia_llm::CompletionModel>> =
+            names
+                .iter()
+                .map(|n| {
+                    (
+                        n.to_string(),
+                        Arc::new(NamedModel(n)) as Arc<dyn apollia_llm::CompletionModel>,
+                    )
+                })
+                .collect();
+        Arc::new(LlmRouter::with_backends(backends, default))
+    }
+
+    fn proxy_on(router: Arc<LlmRouter>, bus: Option<EventBusSender>) -> LlmProxy {
+        LlmProxy::new(
+            router,
+            Arc::new(StepBudgetView::unlimited()),
+            Arc::new(ObservabilityConfig::default()),
+            bus,
+        )
+    }
+
+    #[test]
+    fn a_call_without_backend_runs_on_the_agents_model() {
+        // GIVEN a proxy bound to an agent whose manifest declares `cloud`, and
+        //       one bound to an agent asking for a model the router lacks
+        let router = named_router(&["local", "cloud"], "local");
+        let (bus, mut rx) = tokio::sync::broadcast::channel(8);
+        let declared = proxy_on(Arc::clone(&router), Some(bus.clone()))
+            .with_agent_model(AgentModelBinding::new("notes", Some("cloud".into()), None));
+        let missing = proxy_on(Arc::clone(&router), Some(bus))
+            .with_agent_model(AgentModelBinding::new("mail", Some("gone".into()), None));
+        let unbound = proxy_on(Arc::clone(&router), None);
+
+        // WHEN a call is routed with and without a backend named
+        let (_, by_agent) = declared.route_call(None);
+        let (_, named) = declared.route_call(Some("local".into()));
+        let (_, fell_back) = missing.route_call(None);
+        let (_, plain) = unbound.route_call(None);
+
+        // THEN the agent's model answers unless the call names one, a missing
+        //      model leaves the default in force and says so, and an agent
+        //      bound to nothing keeps the default
+        assert_eq!(by_agent.as_deref(), Some("cloud"));
+        assert_eq!(named.as_deref(), Some("local"));
+        assert_eq!(fell_back, None);
+        assert_eq!(plain, None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(apollia_core::events::RuntimeEvent::LlmAgentModelFallback { ref agent, .. })
+                if agent == "mail"
+        ));
+    }
+
+    #[test]
+    fn a_reload_reaches_a_proxy_built_before_it() {
+        // GIVEN a proxy built on the boot router, whose agent asks for `fresh`,
+        //       a model the boot router does not hold
+        let boot = named_router(&["local"], "local");
+        let proxy = proxy_on(Arc::clone(&boot), None).with_agent_model(AgentModelBinding::new(
+            "notes",
+            Some("fresh".into()),
+            None,
+        ));
+        let (_, before) = proxy.route_call(None);
+
+        // WHEN a reload builds a router holding `fresh` and supersedes the boot one
+        let reloaded = named_router(&["local", "fresh"], "local");
+        boot.supersede(&reloaded);
+        let (router, after) = proxy.route_call(None);
+
+        // THEN the same proxy now routes on the reloaded router, to `fresh`
+        assert_eq!(before, None);
+        assert!(Arc::ptr_eq(&router, &reloaded));
+        assert_eq!(after.as_deref(), Some("fresh"));
     }
 }

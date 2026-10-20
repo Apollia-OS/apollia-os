@@ -1,17 +1,35 @@
-import { vi, describe, test, expect, beforeEach } from "vitest";
+import { vi, describe, test, expect, beforeAll, beforeEach } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn().mockResolvedValue(""),
 }));
 
 import { get } from "svelte/store";
+import { locale, t, waitLocale } from "svelte-i18n";
+import "$lib/i18n";
+import en from "$lib/i18n/en.json";
+import fr from "$lib/i18n/fr.json";
 import { invoke } from "@tauri-apps/api/core";
-import { companionStore } from "./companion";
+import { companionStore } from "$lib/stores/companion";
+import { detailSidebar, guideVisible } from "$lib/stores/detailSidebar";
+import type { GuideContext } from "$lib/stores/guideContext";
+
+/** The context of a screen with no declared sub-screen. */
+function onScreen(route: string): GuideContext {
+  return { route, subscreen: null, object: null };
+}
 
 const mockedInvoke = vi.mocked(invoke);
 
+// The context text is a catalogue entry, read in the language of the interface.
+beforeAll(async () => {
+  locale.set("en");
+  await waitLocale();
+});
+
 beforeEach(() => {
   companionStore.reset();
+  detailSidebar.reset();
   vi.clearAllMocks();
   mockedInvoke.mockResolvedValue("");
 });
@@ -19,23 +37,20 @@ beforeEach(() => {
 // ── toggleCompanion ───────────────────────────────────────────────────────────
 
 describe("companionStore - toggleCompanion", () => {
-  test("flips enabled and visible from false to true", () => {
-    // GIVEN companion disabled (enabled=false, visible=false)
-    const before = get(companionStore);
-    expect(before.enabled).toBe(false);
-    expect(before.visible).toBe(false);
+  test("opens the Guide tab and enables the companion", () => {
+    // GIVEN companion disabled and the Guide tab closed
+    expect(get(companionStore).enabled).toBe(false);
+    expect(get(guideVisible)).toBe(false);
 
     // WHEN
     companionStore.toggleCompanion();
 
     // THEN
-    const after = get(companionStore);
-    expect(after.enabled).toBe(true);
-    expect(after.visible).toBe(true);
-    expect(after.minimized).toBe(false);
+    expect(get(companionStore).enabled).toBe(true);
+    expect(get(guideVisible)).toBe(true);
   });
 
-  test("flips enabled and visible from true to false", () => {
+  test("closes the Guide tab and disables the companion", () => {
     // GIVEN companion already enabled
     companionStore.toggleCompanion();
     expect(get(companionStore).enabled).toBe(true);
@@ -44,9 +59,8 @@ describe("companionStore - toggleCompanion", () => {
     companionStore.toggleCompanion();
 
     // THEN both are false
-    const state = get(companionStore);
-    expect(state.enabled).toBe(false);
-    expect(state.visible).toBe(false);
+    expect(get(companionStore).enabled).toBe(false);
+    expect(get(guideVisible)).toBe(false);
   });
 
   test("persists enabled state via set_companion_enabled IPC", () => {
@@ -61,31 +75,18 @@ describe("companionStore - toggleCompanion", () => {
   });
 });
 
-// ── toggleVisibility ──────────────────────────────────────────────────────────
+// ── openCompanion ─────────────────────────────────────────────────────────────
 
-describe("companionStore - toggleVisibility", () => {
-  test("flips visible without changing enabled", () => {
-    // GIVEN companion enabled and visible
-    companionStore.toggleCompanion(); // enabled=true, visible=true
+describe("companionStore - openCompanion", () => {
+  test("opens the detail sidebar on the Guide tab without persisting", () => {
+    // GIVEN the Guide tab closed
+    expect(get(guideVisible)).toBe(false);
 
-    // WHEN keyboard shortcut hides
-    companionStore.toggleVisibility();
+    // WHEN the guide is opened (Cmd+Shift+C)
+    companionStore.openCompanion();
 
-    // THEN visible=false but enabled stays true
-    const state = get(companionStore);
-    expect(state.visible).toBe(false);
-    expect(state.enabled).toBe(true);
-  });
-
-  test("does not call set_companion_enabled IPC", () => {
-    // GIVEN companion enabled
-    companionStore.toggleCompanion();
-    vi.clearAllMocks();
-
-    // WHEN visibility is toggled via keyboard shortcut
-    companionStore.toggleVisibility();
-
-    // THEN no IPC persistence call is made
+    // THEN the Guide tab shows and no preference is written
+    expect(get(guideVisible)).toBe(true);
     expect(mockedInvoke).not.toHaveBeenCalledWith(
       "set_companion_enabled",
       expect.anything(),
@@ -96,20 +97,67 @@ describe("companionStore - toggleVisibility", () => {
 // ── updateContext ─────────────────────────────────────────────────────────────
 
 describe("companionStore - updateContext", () => {
-  test("stores fetched context text and updates currentRoute", async () => {
-    // GIVEN
+  test("stores the catalogue text of the route and updates currentRoute", async () => {
+    // GIVEN the interface in English
+    // WHEN the guide is given the Agents screen
+    await companionStore.updateContext(onScreen("agents"));
+
+    // THEN the context is the catalogue text of that screen, with the action
+    // the guide may offer and the route it opens
+    const state = get(companionStore);
+    expect(state.currentContext).toContain(get(t)("guide.context.agents.text"));
+    expect(state.currentContext).toContain("(/chat)");
+    expect(state.currentRoute).toBe("agents");
+    expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  test("the context text follows the language of the interface", async () => {
+    // GIVEN the Journal screen described in English
+    await companionStore.updateContext(onScreen("journal"));
+    const english = get(companionStore).currentContext;
+
+    // WHEN the interface switches to French and the context is handed again
+    locale.set("fr");
+    await waitLocale();
+    await companionStore.updateContext(onScreen("journal"));
+    const french = get(companionStore).currentContext;
+    locale.set("en");
+    await waitLocale();
+
+    // THEN the same screen is described in French
+    expect(english).toContain(en.guide.context.journal.text);
+    expect(french).toContain(fr.guide.context.journal.text);
+    expect(fr.guide.context.journal.text).not.toBe(en.guide.context.journal.text);
+  });
+
+  test("a declared sub-screen and its object reach the guide's instructions", async () => {
+    // GIVEN an active session
     mockedInvoke.mockImplementation((cmd: string) => {
-      if (cmd === "get_companion_context") return Promise.resolve("You are on the Agents page.");
+      if (cmd === "create_companion_session")
+        return Promise.resolve({ session_id: "sess-2" });
       return Promise.resolve(null);
     });
+    await companionStore.createSession("agents");
 
-    // WHEN
-    await companionStore.updateContext("agents");
+    // WHEN the context carries the agent sheet and the agent it shows
+    await companionStore.updateContext({
+      route: "agents",
+      subscreen: "agents.fiche",
+      object: { id: "agent-7", name: "Qualify requests" },
+    });
 
-    // THEN
+    // THEN the instructions sent to the session carry the text of the sheet,
+    // and name the sub-screen and the agent
+    const call = mockedInvoke.mock.calls.find(
+      ([cmd]) => cmd === "update_chat_session",
+    );
+    const update = (call?.[1] as { update: { system_prompt: string } }).update;
+    expect(update.system_prompt).toContain("You are reading the sheet of Qualify requests.");
+    expect(update.system_prompt).toContain("agents.fiche");
+    expect(update.system_prompt).toContain('"Qualify requests" (id: agent-7)');
     const state = get(companionStore);
-    expect(state.currentContext).toBe("You are on the Agents page.");
-    expect(state.currentRoute).toBe("agents");
+    expect(state.currentSubscreen).toBe("agents.fiche");
+    expect(state.currentObject).toEqual({ id: "agent-7", name: "Qualify requests" });
   });
 
   test("session id is preserved across route changes", async () => {
@@ -117,15 +165,13 @@ describe("companionStore - updateContext", () => {
     mockedInvoke.mockImplementation((cmd: string) => {
       if (cmd === "create_companion_session")
         return Promise.resolve({ session_id: "abc123" });
-      if (cmd === "get_companion_context")
-        return Promise.resolve("Context text.");
       return Promise.resolve(null);
     });
     await companionStore.createSession("agents");
     expect(get(companionStore).sessionId).toBe("abc123");
 
     // WHEN context is updated for a different route
-    await companionStore.updateContext("tasks");
+    await companionStore.updateContext(onScreen("tasks"));
 
     // THEN the session id is unchanged
     expect(get(companionStore).sessionId).toBe("abc123");
@@ -136,14 +182,12 @@ describe("companionStore - updateContext", () => {
     mockedInvoke.mockImplementation((cmd: string) => {
       if (cmd === "create_companion_session")
         return Promise.resolve({ session_id: "sess-1" });
-      if (cmd === "get_companion_context")
-        return Promise.resolve("Tasks context.");
       return Promise.resolve(null);
     });
     await companionStore.createSession("agents");
 
     // WHEN context is updated
-    await companionStore.updateContext("tasks");
+    await companionStore.updateContext(onScreen("journal"));
 
     // THEN update_chat_session IPC is called with the new context as system
     // prompt, under the argument key Tauri actually reads. Tauri camel-cases
@@ -152,7 +196,11 @@ describe("companionStore - updateContext", () => {
     // carrying no `rename_all`.
     expect(mockedInvoke).toHaveBeenCalledWith("update_chat_session", {
       sessionId: "sess-1",
-      update: { system_prompt: "Tasks context.", tools: null, llm_backend: null },
+      update: {
+        system_prompt: get(companionStore).currentContext,
+        tools: null,
+        llm_backend: null,
+      },
     });
   });
 
@@ -161,14 +209,12 @@ describe("companionStore - updateContext", () => {
     mockedInvoke.mockImplementation((cmd: string) => {
       if (cmd === "create_companion_session")
         return Promise.resolve({ session_id: "sess-1" });
-      if (cmd === "get_companion_context")
-        return Promise.resolve("Agents context.");
       return Promise.resolve(null);
     });
     await companionStore.createSession("tasks");
 
     // WHEN context is updated
-    await companionStore.updateContext("agents");
+    await companionStore.updateContext(onScreen("agents"));
 
     // THEN the argument object carries `sessionId` and never `session_id`:
     // a key Tauri does not find makes it reject the whole call, so the wrong
@@ -186,7 +232,7 @@ describe("companionStore - updateContext", () => {
 // ── initFromMemory ────────────────────────────────────────────────────────────
 
 describe("companionStore - initFromMemory", () => {
-  test("restores the opt-in but keeps the panel closed at startup", async () => {
+  test("restores the opt-in but keeps the Guide tab closed at startup", async () => {
     // GIVEN a profile where the companion was enabled
     mockedInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_companion_enabled") return Promise.resolve(true);
@@ -199,9 +245,8 @@ describe("companionStore - initFromMemory", () => {
     // THEN the feature stays enabled but the panel does not auto-open:
     // showing it on every launch spawned an empty chat session each time.
     // The user opens it on demand via the toggle or the global shortcut.
-    const state = get(companionStore);
-    expect(state.enabled).toBe(true);
-    expect(state.visible).toBe(false);
+    expect(get(companionStore).enabled).toBe(true);
+    expect(get(guideVisible)).toBe(false);
   });
 
   test("leaves companion disabled when get_companion_enabled returns false", async () => {
@@ -212,9 +257,8 @@ describe("companionStore - initFromMemory", () => {
 
     await companionStore.initFromMemory();
 
-    const state = get(companionStore);
-    expect(state.enabled).toBe(false);
-    expect(state.visible).toBe(false);
+    expect(get(companionStore).enabled).toBe(false);
+    expect(get(guideVisible)).toBe(false);
   });
 
   test("leaves companion disabled when get_companion_enabled returns undefined", async () => {

@@ -52,9 +52,9 @@ impl RuntimeClient {
         Ok(json)
     }
 
-    /// Start (register) a new agent via `POST /api/v1/agents`.
-    pub async fn start_agent(&self, agent_path: &str) -> Result<serde_json::Value, ClientError> {
-        let body = serde_json::json!({ "agent_path": agent_path });
+    /// Make the stored agent `agent` available via `POST /api/v1/agents`.
+    pub async fn start_agent(&self, agent: &str) -> Result<serde_json::Value, ClientError> {
+        let body = serde_json::json!({ "agent": agent });
         let resp = self.post("/api/v1/agents", Some(&body)).await?;
         if resp.status >= 400 {
             return Err(ClientError::ServerError {
@@ -63,6 +63,88 @@ impl RuntimeClient {
             });
         }
         Ok(serde_json::from_str(&resp.body)?)
+    }
+
+    /// Every stored agent, resolved, via `GET /api/v1/agent-definitions`.
+    pub async fn list_agent_definitions(&self) -> Result<serde_json::Value, ClientError> {
+        let resp = self.get("/api/v1/agent-definitions").await?;
+        definition_body(resp)
+    }
+
+    /// One stored agent, resolved (its definition then the user's overrides),
+    /// via `GET /api/v1/agent-definitions/{name}`.
+    pub async fn get_agent_definition(&self, name: &str) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .get(&format!("/api/v1/agent-definitions/{name}"))
+            .await?;
+        definition_body(resp)
+    }
+
+    /// Set the user's value of `field` for `name` via
+    /// `PUT /api/v1/agent-definitions/{name}/overrides/{field}`.
+    pub async fn set_agent_override(
+        &self,
+        name: &str,
+        field: &str,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        let body = serde_json::json!({ "value": value });
+        let resp = self
+            .put(
+                &format!("/api/v1/agent-definitions/{name}/overrides/{field}"),
+                Some(&body),
+            )
+            .await?;
+        definition_body(resp)
+    }
+
+    /// Remove the user's value of `field` for `name` via
+    /// `DELETE /api/v1/agent-definitions/{name}/overrides/{field}`.
+    pub async fn remove_agent_override(
+        &self,
+        name: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .delete(&format!(
+                "/api/v1/agent-definitions/{name}/overrides/{field}"
+            ))
+            .await?;
+        definition_body(resp)
+    }
+
+    /// Back to defaults for `name` via
+    /// `DELETE /api/v1/agent-definitions/{name}/overrides`.
+    pub async fn reset_agent_overrides(
+        &self,
+        name: &str,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .delete(&format!("/api/v1/agent-definitions/{name}/overrides"))
+            .await?;
+        definition_body(resp)
+    }
+
+    /// Assign a model to `agent` via `PUT /api/v1/llm/agents/{agent}/model`;
+    /// `body` carries `model_source` and `model_id`.
+    pub async fn set_agent_model(
+        &self,
+        agent: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .put(&format!("/api/v1/llm/agents/{agent}/model"), Some(body))
+            .await?;
+        definition_body(resp)
+    }
+
+    /// Remove the model assigned to `agent` via
+    /// `DELETE /api/v1/llm/agents/{agent}/model`.
+    pub async fn clear_agent_model(&self, agent: &str) -> Result<serde_json::Value, ClientError> {
+        let resp = self
+            .delete(&format!("/api/v1/llm/agents/{agent}/model"))
+            .await?;
+        definition_body(resp)
     }
 
     /// Get agent detail via `GET /api/v1/agents/{id}`.
@@ -209,4 +291,62 @@ impl RuntimeClient {
         }
         Ok(serde_json::from_str(&resp.body)?)
     }
+}
+
+/// The JSON body of an agent-definition route, or its error.
+/// An exported agent: the archive and the report the runtime gave with it.
+#[derive(Debug, Clone)]
+pub struct ExportedAgent {
+    /// The bytes of the `.apo` archive.
+    pub bytes: Vec<u8>,
+    /// The report of the export (`file_name`, `publisher`, `signed`,
+    /// `key_fingerprint`, `removed_access`, `required_connections`).
+    pub report: serde_json::Value,
+}
+
+/// Header that carries the report of an export.
+const EXPORT_REPORT_HEADER: &str = "x-apollia-export-report";
+
+impl RuntimeClient {
+    /// Export the agent `name` as a `.apo` archive via
+    /// `POST /api/v1/agent-definitions/{name}/export`, signed when `sign`,
+    /// under `publisher` when given (else the `author.name` setting).
+    pub async fn export_agent(
+        &self,
+        name: &str,
+        sign: bool,
+        publisher: Option<&str>,
+    ) -> Result<ExportedAgent, ClientError> {
+        let body = serde_json::json!({ "sign": sign, "publisher": publisher });
+        let (status, headers, bytes) = self
+            .post_for_file(&format!("/api/v1/agent-definitions/{name}/export"), &body)
+            .await?;
+        if status >= 400 {
+            let text = String::from_utf8_lossy(&bytes);
+            return Err(ClientError::ServerError {
+                status,
+                body: extract_error(&text, status),
+            });
+        }
+        let report = headers
+            .get(EXPORT_REPORT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or(serde_json::Value::Null);
+        Ok(ExportedAgent {
+            bytes: bytes.to_vec(),
+            report,
+        })
+    }
+}
+
+fn definition_body(resp: crate::client::RawResponse) -> Result<serde_json::Value, ClientError> {
+    if resp.status >= 400 {
+        return Err(ClientError::ServerError {
+            status: resp.status,
+            body: extract_error(&resp.body, resp.status),
+        });
+    }
+    Ok(serde_json::from_str(&resp.body)?)
 }

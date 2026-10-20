@@ -1,0 +1,202 @@
+//! The desktop side of the installed-model index.
+//!
+//! The index itself lives in `apollia_llm::model_index`; this module decides
+//! where it is kept (beside the models, in `~/.apollia/models/`) and when it is
+//! written: reconciled with the disk at startup, extended when a download or an
+//! import finishes (with the digest of the weights and whether it was
+//! verified). The removal of a model trims it in the runtime
+//! (`apollia_runtime::installed_models`). The Hub lists what the index holds.
+//!
+//! Every function takes the models directory as an argument so the tests run
+//! on a temporary folder, without touching the process environment.
+
+use std::path::Path;
+
+use apollia_llm::{ModelIndexError, ModelOrigin};
+use apollia_runtime::installed_models::load_or_empty;
+
+/// Where the index is kept, how it is read and reconciled: shared with the
+/// daemon, which lists the same models.
+pub(crate) use apollia_runtime::installed_models::{current, index_path, reconcile};
+
+/// Add an imported model with its digest and whether that digest matched a
+/// known one.
+pub(crate) fn record_import(
+    models_dir: &Path,
+    path: &Path,
+    sha256: String,
+    origin_verified: bool,
+) -> Result<String, ModelIndexError> {
+    record_with_digest(
+        models_dir,
+        path,
+        ModelOrigin::Import,
+        Some(sha256),
+        origin_verified,
+    )
+}
+
+fn record_with_digest(
+    models_dir: &Path,
+    path: &Path,
+    origin: ModelOrigin,
+    sha256: Option<String>,
+    origin_verified: bool,
+) -> Result<String, ModelIndexError> {
+    let mut index = load_or_empty(models_dir);
+    let id = index.record(models_dir, path, origin)?.id.clone();
+    if let Some(sha256) = sha256 {
+        index.set_digest(path, sha256, origin_verified)?;
+    }
+    index.save(&index_path(models_dir))?;
+    tracing::event!(
+        tracing::Level::INFO,
+        id = %id,
+        path = %path.display(),
+        origin_verified = origin_verified,
+        "model.index.recorded"
+    );
+    Ok(id)
+}
+
+/// The digest a finished download computed, and whether it matched the one
+/// its repository publishes.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DownloadDigest {
+    /// SHA-256 of the weights, lowercase hex, when the downloader has one.
+    pub(crate) sha256: Option<String>,
+    /// Whether it matched the repository's reference.
+    pub(crate) verified: bool,
+}
+
+/// Record a finished download with the digest the downloader computed and
+/// whether it matched the repository's, logging rather than failing: the file
+/// is on disk either way and the next startup reconciliation indexes it.
+pub(crate) fn record_download(
+    models_dir: &Path,
+    path: &Path,
+    repo_id: Option<String>,
+    file: String,
+    digest: DownloadDigest,
+) {
+    let origin = match repo_id {
+        Some(repo) => ModelOrigin::Catalog { repo, file },
+        None => ModelOrigin::Import,
+    };
+    if let Err(e) = record_with_digest(models_dir, path, origin, digest.sha256, digest.verified) {
+        tracing::event!(
+            tracing::Level::WARN,
+            path = %path.display(),
+            error = %e,
+            "model.index.record.failed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apollia_llm::ModelCategory;
+
+    fn whisper_gguf() -> Vec<u8> {
+        let key = b"general.architecture";
+        let value = b"whisper";
+        let mut out = Vec::new();
+        out.extend_from_slice(b"GGUF");
+        out.extend_from_slice(&3u32.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&1u64.to_le_bytes());
+        out.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        out.extend_from_slice(key);
+        out.extend_from_slice(&8u32.to_le_bytes());
+        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        out.extend_from_slice(value);
+        out
+    }
+
+    // GIVEN a models folder holding a GGUF in a sub-folder and no index yet
+    // WHEN the current index is asked for, as the Hub list does
+    // THEN the sub-folder model is in it and the index is now on disk
+    #[test]
+    fn test_current_builds_the_index_and_sees_subfolders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("vendor")).unwrap();
+        std::fs::write(dir.join("vendor/model.gguf"), b"GGUF").unwrap();
+
+        let index = current(dir).unwrap();
+
+        assert_eq!(index.models.len(), 1);
+        assert_eq!(index.models[0].path, dir.join("vendor/model.gguf"));
+        assert!(index_path(dir).is_file());
+    }
+
+    // GIVEN an index already written, then a model copied in behind its back
+    //       and another one deleted
+    // WHEN the startup reconciliation runs
+    // THEN the copied model is added and the deleted one removed
+    #[test]
+    fn test_reconcile_follows_the_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("old.gguf"), b"GGUF").unwrap();
+        reconcile(dir).unwrap();
+        std::fs::remove_file(dir.join("old.gguf")).unwrap();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/new.gguf"), b"GGUF").unwrap();
+
+        let stale = current(dir).unwrap();
+        let index = reconcile(dir).unwrap();
+
+        assert_eq!(stale.models[0].id, "old");
+        let ids: Vec<&str> = index.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["new"]);
+        assert_eq!(current(dir).unwrap(), index);
+    }
+
+    // GIVEN a finished download of a file from a catalog repository
+    // WHEN it is recorded
+    // THEN the index holds it with the repository and file as its origin
+    #[test]
+    fn test_a_finished_download_is_recorded_with_its_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        reconcile(dir).unwrap();
+        let path = dir.join("qwen.gguf");
+        std::fs::write(&path, b"GGUF").unwrap();
+
+        record_download(
+            dir,
+            &path,
+            Some("org/qwen-GGUF".into()),
+            "qwen.gguf".into(),
+            DownloadDigest::default(),
+        );
+
+        let index = current(dir).unwrap();
+        assert_eq!(
+            index.get("qwen").unwrap().origin,
+            ModelOrigin::Catalog {
+                repo: "org/qwen-GGUF".into(),
+                file: "qwen.gguf".into()
+            }
+        );
+    }
+
+    // GIVEN a dictation model saved as .gguf in the models folder
+    // WHEN the index is rebuilt
+    // THEN it is filed as dictation, where the extension alone said LLM
+    #[test]
+    fn test_a_gguf_dictation_model_is_filed_as_dictation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("whisper-fr.gguf"), whisper_gguf()).unwrap();
+
+        let index = reconcile(dir).unwrap();
+
+        assert_eq!(
+            index.get("whisper-fr").unwrap().effective_category(),
+            ModelCategory::Dictation
+        );
+    }
+}

@@ -3,42 +3,69 @@
 //!
 //! ## What actually gates a tool call
 //!
-//! - [`PrefixRuleEngine`] as a **rule store**: the chat manager lists its
-//!   persisted rules once per message and seeds a name-only authorization set
-//!   from the allow rules that carry no `arg_prefix`
-//!   (`apply_chat_prefix_allow_rules` in `apollia-runtime`). That set is the
-//!   mechanism behind "always allow" for ordinary tools.
-//! - The **per-invocation prefix matching**: on a miss of that set, the chat
-//!   ReAct loop consults [`PrefixRuleEngine::check_with_scope`] with the
-//!   call's first argument (`build_prefix_checker` in `apollia-runtime`), which
-//!   it extracts with [`prefix_rule_engine::extract_first_arg`].
-//!   For a code executor the match goes through
-//!   [`executor_guard::is_single_simple_command`], so an allowed prefix only
-//!   ever covers a single simple command, and a rule without a prefix never
-//!   matches an executor.
-//! - [`executor_guard::is_code_executor`]: the invariant that `bash_executor`
-//!   and `python_executor` are never blanket-authorised; the runtime filters
-//!   them out of the authorization set on every seeding route.
+//! The governance decision of `apollia-runtime` decides every tool call of
+//! every agent, before it runs. This crate holds what it reads:
 //!
-//! Anything the chat path does not auto-approve asks a human, through the HITL
-//! flow of `apollia-runtime`.
+//! - [`PrefixRuleEngine`] as the **rule store**: the fine rules, by argument
+//!   prefix, listed by the governance actor; [`rule_matches`] matches one
+//!   against a call, with the call's first argument extracted by
+//!   [`prefix_rule_engine::extract_first_arg`]. For a code executor the match
+//!   goes through [`executor_guard::is_single_simple_command`], so an allowed
+//!   prefix only ever covers a single simple command, and a rule without a
+//!   prefix never matches an executor.
+//! - [`executor_guard::is_code_executor`]: `bash_executor` and
+//!   `python_executor` execute code whatever their descriptor says, so no
+//!   standing consent and no grant ever covers them.
 //!
-//! [`PermissionAuditLog`] reads the `permission_audit` table of `governance.db`
-//! for the `apollia permissions audit` command and for the desktop audit view.
-//! Nothing in this crate writes to that table.
+//! Anything the decision does not allow or refuse asks a human, through the
+//! HITL flow of `apollia-runtime`.
+//!
+//! [`org_policy`] reads and verifies the signed organisation policy that IT
+//! drops in a system folder; [`load_policy`] answers whether it is absent,
+//! valid or invalid, and nothing in this crate applies it yet.
+//!
+//! [`FamilyConsentStore`] holds the standing consents ("always" for one agent
+//! and one action family, permanent or for one batch run), and
+//! [`run_access_upgrade`] converts, once, the rules persisted before them.
+//! Every change these two stores make to a rule or a consent leaves its event
+//! in a [`JournalOutbox`], which the runtime empties into the signed journal.
+//! [`read_legacy_chat_config`] reads, once, the settings of the built-in chat
+//! that the runtime carries over to the Apollia agent.
 
-pub mod audit_log;
+pub mod access_upgrade;
+pub mod chat_config_upgrade;
 pub mod error;
 pub mod executor_guard;
+pub mod family_consent;
 pub mod governance_schema;
+pub mod journal_outbox;
+pub mod org_policy;
 pub mod prefix_rule_engine;
 
-pub use audit_log::{PermissionAuditEntry, PermissionAuditLog};
+pub use access_upgrade::{
+    run_access_upgrade, AccessUpgradeReport, UpgradeChange, UpgradeEntry, ALL_AGENTS,
+};
+pub use chat_config_upgrade::{
+    drop_legacy_chat_config, read_legacy_chat_config, LegacyChatConfig, LegacyChatConfigState,
+};
 pub use error::PermissionError;
 pub use executor_guard::{is_code_executor, is_single_simple_command, CODE_EXECUTOR_TOOLS};
+pub use family_consent::{
+    ConsentFamily, ConsentScope, FamilyConsent, FamilyConsentStore, APOLLIA_AGENT_ID,
+};
 pub use governance_schema::{
     open_governance_schema, GOVERNANCE_MIGRATIONS, GOVERNANCE_SCHEMA_VERSION,
+    TOOL_CREDENTIALS_UPGRADE,
+};
+pub use journal_outbox::{
+    JournalOutbox, OutboxEntry, RuleRecord, StoreEvent, OUTBOX_EVENT_VERSION,
+};
+pub use org_policy::{
+    load_policy, parse_policy, policy_location, OrgPolicy, OwnerRequirement, PackagesPolicy,
+    PolicyInvalid, PolicyInvalidReason, PolicyLocation, PolicySchemaError, PolicyVerdict,
+    PolicyView, ValidPolicy, REQUIRE_VERIFIED_SETTING,
 };
 pub use prefix_rule_engine::{
-    extract_first_arg, PermissionScope, PrefixRule, PrefixRuleEngine, RuleAction, ScopeContext,
+    extract_first_arg, rule_matches, PermissionScope, PrefixRule, PrefixRuleEngine, RuleAction,
+    ScopeContext,
 };

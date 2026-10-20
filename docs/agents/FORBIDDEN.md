@@ -123,8 +123,8 @@ Use Pydantic only when runtime validation of external API responses is unavoidab
 and state the reason inline with a `# REASON:` comment.
 
 **NEVER add a third-party dependency without a decision stated in
-`docs/site/docs/architecture/08-decisions.md`.** Workers and agents are
-stdlib-only by default. Each dep is a sovereignty surface and a maintenance liability.
+`docs/site/docs/architecture/08-decisions.md`.** The SDK and the code of a
+package are stdlib-only by default. Each dep is a sovereignty surface and a maintenance liability.
 
 **NEVER `from typing import *`.** Import explicit symbols.
 
@@ -162,17 +162,18 @@ The three families, and how to recognise a new one:
   `meta_orchestrator.rs`. These are LLM prompts. `include_str!` resolves at
   compile time, so removing a file is a compilation error, and rewording one
   changes model behaviour with no test to catch it.
-- `agents/system/apollia-guide/knowledge/*.md`, also `include_str!`, and
-  additionally written to disk at first run. These are what the companion agent
-  answers with. Stale content here is a product defect, not a stale document.
+- `agents/system/apollia-guide/knowledge/*.md`, also `include_str!`, from
+  `crates/apollia-desktop/src/bundled_packages.rs`, which appends them to the
+  mission of the guide when the desktop assembles its package at start. These
+  are what the guide agent answers with. Stale content here is a product
+  defect, not a stale document.
 - `tests/cli/seed/files/**/*.md`, copied by `build-seed.sh` into the
   throwaway `HOME` of the end-to-end automaton. Removing one breaks the suite.
 
 The test is mechanical: `grep -rn '<basename>.md' crates sdk scripts agents
 .github justfile`. A hit inside an `include_str!`, a `cp`, or a path join means
-the file is a resource. A hit inside a comment means it is a document, and two of
-those exist as known false positives:
-`crates/apollia-desktop/ui/src/lib/i18n/operator-glossary.md` and
+the file is a resource. A hit inside a comment means it is a document, and one
+of those exists as a known false positive:
 `crates/apollia-desktop/ui/src/lib/design/breakpoints.md`.
 
 This rule exists because a documentation audit proposed deleting fifteen files
@@ -222,12 +223,11 @@ public and the tracker is not.
 **NEVER hardcoded secrets, API keys, tokens, or PII** in any committed file. Use
 `SecretStore` backends (Keyring or AgeFile). See `docs/agents/SECURITY.md`.
 
-One exemption, measured and bounded: `.mailmap` carries the maintainer's commit
-addresses, because that is the file git reads to fold an author's identities
-into one. It is the only committed file that holds an address on purpose, and
-it holds nothing else. Every other appearance of a personal address, path or
-handle is a defect; `scripts/check_prose.py` holds the personal-path and stale-
-handle halves of that at zero across the tracked tree.
+No committed file holds a personal name, address, handle, home path or machine
+name: the project speaks as Apollia, and `contact@apollia.fr` is its one public
+address. Test data that needs a first name uses `Ada`. `scripts/check_prose.py`
+holds the name, handle, personal-path and machine-name halves of that at zero
+across the tracked tree.
 
 **NEVER justify a rule by pointing at a document the reader cannot open.** There
 is no numbered decision record to cite. The decisions in force are stated in the
@@ -240,9 +240,10 @@ describe structure, wording, and intent only.
 
 **NEVER copy an existing agent in `agents/` as a reference template.** Confidence in
 those agents is low. Sources of truth: the SDK type contract
-(`sdk/apollia/types.py` + `sdk/apollia/context/*.py`), `@agent` / `@skill`
-decorator implementations, and the decisions chapter of the documentation
-site.
+(`sdk/apollia/types.py` + `sdk/apollia/context/*.py`), the `@tool` and
+`@workflow` decorator implementations, the manifest schema
+(`crates/apollia-tools/src/apollia_manifest/mod.rs`), and the decisions chapter
+of the documentation site.
 
 **NEVER references to internal artifacts in public-facing files.** Specifically, no
 internal tracker identifiers, sprint or batch numbers, or planning vocabulary

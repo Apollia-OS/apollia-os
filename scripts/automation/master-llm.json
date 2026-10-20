@@ -3,8 +3,7 @@
   "stopOnError": false,
   "dynamicTestids": [
     "command-item-companion.toggle",
-    "getting-started-milestone-chat",
-    "sidebar-mode-option-operator"
+    "settings-nav-developer"
   ],
   "steps": [
     {
@@ -85,7 +84,7 @@
     },
     {
       "kind": "sendChat",
-      "text": "\u00c9cris une phrase qui contient le mot banane."
+      "text": "Écris une phrase qui contient le mot banane."
     },
     {
       "kind": "awaitTurn",
@@ -217,7 +216,7 @@
     },
     {
       "kind": "sendChat",
-      "text": "Retiens que mon plat pr\u00e9f\u00e9r\u00e9 est le couscous."
+      "text": "Retiens que mon plat préféré est le couscous."
     },
     {
       "kind": "awaitTurn",
@@ -239,7 +238,7 @@
     },
     {
       "kind": "sendChat",
-      "text": "Quel est mon plat pr\u00e9f\u00e9r\u00e9 ?"
+      "text": "Quel est mon plat préféré ?"
     },
     {
       "kind": "awaitTurn",
@@ -286,32 +285,38 @@
     },
     {
       "kind": "waitFor",
-      "testid": "chat-config-panel",
+      "testid": "chat-session-settings",
       "timeoutMs": 10000
     },
     {
-      "kind": "expect",
-      "testidPrefix": "config-tool-"
+      "kind": "click",
+      "testid": "chat-inspector-integrations-tab"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-session-integrations",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "session-access-row",
+      "timeoutMs": 10000
     },
     {
       "kind": "click",
-      "testidPrefix": "config-tool-"
+      "testid": "session-access-switch"
     },
     {
       "kind": "screenshot",
-      "label": "11-config-tool-toggle"
+      "label": "11-session-access-switched"
     },
     {
       "kind": "click",
-      "testidPrefix": "config-group-toggle-"
+      "testid": "session-access-switch"
     },
     {
       "kind": "screenshot",
-      "label": "12-config-group-toggle"
-    },
-    {
-      "kind": "expect",
-      "testid": "context-window-bar"
+      "label": "12-session-access-restored"
     },
     {
       "kind": "expect",
@@ -353,21 +358,39 @@
       "label": "13-greeting"
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
-      "timeoutMs": 6000
+      "testid": "settings-page",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-operator"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-off"
     },
     {
       "kind": "sleep",
       "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-page",
+      "timeoutMs": 30000
     },
     {
       "kind": "click",
@@ -392,7 +415,7 @@
     },
     {
       "kind": "sendChat",
-      "text": "Pr\u00e9pare un plan en trois \u00e9tapes pour organiser une r\u00e9union d'\u00e9quipe hebdomadaire."
+      "text": "Prépare un plan en trois étapes pour organiser une réunion d'équipe hebdomadaire."
     },
     {
       "kind": "awaitTurn",
@@ -428,7 +451,7 @@
     {
       "kind": "fill",
       "testid": "chat-plan-review-adjust",
-      "text": "Ajoute une quatri\u00e8me \u00e9tape de bilan \u00e0 la fin."
+      "text": "Ajoute une quatrième étape de bilan à la fin."
     },
     {
       "kind": "screenshot",
@@ -486,7 +509,7 @@
     {
       "kind": "fill",
       "testid": "quickpicker-textarea",
-      "text": "Demande-moi mon pr\u00e9nom avec l'outil ask_user, puis r\u00e9p\u00e8te-le."
+      "text": "Demande-moi mon prénom avec l'outil ask_user, puis répète-le."
     },
     {
       "kind": "click",
@@ -553,7 +576,7 @@
     {
       "kind": "fill",
       "testid": "quickpicker-textarea",
-      "text": "Bonjour, pr\u00eat \u00e0 travailler ?"
+      "text": "Bonjour, prêt à travailler ?"
     },
     {
       "kind": "click",
@@ -567,32 +590,6 @@
     {
       "kind": "awaitTurn",
       "label": "18-budget-ready"
-    },
-    {
-      "kind": "click",
-      "testid": "chat-config-button"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "config-step-budget",
-      "timeoutMs": 10000
-    },
-    {
-      "kind": "fill",
-      "testid": "config-step-budget",
-      "text": "1"
-    },
-    {
-      "kind": "click",
-      "testid": "config-save"
-    },
-    {
-      "kind": "screenshot",
-      "label": "18-step-budget-set"
-    },
-    {
-      "kind": "click",
-      "testid": "chat-config-button"
     },
     {
       "kind": "sendChat",
@@ -671,7 +668,7 @@
     },
     {
       "kind": "expect",
-      "testidPrefix": "approval-card-"
+      "testidPrefix": "operator-approval-"
     },
     {
       "kind": "expect",
@@ -682,55 +679,33 @@
       "label": "01-critical-approval-card"
     },
     {
-      "kind": "click",
-      "testidPrefix": "approval-always-toggle-"
-    },
-    {
-      "kind": "waitFor",
-      "testidPrefix": "approval-scope-menu-",
-      "timeoutMs": 8000
+      "kind": "expect",
+      "testidPrefix": "operator-approval-accept-"
     },
     {
       "kind": "expect",
-      "testidPrefix": "approval-scope-session-"
+      "testidPrefix": "operator-approval-always-"
     },
     {
       "kind": "expect",
-      "testidPrefix": "approval-scope-agent-"
-    },
-    {
-      "kind": "expect",
-      "testidPrefix": "approval-scope-project-"
-    },
-    {
-      "kind": "expect",
-      "testidPrefix": "approval-scope-global-"
+      "testidPrefix": "operator-approval-reason-"
     },
     {
       "kind": "screenshot",
-      "label": "02-approval-scope-menu"
-    },
-    {
-      "kind": "click",
-      "testidPrefix": "approval-refuse-"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "inbox-reject-dialog",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "screenshot",
-      "label": "03-approval-reject-dialog"
+      "label": "02-approval-three-answers"
     },
     {
       "kind": "fill",
-      "testid": "inbox-reject-reason",
+      "testidPrefix": "operator-approval-reason-",
       "text": "Refused during the automation coverage run."
     },
     {
+      "kind": "screenshot",
+      "label": "03-approval-refuse-reason-typed"
+    },
+    {
       "kind": "click",
-      "testid": "inbox-reject-confirm"
+      "testidPrefix": "operator-approval-refuse-"
     },
     {
       "kind": "waitGone",
@@ -752,23 +727,23 @@
     },
     {
       "kind": "waitFor",
-      "testidPrefix": "approval-card-",
+      "testidPrefix": "operator-approval-",
       "nth": 0,
       "timeoutMs": 6000
     },
     {
       "kind": "expect",
-      "testidPrefix": "approval-accept-",
+      "testidPrefix": "operator-approval-accept-",
       "nth": 0
     },
     {
       "kind": "expect",
-      "testidPrefix": "approval-refuse-",
+      "testidPrefix": "operator-approval-refuse-",
       "nth": 0
     },
     {
       "kind": "expect",
-      "testidPrefix": "approval-always-toggle-",
+      "testidPrefix": "operator-approval-always-",
       "nth": 0
     },
     {
@@ -777,7 +752,7 @@
     },
     {
       "kind": "click",
-      "testidPrefix": "approval-accept-",
+      "testidPrefix": "operator-approval-accept-",
       "nth": 0,
       "timeoutMs": 6000
     },
@@ -800,7 +775,7 @@
     },
     {
       "kind": "goto",
-      "route": "dashboard"
+      "route": "chat"
     },
     {
       "kind": "waitFor",
@@ -845,7 +820,7 @@
     },
     {
       "kind": "sendChat",
-      "text": "Comment cr\u00e9er un agent ?"
+      "text": "Comment créer un agent ?"
     },
     {
       "kind": "waitFor",
@@ -874,155 +849,12 @@
     {
       "kind": "screenshot",
       "label": "03-coach-answer"
-    },
-    {
-      "kind": "screenshot",
-      "label": "section-tour-llm"
-    },
-    {
-      "kind": "click",
-      "testid": "companion-close",
-      "timeoutMs": 5000
-    },
-    {
-      "kind": "goto",
-      "route": "dashboard"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "app-main",
-      "timeoutMs": 15000
-    },
-    {
-      "kind": "click",
-      "testid": "sidebar-mode-chip",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "click",
-      "testid": "sidebar-mode-option-operator",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "sleep",
-      "ms": 600
-    },
-    {
-      "kind": "waitFor",
-      "testid": "getting-started-card",
-      "timeoutMs": 15000
-    },
-    {
-      "kind": "screenshot",
-      "label": "00-tour-band"
-    },
-    {
-      "kind": "click",
-      "testid": "getting-started-milestone-chat",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "quickpicker-textarea",
-      "timeoutMs": 15000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "tour-step-card",
-      "timeoutMs": 15000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "tour-spotlight",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "expect",
-      "testid": "tour-counter"
-    },
-    {
-      "kind": "screenshot",
-      "label": "01-annotation-1-on-composer"
-    },
-    {
-      "kind": "fill",
-      "testid": "quickpicker-textarea",
-      "text": "Liste les fichiers du dossier courant."
-    },
-    {
-      "kind": "click",
-      "testid": "quickpicker-submit",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "chat-conversation",
-      "timeoutMs": 30000
-    },
-    {
-      "kind": "expect",
-      "testid": "tour-step-card"
-    },
-    {
-      "kind": "screenshot",
-      "label": "02-conversation-opened"
-    },
-    {
-      "kind": "click",
-      "testid": "tour-next",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "awaitTurn",
-      "timeoutMs": 300000,
-      "maxApprovals": 10,
-      "label": "approval-autoaccepted"
-    },
-    {
-      "kind": "captureText",
-      "testidPrefix": "chat-message-",
-      "nth": -1,
-      "as": "tour_first_result_answer"
-    },
-    {
-      "kind": "click",
-      "testid": "tour-next",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "tour-step-card",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "screenshot",
-      "label": "04-annotation-3-on-answer"
-    },
-    {
-      "kind": "click",
-      "testid": "tour-next",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "tour-step-card",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "screenshot",
-      "label": "05-act-1-finished"
     }
   ],
   "notes": [
     "ChatPlanHost picks the review card by persona: operator gets ChatPlanReview (chat-plan-review, with request-changes + an adjust textarea), builder gets ChatPlanReviewBuilder (chat-plan-review-builder, approve/reject only, revision by continuing to type). This block is written for the operator card, so the mode is forced to operator first instead of inheriting whatever the previous section left.",
     "The journey now ends on an approval: propose, request changes, revise, approve. Stopping after the revision left the plan pending forever and never exercised the gate that releases execution.",
     "The ask_user card is answered with ask-user-skip, not with a typed answer: AskUserCard renders whatever question TYPE the model chose (open input, radios, checkboxes) and ask-user-submit stays disabled until every question is answered, so no fixed step can answer it. Skip is always enabled and releases the turn; leaving the card pending keeps the session processing, which then hides config-save (isReadOnly = isClosed || isProcessing) and breaks the whole tail.",
-    "The turn that follows the plan approval keeps the runner's default approval budget (25), not the 6 used while reviewing the plan: approving releases the execution of every planned step, and a three-step plan with two or three tools each blows past 6 approvals and aborts as a runaway turn.",
-    "The tour section runs last, after the three proven ones, so it cannot perturb them. It closes the companion the coach section leaves open, forces operator mode (the approval card is persona-picked), and drives its approval by hand rather than through awaitTurn, which would accept the HITL card before the annotation could land on it. If the model answers without calling a tool the approval annotation never fires: that silence is the accepted product behaviour, not a defect."
+    "The turn that follows the plan approval keeps the runner's default approval budget (25), not the 6 used while reviewing the plan: approving releases the execution of every planned step, and a three-step plan with two or three tools each blows past 6 approvals and aborts as a runaway turn."
   ]
 }

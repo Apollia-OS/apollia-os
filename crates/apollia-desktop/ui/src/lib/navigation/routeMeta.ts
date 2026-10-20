@@ -14,21 +14,23 @@
 // type because the icons come from `lucide-svelte` (compiled with Svelte 4).
 import type { ComponentType } from "svelte"; // NOSONAR typescript:S1874
 import {
-  LayoutDashboard,
   Bot,
-  ListChecks,
   MessageSquare,
   ShieldCheck,
   Plug,
   Brain,
   Repeat,
   Database,
-  Bell,
   Activity,
   Settings,
   Mic,
-  FolderKanban,
   Paintbrush,
+  Landmark,
+  Library,
+  KeyRound,
+  ScrollText,
+  Layers,
+  Code,
 } from "lucide-svelte";
 import type { Route } from "$lib/stores/navigation";
 
@@ -41,19 +43,22 @@ export interface RouteMeta {
 }
 
 export const routeMeta: Record<Route, RouteMeta> = {
-  dashboard: { labelKey: "nav.dashboard", parent: null, icon: LayoutDashboard, homeFor: ["operator", "builder"] },
   agents: { labelKey: "nav.agents", parent: null, icon: Bot },
-  projects: { labelKey: "nav.projects", parent: null, icon: FolderKanban },
-  tasks: { labelKey: "nav.tasks", parent: null, icon: ListChecks },
-  chat: { labelKey: "nav.chat", parent: null, icon: MessageSquare },
+  batches: { labelKey: "nav.sidebar.batches", parent: null, icon: Layers },
+  batch: { labelKey: "batch_view.title_loading", parent: "batches", icon: Layers },
+  chat: { labelKey: "nav.chat", parent: null, icon: MessageSquare, homeFor: ["operator", "builder"] },
   inbox: { labelKey: "nav.inbox", parent: null, icon: ShieldCheck },
   integrations: { labelKey: "nav.connections", parent: null, icon: Plug },
   llm: { labelKey: "nav.llm", parent: null, icon: Brain },
+  library: { labelKey: "nav.library", parent: null, icon: Library },
   automations: { labelKey: "nav.automations", parent: null, icon: Repeat },
   memory: { labelKey: "nav.memory", parent: null, icon: Database },
   transcriptions: { labelKey: "nav.transcriptions", parent: null, icon: Mic },
-  notifications: { labelKey: "nav.notifications", parent: null, icon: Bell },
   observability: { labelKey: "nav.observability", parent: null, icon: Activity },
+  policy: { labelKey: "nav.policy", parent: null, icon: Landmark },
+  authorizations: { labelKey: "nav.authorizations", parent: null, icon: KeyRound },
+  journal: { labelKey: "nav.journal", parent: null, icon: ScrollText },
+  developer: { labelKey: "nav.developer", parent: null, icon: Code },
   settings: { labelKey: "nav.settings", parent: null, icon: Settings },
   design: { labelKey: "topbar.route.design", parent: null, icon: Paintbrush },
   "design-motion": { labelKey: "topbar.route.design_motion", parent: "design", icon: Paintbrush },
@@ -79,5 +84,5 @@ export function homeRouteFor(mode: "operator" | "builder"): Route {
   const entry = (Object.entries(routeMeta) as Array<[Route, RouteMeta]>).find(
     ([, meta]) => meta.homeFor?.includes(mode),
   );
-  return entry?.[0] ?? "dashboard";
+  return entry?.[0] ?? "chat";
 }

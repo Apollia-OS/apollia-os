@@ -26,7 +26,7 @@ use crate::protocol::{
     ClientCapabilities, ClientInfo, InitializeParams, InitializeResult, McpToolDefinition,
     ServerCapabilities, ServerInfo, APOLLIA_MCP_PROTOCOL_VERSION,
 };
-use crate::transport::{create_transport, McpTransport};
+use crate::transport::{create_transport, McpTransport, TransportError};
 
 // ─── errors ──────────────────────────────────────────────────────────────────
 
@@ -37,6 +37,13 @@ pub enum McpSessionError {
     /// The server subprocess could not be spawned.
     #[error("failed to spawn server '{server}': {cause}")]
     SpawnFailed { server: String, cause: String },
+
+    /// The server runs on Node.js and none is installed yet: the launch was
+    /// not attempted. Installing Node.js through the engine store lifts it.
+    #[error(
+        "Node.js required: server '{server}' runs `{command}`, and Node.js is not installed yet"
+    )]
+    NodeRequired { server: String, command: String },
 
     /// The `initialize` handshake completed but the response was malformed.
     #[error("server '{server}' initialize handshake failed: {cause}")]
@@ -98,20 +105,6 @@ pub enum McpSessionError {
     /// A hot reload was requested for a server that is not currently managed.
     #[error("cannot reload server '{server}': not found in managed sessions")]
     ConfigReload { server: String },
-
-    /// The tool call was suspended because HITL approval is required.
-    ///
-    /// The caller should surface `approval_id` to the operator so they can
-    /// run `apollia-os mcp set-approval` to unblock future calls.
-    #[error("tool call to '{server}/{tool}' requires human approval (id={approval_id})")]
-    PendingApproval {
-        /// MCP server name.
-        server: String,
-        /// Tool name within the server.
-        tool: String,
-        /// UUID of the pending approval request created in the approval store.
-        approval_id: String,
-    },
 
     /// A tool call arrived while the server is being hot-reloaded.
     ///
@@ -322,13 +315,36 @@ impl McpSession {
                     cause: e.to_string(),
                 })?;
 
-        let transport: Arc<dyn McpTransport> =
-            Arc::from(create_transport(&config, resolved_env).map_err(|e| {
-                McpSessionError::SpawnFailed {
-                    server: config.name.clone(),
-                    cause: e.to_string(),
-                }
-            })?);
+        let transport = create_transport(&config, resolved_env).map_err(|e| match e {
+            TransportError::NodeRequired { command } => McpSessionError::NodeRequired {
+                server: config.name.clone(),
+                command,
+            },
+            other => McpSessionError::SpawnFailed {
+                server: config.name.clone(),
+                cause: other.to_string(),
+            },
+        })?;
+        Self::start_with_transport(config, transport, mode).await
+    }
+
+    /// Perform the MCP `initialize` handshake over a transport the caller
+    /// built, then read the tools as `mode` says.
+    ///
+    /// `config` names the session and bounds it (timeouts, tool count); its
+    /// transport fields and its environment are not read, so nothing in it is
+    /// resolved against the environment or the secret store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McpSessionError`] when the `initialize` handshake fails or
+    /// times out, or the boot `tools/list` cannot be read.
+    pub async fn start_with_transport(
+        config: McpServerConfig,
+        transport: Box<dyn McpTransport>,
+        mode: LoadingMode,
+    ) -> Result<Self, McpSessionError> {
+        let transport: Arc<dyn McpTransport> = Arc::from(transport);
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -439,19 +455,6 @@ impl McpSession {
     /// `Some("")`, leaving the decision to treat it as absent to the caller.
     pub fn instructions(&self) -> Option<&str> {
         self.instructions.as_deref()
-    }
-
-    /// Returns whether every tool call to this server requires HITL approval.
-    pub fn requires_approval(&self) -> bool {
-        self.config.requires_approval
-    }
-
-    /// Update whether tool calls to this server require HITL approval.
-    ///
-    /// The change takes effect immediately for future calls; no process restart
-    /// is required. Callers are responsible for persisting the change to `mcp.toml`.
-    pub fn set_requires_approval(&mut self, requires_approval: bool) {
-        self.config.requires_approval = requires_approval;
     }
 
     /// Returns the OS process ID of the server process, if applicable.
@@ -611,12 +614,13 @@ mod tests {
             env: HashMap::new(),
             transport: "stdio".to_string(),
             url: None,
-            requires_approval: false,
             init_timeout_secs,
             call_timeout_secs,
             max_response_bytes: 8 * 1024 * 1024,
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         }
     }
 

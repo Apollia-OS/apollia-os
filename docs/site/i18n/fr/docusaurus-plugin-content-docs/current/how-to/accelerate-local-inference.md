@@ -7,8 +7,11 @@ title: Tirer le meilleur parti de l'inférence locale
 
 L'inférence LLM locale est servie par un `llama-server` embarqué (le projet
 llama.cpp en amont) que le daemon lance et supervise via son API HTTP compatible
-OpenAI. C'est le moteur local intégré, et le seul : il n'y a aucun processus
-séparé à installer, à lancer, ni vers lequel pointer Apollia. Il est livré
+OpenAI. C'est le moteur des modèles GGUF, et il n'y a aucun processus séparé à
+installer, à lancer, ni vers lequel pointer Apollia. Sur macOS arm64,
+l'application desktop livre aussi un moteur MLX (vllm-mlx) pour les modèles au
+format MLX : le format d'un modèle choisit son moteur, et Système > Moteurs règle
+le moteur de chaque format. Cette page traite de `llama-server`. Il est livré
 préconstruit dans l'application desktop, et sur une build depuis les sources, le
 daemon retrouve `llama-server` sur votre `PATH` (voir
 [Installer et lancer le runtime](/how-to/install-and-run#local-gguf-inference)).
@@ -31,25 +34,35 @@ amont.
 
 ## Quel moteur part avec quel artefact
 
-Le moteur est choisi à la construction de l'artefact, un par artefact, donc il
-n'y a rien à sélectionner à l'installation. Ce qui est livré :
+Le moteur embarqué est choisi à la construction de l'artefact, un par artefact,
+donc il n'y a rien à sélectionner à l'installation. Il y a un installeur par
+système. Ce qui est livré :
 
 | Artefact | Moteur | Couvre |
 |---|---|---|
 | Application de bureau, macOS | Metal | Apple Silicon |
-| Application de bureau, Windows et Linux, paquet par défaut | Vulkan | NVIDIA, AMD et Intel |
-| Application de bureau, Windows et Linux, paquet `-cuda` | CUDA | NVIDIA |
+| Application de bureau, Windows et Linux | Vulkan | NVIDIA, AMD et Intel |
 | CLI, presets `*-cpu` | processeur | toute machine, sans offload GPU |
 | CLI, presets `*-vulkan` | Vulkan | NVIDIA, AMD et Intel |
 
-Vulkan dans le paquet de bureau par défaut est un arbitrage assumé. Un binaire
-de 32 Mo atteint les trois fabricants, là où le moteur CUDA ne couvre que
-NVIDIA, pèse 238 Mo plus 373 Mo de runtime, et retombe sur le processeur avec
-toute autre carte. Les possesseurs de cartes NVIDIA reçoivent donc un second
-paquet plutôt qu'un paquet par défaut plus lourd : la chaîne de publication
-compile elle-même un `llama-server` CUDA, pour Windows et pour Linux, et le
-confie aux paquets `-cuda`. Ils figurent sur la page de téléchargement à côté
-des paquets par défaut.
+Vulkan dans le paquet de bureau est un arbitrage assumé. Un binaire de 32 Mo
+atteint les trois fabricants, là où le moteur CUDA ne couvre que NVIDIA, pèse
+238 Mo plus 373 Mo de runtime, et retombe sur le processeur avec toute autre
+carte. Le moteur CUDA n'est donc dans aucun installeur. Il est publié à part,
+sur le canal des moteurs, et l'application le télécharge à la demande : sur une
+machine dotée d'une carte NVIDIA, l'écran IA le propose, **Accélérer avec votre
+carte NVIDIA**, et un clic l'installe. Le prochain chargement d'un modèle
+l'utilise, et le moteur Vulkan embarqué reste en place comme repli. Sous
+Windows, le téléchargement porte les bibliothèques d'exécution CUDA ; sous
+Linux, le moteur s'appuie sur celles de la machine.
+
+Rien n'est exécuté avant d'être vérifié. Le canal publie un manifeste qui liste
+chaque archive avec son SHA-256, signé au format minisign avec une clé de
+distribution dédiée. L'application porte la moitié publique de cette clé, ne
+demande aucune archive avant que la signature tienne, et supprime une archive
+dont l'empreinte diffère. Une machine sans réseau importe les trois mêmes sortes
+de fichier, manifeste, signature et archive, depuis un disque, par les mêmes
+contrôles.
 
 Les archives de ligne de commande n'ont aucun preset CUDA, sur aucune
 plateforme. Si vous exécutez le daemon depuis la ligne de commande sur une carte
@@ -83,13 +96,15 @@ varier le débit se situent en amont de lui :
   marge pour le cache KV. `apollia-os model recommend` classe les candidats pour
   cette machine, avec la mémoire que chacun demande et le nombre de ses couches
   qui tiennent sur le GPU.
-- **Servir un seul modèle par processus serveur.** Le moteur charge un modèle
-  GGUF mono-fichier. Changer le backend par défaut change le modèle que le
-  daemon sert.
-- **Provisionner les slots avant d'attendre de la concurrence.** Le batching
-  continu est actif par défaut, mais le moteur démarre avec un seul slot de
-  décodage, si bien que les requêtes s'empilent au lieu de décoder ensemble.
-  Augmentez `APOLLIA_LLAMA_N_PARALLEL` (voir plus bas).
+- **Un modèle par processus de moteur.** Chaque modèle chargé tourne dans un
+  moteur à lui, et plusieurs restent résidents quand le garde-fou de chargement
+  juge qu'ils tiennent ensemble ; `APOLLIA_LLAMA_MAX_LOADED` fixe un plafond
+  explicite.
+- **Les slots sont planifiés pour vous.** Le batching continu est actif par
+  défaut, et le nombre de slots de décodage est planifié à chaque démarrage
+  d'après le modèle et la mémoire de la machine, jusqu'à huit : des requêtes
+  simultanées décodent ensemble quand il y a la place.
+  `APOLLIA_LLAMA_N_PARALLEL` (voir plus bas) impose le nombre à la place.
 
 ## Régler le moteur embarqué
 
@@ -101,11 +116,11 @@ les dans l'environnement de ce qui lance le daemon.
 
 | Variable | Défaut | Ce qu'elle fait |
 |---|---|---|
-| `APOLLIA_LLAMA_N_CTX` | `32768` | Fenêtre de contexte en tokens. La valeur par défaut est fixe, elle n'est pas lue dans le modèle. |
+| `APOLLIA_LLAMA_N_CTX` | *(non définie)* | Fenêtre de contexte en tokens, au-dessus de toute autre source. Non définie, la fenêtre est celle du preset, celle du backend, puis le défaut de `[llm.defaults]` dans `apollia.toml`, et 32768 en dernier. |
 | `APOLLIA_LLAMA_N_GPU_LAYERS` | calculé, sinon `999` | Couches déportées vers le GPU ; `0` force le CPU. Non définie, la valeur est calculée pour chaque modèle sur un GPU dédié (voir plus bas). |
 | `APOLLIA_LLAMA_N_BATCH` | défaut du moteur | Taille de batch logique. |
 | `APOLLIA_LLAMA_N_UBATCH` | défaut du moteur | Taille du micro-batch physique. |
-| `APOLLIA_LLAMA_N_PARALLEL` | `1` | Slots de décodage servis simultanément. |
+| `APOLLIA_LLAMA_N_PARALLEL` | planifié | Slots de décodage servis simultanément. Non définie, le nombre est planifié d'après le modèle et la mémoire, jusqu'à `8` ; définie, elle est prise telle quelle. |
 | `APOLLIA_LLAMA_CONT_BATCHING` | `true` | Batching continu. |
 | `APOLLIA_LLAMA_CACHE_TYPE_K` | défaut du moteur | Quantization du cache KV, clés. |
 | `APOLLIA_LLAMA_CACHE_TYPE_V` | défaut du moteur | Quantization du cache KV, valeurs. |
@@ -115,8 +130,9 @@ les dans l'environnement de ce qui lance le daemon.
 | `APOLLIA_LLAMA_LOG_VERBOSITY` | `4` | Niveau de journal du moteur (`-lv`). À `4`, le chargement nomme son périphérique et le nombre de couches déchargées, que le journal du daemon rapporte sous `llama.server.device`, `llama.server.offload` et `llama.server.buffer`. |
 | `APOLLIA_LLAMA_EXTRA_ARGS` | vide | Options supplémentaires transmises telles quelles. |
 
-Augmenter `N_PARALLEL` est ce qui transforme le batching continu en véritable
-concurrence : avec le défaut d'un seul slot, les requêtes s'empilent.
+Le nombre de slots est ce qui transforme le batching continu en véritable
+concurrence : avec un seul slot, les requêtes s'empilent. N'imposez `N_PARALLEL`
+que si le nombre planifié ne convient pas à votre charge.
 
 <!-- claim:llama-server-ngl-planned -->
 
@@ -167,10 +183,10 @@ l'emporte sur celui qui est embarqué :
 export APOLLIA_LLAMA_SERVER_BIN=/opt/llama.cpp/build/bin/llama-server
 ```
 
-C'est aussi le chemin prévu pour une compilation CUDA sous Linux, qu'aucune
-publication amont ne fournit. Un exploitant qui fait tourner des cartes NVIDIA
-dispose en général déjà d'un llama.cpp compilé pour ces cartes et réglé pour sa
-charge ; Apollia l'utilise plutôt que de lui substituer le sien.
+C'est aussi le chemin pour une compilation CUDA à vous. Un exploitant qui fait
+tourner des cartes NVIDIA dispose en général déjà d'un llama.cpp compilé pour
+ces cartes et réglé pour sa charge ; Apollia l'utilise plutôt que de lui en
+substituer une autre.
 
 ## Voir aussi
 

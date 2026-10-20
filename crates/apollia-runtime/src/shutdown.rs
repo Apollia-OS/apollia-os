@@ -85,6 +85,8 @@ pub struct ShutdownControllerDeps<B: ExecutionBackend> {
     /// Same reason as `runner_supervisor`, and the cost of missing it is higher:
     /// a loaded model holds gigabytes of resident memory.
     pub llama_server_supervisor: Option<Arc<crate::llama_server::LlamaServerSupervisor>>,
+    /// The `vllm-mlx` processes serving MLX models, when this machine runs them.
+    pub mlx_engine: Option<Arc<crate::mlx_engine::MlxEngineSupervisor>>,
 }
 
 /// Graceful shutdown controller for the Apollia runtime.
@@ -111,6 +113,8 @@ pub struct ShutdownController<B: ExecutionBackend> {
     runner_supervisor: Option<Arc<crate::runner_supervisor::RunnerSupervisor>>,
     /// Owner of the `llama-server` child processes, if started.
     llama_server_supervisor: Option<Arc<crate::llama_server::LlamaServerSupervisor>>,
+    /// The `vllm-mlx` processes serving MLX models, when this machine runs them.
+    mlx_engine: Option<Arc<crate::mlx_engine::MlxEngineSupervisor>>,
 }
 
 impl<B: ExecutionBackend> ShutdownController<B> {
@@ -126,6 +130,7 @@ impl<B: ExecutionBackend> ShutdownController<B> {
             mcp_handle: deps.mcp_handle,
             runner_supervisor: deps.runner_supervisor,
             llama_server_supervisor: deps.llama_server_supervisor,
+            mlx_engine: deps.mlx_engine,
         }
     }
 
@@ -181,10 +186,14 @@ impl<B: ExecutionBackend> ShutdownController<B> {
         // Skipping this leaves `llama-server` and the Python runner reparented to
         // init, alive and holding their memory, while the shell that ran
         // `apollia-os stop` reports the runtime stopped.
-        if self.runner_supervisor.is_some() || self.llama_server_supervisor.is_some() {
+        if self.runner_supervisor.is_some()
+            || self.llama_server_supervisor.is_some()
+            || self.mlx_engine.is_some()
+        {
             crate::embedded::stop_supervisors(
                 self.runner_supervisor.as_deref(),
                 self.llama_server_supervisor.as_deref(),
+                self.mlx_engine.as_deref(),
             )
             .await;
             info!("shutdown.children.stopped");
@@ -535,28 +544,24 @@ mod tests {
 
     fn test_manifest(name: &str) -> AgentManifest {
         AgentManifest {
+            autonomy_level: None,
             format_version: 1,
             name: name.to_string(),
             version: "0.1.0".to_string(),
             description: String::new(),
-            tools_required: vec![],
-            tools_optional: vec![],
             supports_streaming: false,
             supports_a2a: false,
             memory_namespace: None,
             shared_memory_namespaces: vec![],
             max_concurrent_tasks: 2,
             step_budget: None,
-            network_allowlist: None,
-            dangerous_tools_allowed: false,
             tags: vec![],
             skills: vec![],
             execution_mode: "auto".to_string(),
             supports_mailbox: false,
             mailbox_allowlist: None,
             system_prompt: None,
-            tools_requiring_approval: vec![],
-            llm_backend: None,
+            model: None,
             packages: vec![],
             memory_config: None,
             agent_type: None,
@@ -601,7 +606,6 @@ mod tests {
             router_handle: router_handle.clone(),
             registry_handle: registry_handle.clone(),
             event_sender: event_sender.clone(),
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -610,11 +614,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -634,11 +640,18 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         let config = APIServerConfig {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: None,
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -659,6 +672,7 @@ mod tests {
             mcp_handle: None,
             runner_supervisor: None,
             llama_server_supervisor: Some(llama.clone()),
+            mlx_engine: None,
         });
 
         (controller, event_sender, socket_path, llama)
@@ -775,7 +789,6 @@ mod tests {
             router_handle: router_handle.clone(),
             registry_handle: registry_handle.clone(),
             event_sender: event_sender.clone(),
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: GatedBackend::released(),
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -784,11 +797,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -808,11 +823,18 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         let api_config = crate::api::APIServerConfig {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: None,
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -833,6 +855,7 @@ mod tests {
             mcp_handle: None,
             runner_supervisor: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
         });
 
         // WHEN shutdown() runs and the in-flight task is released so it completes
@@ -898,7 +921,6 @@ mod tests {
             router_handle: router_handle.clone(),
             registry_handle: registry_handle.clone(),
             event_sender: event_sender.clone(),
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: GatedBackend::released(),
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -907,11 +929,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -931,11 +955,18 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         let api_config = crate::api::APIServerConfig {
             socket_path: socket_path.clone(),
             bind_addr: "127.0.0.1".to_owned(),
             tcp_port: None,
+            tcp_listener: None,
             api_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -956,6 +987,7 @@ mod tests {
             mcp_handle: None,
             runner_supervisor: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
         });
 
         // WHEN the drain runs and the task completes while it is in progress. The
@@ -1016,7 +1048,6 @@ mod tests {
             router_handle: router_handle.clone(),
             registry_handle: registry_handle.clone(),
             event_sender: event_sender.clone(),
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: NeverBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -1025,11 +1056,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -1049,12 +1082,19 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         let api = crate::api::APIServer::new(
             crate::api::APIServerConfig {
                 socket_path: socket_path.clone(),
                 bind_addr: "127.0.0.1".to_owned(),
                 tcp_port: None,
+                tcp_listener: None,
                 api_token: None,
                 tls_cert_path: None,
                 tls_key_path: None,
@@ -1077,6 +1117,7 @@ mod tests {
             mcp_handle: None,
             runner_supervisor: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
         });
 
         let result = controller.shutdown().await;
@@ -1226,7 +1267,6 @@ mod tests {
             router_handle: router_handle.clone(),
             registry_handle: registry_handle.clone(),
             event_sender: event_sender.clone(),
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend::instant(),
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -1235,11 +1275,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -1259,12 +1301,19 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         let api = crate::api::APIServer::new(
             crate::api::APIServerConfig {
                 socket_path: socket_path.clone(),
                 bind_addr: "127.0.0.1".to_owned(),
                 tcp_port: None,
+                tcp_listener: None,
                 api_token: None,
                 tls_cert_path: None,
                 tls_key_path: None,
@@ -1286,6 +1335,7 @@ mod tests {
             mcp_handle: None,
             runner_supervisor: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
         });
 
         // WHEN shutdown

@@ -69,6 +69,11 @@
 //! warning and keeps the value that was already there, so a typo in a sweep
 //! script cannot silently launch a different engine or fail a spawn.
 //!
+//! A model's default preset is laid over the base before these variables, and
+//! the automatic plans (window, offload, slots) only decide what neither of
+//! the two fixed: the environment, then the preset, then the computation. See
+//! `load_settings`.
+//!
 //! `model_path` deliberately has no override. It is user state owned by
 //! `switch_model`, and an ambient variable pinning it would defeat every model
 //! switch made from the UI.
@@ -79,7 +84,7 @@ use std::str::FromStr;
 /// Loopback address the server binds to. Never configurable: the OpenAI-compatible
 /// surface is for this machine only, and binding elsewhere would expose an
 /// unauthenticated inference endpoint.
-const HOST: &str = "127.0.0.1";
+pub(super) const HOST: &str = "127.0.0.1";
 
 pub(crate) const ENV_N_CTX: &str = "APOLLIA_LLAMA_N_CTX";
 /// Read by `ngl::apply_offload_plan` too, which leaves the offload count alone
@@ -87,7 +92,9 @@ pub(crate) const ENV_N_CTX: &str = "APOLLIA_LLAMA_N_CTX";
 pub(crate) const ENV_N_GPU_LAYERS: &str = "APOLLIA_LLAMA_N_GPU_LAYERS";
 const ENV_N_BATCH: &str = "APOLLIA_LLAMA_N_BATCH";
 const ENV_N_UBATCH: &str = "APOLLIA_LLAMA_N_UBATCH";
-const ENV_N_PARALLEL: &str = "APOLLIA_LLAMA_N_PARALLEL";
+/// Read by `parallel::apply_parallel_plan` too, which leaves the slot count
+/// alone when the operator has set it.
+pub(crate) const ENV_N_PARALLEL: &str = "APOLLIA_LLAMA_N_PARALLEL";
 const ENV_CONT_BATCHING: &str = "APOLLIA_LLAMA_CONT_BATCHING";
 const ENV_CACHE_TYPE_K: &str = "APOLLIA_LLAMA_CACHE_TYPE_K";
 const ENV_CACHE_TYPE_V: &str = "APOLLIA_LLAMA_CACHE_TYPE_V";
@@ -151,8 +158,13 @@ impl FromStr for FlashAttn {
 pub struct LlamaServerConfig {
     /// Absolute path to the `.gguf` model file to load (`-m`).
     pub model_path: String,
-    /// Total context window in tokens (`-c`). Split across slots; the desktop
-    /// runs a single conversation, so the whole window serves one request.
+    /// Absolute path to the vision projector fetched with the model
+    /// (`--mmproj`). `None` loads the model without vision. Set at spawn time
+    /// from the model index, like `model_path`, and never from the environment.
+    pub mmproj_path: Option<String>,
+    /// Context window one request may use, in tokens. With a single slot it is
+    /// the `-c` argument as is; with a unified buffer the engine is launched
+    /// with one such window per slot, see [`LlamaServerConfig::engine_n_ctx`].
     pub n_ctx: u32,
     /// Number of layers to offload to the GPU (`-ngl`). `999` offloads all;
     /// a CPU-only build silently ignores the request.
@@ -163,10 +175,16 @@ pub struct LlamaServerConfig {
     /// default. This is the knob that trades prefill throughput against peak
     /// memory during prompt processing.
     pub n_ubatch: Option<u32>,
-    /// Number of server slots (`-np`). Explicitly `1`: the engine default is
-    /// auto, and the desktop serves one conversation, so a single slot owns the
-    /// entire context window instead of splitting it.
+    /// Number of server slots (`-np`). `1` here: the engine default is auto, so
+    /// the field always names a count. At spawn time the count is planned from
+    /// the model and the machine (see `parallel`), unless
+    /// `APOLLIA_LLAMA_N_PARALLEL` pins it.
     pub n_parallel: Option<u32>,
+    /// One key/value buffer shared by every slot (`--kv-unified`). Set by the
+    /// slot planner together with the count it chose, so that each slot can
+    /// hold a full window. Off by default, which leaves the engine to split
+    /// `-c` evenly across the slots.
+    pub kv_unified: bool,
     /// Continuous batching (`-cb` when true, `-nocb` when false). `None` leaves
     /// the engine default, which is enabled.
     pub cont_batching: Option<bool>,
@@ -195,20 +213,95 @@ pub struct LlamaServerConfig {
     /// prints neither the device the model loads onto nor the offload tally.
     /// The default here is 4, the lowest level at which the load names both.
     pub log_verbosity: Option<u8>,
+    /// CPU threads used during generation (`-t`). `None` leaves the engine
+    /// default.
+    pub n_threads: Option<i32>,
+    /// Context checkpoints kept per slot (`--ctx-checkpoints`). `None` leaves
+    /// the engine default.
+    pub ctx_checkpoints: Option<u32>,
+    /// Token budget for reasoning (`--reasoning-budget`): `-1` unrestricted,
+    /// `0` ends the reasoning at once. `None` leaves the engine default.
+    pub reasoning_budget: Option<i32>,
+    /// Message injected before the end of the reasoning when its budget is
+    /// spent (`--reasoning-budget-message`). `None` injects nothing.
+    pub reasoning_budget_message: Option<String>,
+    /// RoPE base frequency (`--rope-freq-base`). `None` reads it from the
+    /// model, which is the automatic mode.
+    pub rope_freq_base: Option<f32>,
+    /// RoPE frequency scaling factor (`--rope-freq-scale`). `None` reads it
+    /// from the model, which is the automatic mode.
+    pub rope_freq_scale: Option<f32>,
+    /// Keep the key/value cache off the accelerator (`--no-kv-offload`).
+    pub no_kv_offload: bool,
+    /// Keep the model in memory rather than letting it be swapped
+    /// (`--load-mode`, see [`load_mode`]).
+    pub mlock: bool,
+    /// Load the model without memory-mapping it (`--load-mode`).
+    pub no_mmap: bool,
+    /// Engine seed (`--seed`). `None` leaves the engine default, a random seed.
+    pub seed: Option<u32>,
+    /// Draft model for speculative decoding (`--model-draft`), an absolute
+    /// path. A preset names the draft by its index identifier; the launch
+    /// resolves it to this path.
+    pub draft_model: Option<String>,
+    /// Speculative decoding mode (`--spec-type`). `None` leaves the engine
+    /// default, which is off.
+    pub spec_type: Option<SpecType>,
+    /// File holding a Jinja chat template that replaces the model's own
+    /// (`--chat-template-file`).
+    pub chat_template_file: Option<String>,
+    /// Devices the engine may load onto (`--device`), by the identifiers it
+    /// lists. `None` leaves the choice to the engine; an empty list is
+    /// `--device none`, the processor alone.
+    pub devices: Option<Vec<String>>,
     /// Extra arguments appended verbatim after every generated flag, so a later
     /// entry wins wherever llama-server takes the last occurrence.
     pub extra_args: Vec<String>,
+}
+
+/// Speculative decoding mode accepted by `--spec-type`.
+///
+/// Only the modes the model sheet offers are named, and only those the
+/// bundled engine (tag 10092) accepts: a draft model, the model's own
+/// multi-token prediction head, and DFlash. A mode absent from that build has
+/// no variant, so a preset naming it is refused while it is read rather than
+/// by a process that will not start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpecType {
+    /// No speculative decoding.
+    None,
+    /// A separate draft model proposes the tokens (`draft-simple`).
+    DraftSimple,
+    /// The model's multi-token prediction head drafts (`draft-mtp`).
+    DraftMtp,
+    /// DFlash block drafting (`draft-dflash`).
+    DraftDflash,
+}
+
+impl fmt::Display for SpecType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::None => "none",
+            Self::DraftSimple => "draft-simple",
+            Self::DraftMtp => "draft-mtp",
+            Self::DraftDflash => "draft-dflash",
+        };
+        f.write_str(s)
+    }
 }
 
 impl Default for LlamaServerConfig {
     fn default() -> Self {
         Self {
             model_path: String::new(),
+            mmproj_path: None,
             n_ctx: 32_768,
             n_gpu_layers: 999,
             n_batch: None,
             n_ubatch: None,
             n_parallel: Some(1),
+            kv_unified: false,
             cont_batching: Some(true),
             cache_type_k: None,
             cache_type_v: None,
@@ -216,7 +309,39 @@ impl Default for LlamaServerConfig {
             cache_reuse: None,
             metrics: false,
             log_verbosity: Some(4),
+            n_threads: None,
+            ctx_checkpoints: None,
+            reasoning_budget: None,
+            reasoning_budget_message: None,
+            rope_freq_base: None,
+            rope_freq_scale: None,
+            no_kv_offload: false,
+            mlock: false,
+            no_mmap: false,
+            seed: None,
+            draft_model: None,
+            spec_type: None,
+            chat_template_file: None,
+            devices: None,
             extra_args: Vec::new(),
+        }
+    }
+}
+
+impl LlamaServerConfig {
+    /// The context the engine is launched with (`-c`).
+    ///
+    /// Under a unified buffer every slot draws on one pool, so the pool holds
+    /// one window per slot: eight requests of a batch each keep the window a
+    /// single conversation has. Without it the engine splits `-c` across the
+    /// slots itself, and the window is passed as is.
+    #[must_use]
+    pub fn engine_n_ctx(&self) -> u32 {
+        if self.kv_unified {
+            self.n_ctx
+                .saturating_mul(self.n_parallel.unwrap_or(1).max(1))
+        } else {
+            self.n_ctx
         }
     }
 }
@@ -233,8 +358,11 @@ pub(crate) fn build_args(config: &LlamaServerConfig, port: u16) -> Vec<String> {
     };
 
     push("-m", config.model_path.clone());
+    if let Some(projector) = &config.mmproj_path {
+        push("--mmproj", projector.clone());
+    }
     push("-ngl", config.n_gpu_layers.to_string());
-    push("-c", config.n_ctx.to_string());
+    push("-c", config.engine_n_ctx().to_string());
 
     if let Some(v) = config.n_batch {
         push("-b", v.to_string());
@@ -253,6 +381,9 @@ pub(crate) fn build_args(config: &LlamaServerConfig, port: u16) -> Vec<String> {
     }
     if let Some(v) = config.n_parallel {
         push("-np", v.to_string());
+    }
+    if config.kv_unified {
+        args.push("--kv-unified".to_owned());
     }
 
     if let Some(enabled) = config.cont_batching {
@@ -273,6 +404,8 @@ pub(crate) fn build_args(config: &LlamaServerConfig, port: u16) -> Vec<String> {
     if config.metrics {
         args.push("--metrics".to_owned());
     }
+    push_load_args(config, &mut args);
+    super::devices::push_args(config.devices.as_deref(), &mut args);
     args.push("--host".to_owned());
     args.push(HOST.to_owned());
     args.push("--port".to_owned());
@@ -280,6 +413,64 @@ pub(crate) fn build_args(config: &LlamaServerConfig, port: u16) -> Vec<String> {
 
     args.extend(config.extra_args.iter().cloned());
     args
+}
+
+/// The flags of the model sheet's load settings that the historical command
+/// line never carried. Each is absent unless its field is set, so the default
+/// configuration still reproduces that line exactly.
+fn push_load_args(config: &LlamaServerConfig, args: &mut Vec<String>) {
+    let mut push = |flag: &str, value: Option<String>| {
+        if let Some(value) = value {
+            args.push(flag.to_owned());
+            args.push(value);
+        }
+    };
+    push("-t", config.n_threads.map(|v| v.to_string()));
+    push(
+        "--ctx-checkpoints",
+        config.ctx_checkpoints.map(|v| v.to_string()),
+    );
+    push(
+        "--reasoning-budget",
+        config.reasoning_budget.map(|v| v.to_string()),
+    );
+    push(
+        "--reasoning-budget-message",
+        config.reasoning_budget_message.clone(),
+    );
+    push(
+        "--rope-freq-base",
+        config.rope_freq_base.map(|v| v.to_string()),
+    );
+    push(
+        "--rope-freq-scale",
+        config.rope_freq_scale.map(|v| v.to_string()),
+    );
+    push("--seed", config.seed.map(|v| v.to_string()));
+    push("--model-draft", config.draft_model.clone());
+    push("--spec-type", config.spec_type.map(|v| v.to_string()));
+    push("--chat-template-file", config.chat_template_file.clone());
+    if config.no_kv_offload {
+        args.push("--no-kv-offload".to_owned());
+    }
+    if let Some(mode) = load_mode(config.mlock, config.no_mmap) {
+        args.push("--load-mode".to_owned());
+        args.push(mode.to_owned());
+    }
+}
+
+/// The `--load-mode` value for the two loading switches, `None` when both are
+/// left as the engine has them (memory-mapped, not locked).
+///
+/// The engine took `--mlock` and `--no-mmap` until it folded them into this
+/// one argument, and it now refuses the two former flags.
+fn load_mode(mlock: bool, no_mmap: bool) -> Option<&'static str> {
+    match (mlock, no_mmap) {
+        (false, false) => None,
+        (true, false) => Some("mmap+mlock"),
+        (true, true) => Some("mlock"),
+        (false, true) => Some("none"),
+    }
 }
 
 /// Overlay the `APOLLIA_LLAMA_` environment variables onto a configuration.
@@ -468,6 +659,33 @@ mod tests {
 
         // THEN it is the historical launch line, flag for flag and in order
         assert_eq!(args, frozen_baseline());
+    }
+
+    #[test]
+    fn test_build_args_projector_is_passed_right_after_the_model() {
+        // GIVEN a model fetched with its vision projector
+        let config = LlamaServerConfig {
+            model_path: "/models/Vision-Q4_K_M/Vision-Q4_K_M.gguf".to_owned(),
+            mmproj_path: Some("/models/Vision-Q4_K_M/mmproj-Vision-f16.gguf".to_owned()),
+            ..LlamaServerConfig::default()
+        };
+
+        // WHEN the argument vector is built
+        let args = build_args(&config, PORT);
+
+        // THEN the projector follows the model and nothing else moves
+        assert_eq!(
+            args,
+            baseline_with(|v| {
+                v[1] = "/models/Vision-Q4_K_M/Vision-Q4_K_M.gguf".to_owned();
+                insert(
+                    v,
+                    2,
+                    "--mmproj",
+                    "/models/Vision-Q4_K_M/mmproj-Vision-f16.gguf",
+                );
+            })
+        );
     }
 
     #[test]
@@ -681,7 +899,7 @@ mod tests {
     #[test]
     fn test_resolve_env_extra_args_are_appended_last() {
         // GIVEN APOLLIA_LLAMA_EXTRA_ARGS carrying two tokens
-        let config = with_env(ENV_EXTRA_ARGS, "--mlock --no-warmup");
+        let config = with_env(ENV_EXTRA_ARGS, "--swa-full --no-warmup");
 
         // WHEN the argument vector is built
         let args = build_args(&config, PORT);
@@ -690,7 +908,7 @@ mod tests {
         assert_eq!(
             args,
             baseline_with(|v| {
-                v.push("--mlock".to_owned());
+                v.push("--swa-full".to_owned());
                 v.push("--no-warmup".to_owned());
             })
         );
@@ -798,7 +1016,7 @@ mod tests {
             cache_type_k: Some("q8_0".to_owned()),
             cache_type_v: Some("q8_0".to_owned()),
             cache_reuse: Some(256),
-            extra_args: vec!["--mlock".to_owned()],
+            extra_args: vec!["--swa-full".to_owned()],
             ..LlamaServerConfig::default()
         };
 
@@ -837,7 +1055,7 @@ mod tests {
             "127.0.0.1",
             "--port",
             "8080",
-            "--mlock",
+            "--swa-full",
         ]
         .iter()
         .map(|s| (*s).to_owned())

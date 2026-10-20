@@ -1,6 +1,6 @@
 [package]
 name = "apollia-e2e-tests"
-version = "0.2.0-preview"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
@@ -33,6 +33,7 @@ apollia-aip           = { workspace = true, optional = true }
 pyo3                  = { workspace = true, optional = true }
 apollia-memory       = { workspace = true }
 apollia-mcp          = { workspace = true }
+apollia-permissions  = { workspace = true }
 apollia-notifications = { workspace = true }
 rusqlite              = { workspace = true }
 chrono                = { workspace = true }
@@ -60,11 +61,6 @@ name = "test_runtime_chain"
 path = "integration/test_runtime_chain.rs"
 
 [[test]]
-name = "test_hello_agent"
-path = "integration/test_hello_agent.rs"
-required-features = ["python-tests"]
-
-[[test]]
 name = "test_llm_degraded"
 path = "integration/test_llm_degraded.rs"
 
@@ -75,11 +71,6 @@ path = "integration/test_run_tools.rs"
 [[test]]
 name = "test_llm_structured_output"
 path = "integration/test_llm_structured_output.rs"
-required-features = ["python-tests"]
-
-[[test]]
-name = "test_llm_agent"
-path = "integration/test_llm_agent.rs"
 required-features = ["python-tests"]
 
 [[test]]
@@ -147,9 +138,20 @@ name = "test_a2a_routing"
 path = "integration/test_a2a_routing.rs"
 
 [[test]]
-name = "test_distribution"
-path = "integration/test_distribution.rs"
-
-[[test]]
 name = "test_a2a_guards"
 path = "integration/test_a2a_guards.rs"
+
+[[test]]
+name = "test_hello_agent"
+path = "integration/test_hello_agent.rs"
+required-features = ["python-tests"]
+
+[[test]]
+name = "test_package_tools"
+path = "integration/test_package_tools.rs"
+required-features = ["python-tests"]
+
+[[test]]
+name = "test_package_workflows"
+path = "integration/test_package_workflows.rs"
+required-features = ["python-tests"]

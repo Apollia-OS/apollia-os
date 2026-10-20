@@ -9,10 +9,14 @@ use std::pin::Pin;
 
 use futures::Stream;
 
+mod message;
+
+pub use message::ChatMessage;
+
 /// Unified trait for any LLM backend: local via sidecar runner or cloud HTTP.
 ///
 /// Implemented by `RunnerLlmBackend` (apollia-runtime sidecar),
-/// `OpenAICompatibleClient`, `AnthropicClient` and `VertexClient` (feature `"cloud"`).
+/// and `OpenAICompatibleClient` (feature `"cloud"`).
 /// Stored as `Arc<dyn CompletionModel>` in the `LlmRouter`.
 #[async_trait::async_trait]
 pub trait CompletionModel: Send + Sync {
@@ -40,6 +44,33 @@ pub trait CompletionModel: Send + Sync {
     /// GBNF grammar that constrains tool-call decoding. Cloud backends return `false`
     /// (the default); only the runner-backed local backend overrides this to `true`.
     fn is_local(&self) -> bool {
+        false
+    }
+
+    /// Whether a [`CompletionRequest::seed`] reaches the inference server.
+    ///
+    /// `false` (the default) means the field is dropped on the way out, so two
+    /// calls carrying the same seed are free to answer differently. It is
+    /// reported on [`BackendInfo`] and logged at call time rather than left for
+    /// the caller to discover: a seed silently dropped turns a backend
+    /// limitation into what reads like a non-deterministic model.
+    ///
+    /// Carrying the seed is not a promise of reproducibility. A server is free
+    /// to answer differently on the same seed (continuous batching, a changed
+    /// model build, a pooled fleet), which is why this says what the engine
+    /// sends rather than what the provider guarantees.
+    fn carries_seed(&self) -> bool {
+        false
+    }
+
+    /// Whether a request that ends on an assistant message has that message
+    /// continued, rather than answered by a new one.
+    ///
+    /// `false` (the default) is the answer for every engine it was not
+    /// measured on: a server free to close the trailing message and open a new
+    /// turn would answer something other than the rest of the text, and the
+    /// caller would stitch the two together as if they were one answer.
+    fn continues_answer(&self) -> bool {
         false
     }
 
@@ -73,17 +104,20 @@ pub trait CompletionModel: Send + Sync {
 /// `pub(crate)` so both live in one place without an apollia-llm -> apollia-oria
 /// dependency.
 pub(crate) fn message_char_len(msg: &ChatMessage) -> usize {
-    match &msg.content {
-        MessageContent::Text(s) => s.len(),
-        MessageContent::ToolResult { content, .. } => content.len(),
-        MessageContent::WithToolCalls { text, tool_calls } => {
-            text.len()
-                + tool_calls
-                    .iter()
-                    .map(|tc| tc.arguments.to_string().len())
-                    .sum::<usize>()
+    let reasoning = msg.reasoning.as_ref().map_or(0, String::len);
+    reasoning
+        + match &msg.content {
+            MessageContent::Text(s) => s.len(),
+            MessageContent::TextWithImages { text, .. } => text.len(),
+            MessageContent::ToolResult { content, .. } => content.len(),
+            MessageContent::WithToolCalls { text, tool_calls } => {
+                text.len()
+                    + tool_calls
+                        .iter()
+                        .map(|tc| tc.arguments.to_string().len())
+                        .sum::<usize>()
+            }
         }
-    }
 }
 
 /// Unified inference request for all backends.
@@ -132,6 +166,72 @@ pub struct CompletionRequest {
     /// the caller then validates an answer that was never constrained and
     /// blames the model.
     pub response_schema: Option<serde_json::Value>,
+    /// Nucleus sampling: keep the smallest token set whose probability mass
+    /// reaches this value. `None` leaves the engine default.
+    pub top_p: Option<f32>,
+    /// Keep only the `k` most likely tokens before sampling. `None` leaves the
+    /// engine default. Not part of the OpenAI protocol: sent under the name
+    /// llama-server reads, and a server that knows no such field may refuse it.
+    pub top_k: Option<u32>,
+    /// Drop every token whose probability is below this fraction of the most
+    /// likely one. `None` leaves the engine default. A llama-server field, sent
+    /// under its own name.
+    pub min_p: Option<f32>,
+    /// Penalty on any token already present in the output, OpenAI protocol
+    /// field. `None` leaves the engine default.
+    pub presence_penalty: Option<f32>,
+    /// Penalty proportional to how often a token already appeared, OpenAI
+    /// protocol field. `None` leaves the engine default.
+    pub frequency_penalty: Option<f32>,
+    /// Multiplicative penalty on repeated tokens, the llama-server field of
+    /// that name. `None` leaves the engine default.
+    pub repeat_penalty: Option<f32>,
+    /// Strings that end generation when produced. `None` or an empty list sends
+    /// no stop field.
+    pub stop: Option<Vec<String>>,
+    /// Reasoning on or off, for a model whose chat template reads
+    /// `enable_thinking`. `None` (default) sends nothing and leaves the
+    /// template's own default.
+    pub thinking: Option<bool>,
+    /// The level of reasoning, for a model whose chat template reads
+    /// `reasoning_effort`. `None` (default) sends nothing and leaves the
+    /// template's own default.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Whether the reasoning of the earlier answers goes back to the model.
+    /// `Some(true)` sends each earlier assistant message with the reasoning it
+    /// carries and tells the chat template to keep it (`preserve_thinking`).
+    /// `None` (default) and `Some(false)` send neither, and the earlier
+    /// answers travel as their content alone.
+    pub preserve_thinking: Option<bool>,
+    /// The conversation turn the call is made for, when there is one.
+    ///
+    /// Read by the router to stamp the call it publishes; never sent to a
+    /// backend. `None` outside a conversation.
+    pub call_context: Option<crate::call_measure::CallContext>,
+}
+
+/// A level of reasoning, the values a `reasoning_effort` template reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// Short reasoning, a faster answer.
+    Low,
+    /// The middle level.
+    Medium,
+    /// Long reasoning, a more thorough answer.
+    High,
+}
+
+impl ReasoningEffort {
+    /// The value the template variable receives.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 /// Unified inference response returned by all backends.
@@ -163,13 +263,11 @@ pub struct CompletionResponse {
     pub engine_timings: Option<serde_json::Value>,
 }
 
-/// Anthropic cache marker for prompt caching.
+/// Prompt-caching marker, in the shape of the Anthropic API.
 ///
-/// May be set on a `ChatMessage` to indicate the message should be included
-/// in a cache breakpoint when serializing to the Anthropic API. Only the
-/// `Ephemeral` variant is supported by the current API.
-///
-/// Non-Anthropic backends (OpenAI, Ollama, local) ignore this field.
+/// May be set on a `ChatMessage` to ask that the message close a cache
+/// breakpoint. No backend in this crate reads it: the OpenAI-compatible and
+/// Ollama clients, and the local runner, ignore the field.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheControl {
@@ -241,74 +339,6 @@ pub enum FinishReason {
     Error,
 }
 
-/// A message in a multi-turn conversation history.
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    /// Role of the message sender.
-    pub role: Role,
-    /// Message content (text, tool result, or text + tool calls).
-    pub content: MessageContent,
-    /// Anthropic cache marker for prompt caching.
-    ///
-    /// When `Some(CacheControl::Ephemeral)`, the Anthropic backend includes
-    /// this message in a cache breakpoint when building the request.
-    /// Non-Anthropic backends ignore this field.
-    pub cache_control: Option<CacheControl>,
-}
-
-impl ChatMessage {
-    /// Build a system message (global behavior instructions).
-    pub fn system(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::System,
-            content: MessageContent::Text(text.into()),
-            cache_control: None,
-        }
-    }
-
-    /// Build a user message.
-    pub fn user(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::User,
-            content: MessageContent::Text(text.into()),
-            cache_control: None,
-        }
-    }
-
-    /// Build an assistant message with no tool calls.
-    pub fn assistant(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: MessageContent::Text(text.into()),
-            cache_control: None,
-        }
-    }
-
-    /// Build an assistant message that includes tool calls.
-    pub fn assistant_with_calls(text: &str, calls: &[ToolCall]) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: MessageContent::WithToolCalls {
-                text: text.to_owned(),
-                tool_calls: calls.to_vec(),
-            },
-            cache_control: None,
-        }
-    }
-
-    /// Build a message carrying the result of a tool call.
-    pub fn tool_result(call_id: &str, content: &str) -> Self {
-        Self {
-            role: Role::Tool,
-            content: MessageContent::ToolResult {
-                tool_call_id: call_id.to_owned(),
-                content: content.to_owned(),
-            },
-            cache_control: None,
-        }
-    }
-}
-
 /// Role of a `ChatMessage` sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
@@ -327,6 +357,14 @@ pub enum Role {
 pub enum MessageContent {
     /// Plain text content.
     Text(String),
+    /// A user message carrying text and one or more images, sent to a model
+    /// that reads images. The images follow the text, in order.
+    TextWithImages {
+        /// Text of the message (may be empty).
+        text: String,
+        /// Images attached to the message, in the order the user gave them.
+        images: Vec<crate::message_image::MessageImage>,
+    },
     /// Result of a tool call (`Tool` role).
     ToolResult {
         /// Identifier of the matching tool call.
@@ -409,6 +447,12 @@ pub enum StreamChunk {
     /// [`CompletionResponse::engine_timings`]: the schema belongs to the engine,
     /// not to this crate. Sites that do not measure anything ignore it.
     Timings(serde_json::Value),
+    /// Why the model stopped, from the chunk that carried it.
+    ///
+    /// Emitted at most once, by backends whose stream reports a finish reason
+    /// (the OpenAI-compatible ones). A stream without it ended on a tool call
+    /// if it yielded one, and on a natural stop otherwise.
+    Finish(FinishReason),
 }
 
 /// Summary information about a backend, returned by `LlmRouter::list()`.
@@ -420,6 +464,11 @@ pub struct BackendInfo {
     pub model_id: String,
     /// `true` if the backend is ready to accept requests.
     pub available: bool,
+    /// `true` if a request seed reaches the inference server.
+    ///
+    /// See [`CompletionModel::carries_seed`]. `false` says the engine cannot
+    /// make a call on this backend reproducible, whatever the caller asks.
+    pub carries_seed: bool,
 }
 
 /// Unified errors for the `apollia-llm` crate.
@@ -533,6 +582,27 @@ pub enum LlmError {
     /// The LLM call was cancelled by the session's `CancellationToken`.
     #[error("cancelled by caller")]
     Cancelled,
+
+    /// A local engine refused to load the model: its estimated footprint is
+    /// over what the load guardrail allows on this machine. Not retryable; a
+    /// load the user confirms goes past it.
+    #[error(
+        "backend '{backend}': loading {model} was refused by the {level} load guardrail: it \
+         needs an estimated {estimated_gb:.1} GB and this machine allows {budget_gb:.1} GB; \
+         confirm the load to go ahead"
+    )]
+    LoadRefused {
+        /// Backend name.
+        backend: String,
+        /// The model whose load was refused, as the engine was asked for it.
+        model: String,
+        /// Wire name of the guardrail level that refused it.
+        level: String,
+        /// The estimated footprint, in gigabytes.
+        estimated_gb: f64,
+        /// The limit the level holds to, in gigabytes.
+        budget_gb: f64,
+    },
 
     /// The `[llm.routing]` section is missing from `apollia.toml`.
     ///
@@ -1053,6 +1123,13 @@ mod tests {
             LlmError::ServiceUnavailable,
             LlmError::Unauthorized,
             LlmError::Cancelled,
+            LlmError::LoadRefused {
+                backend: "local".into(),
+                model: "big.gguf".into(),
+                level: "strict".into(),
+                estimated_gb: 18.3,
+                budget_gb: 12.0,
+            },
             LlmError::ConfigConflict {
                 backend: "local".into(),
                 reason: "mutuellement exclusifs".into(),

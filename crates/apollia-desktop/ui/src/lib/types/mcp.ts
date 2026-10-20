@@ -1,12 +1,12 @@
 // ─── MCP integrations and registry ───
 
+import type { ActionFamily, FamilySource } from "$lib/tools/action-family";
 import type { ErrorCategory } from "./reasoning";
 
 export interface McpServerStatusView {
   name: string;
   server_info: string;
   tools_count: number;
-  requires_approval: boolean;
   connected: boolean;
   pid: number | null;
   uptime_secs: number | null;
@@ -61,7 +61,6 @@ export interface McpServerConfigView {
   args: string[];
   env_keys: string[];
   transport: string;
-  requires_approval: boolean;
   tags: string[];
 }
 
@@ -117,7 +116,8 @@ export interface RegistryServerView {
 export interface RegistryPackageView {
   registryType: string;
   identifier: string;
-  version: string;
+  /** Exact version; `null` for a curated entry the selection does not pin. */
+  version: string | null;
   runtimeHint: string | null;
   /** Transport block (`{ "type": "stdio" }`), serialised by `RegistryTransport`. */
   transport: { type: string };
@@ -162,12 +162,22 @@ export interface ConnectorEnrichmentView {
    *  takes precedence over `auth_help_text` and lets us ship long localised
    *  explanations in the bundled FR/EN catalogs instead of inline strings. */
   auth_help_i18n_key: string | null;
-  default_requires_approval: boolean;
   /** Env var name carrying a pre-registered OAuth client id for AS that
    *  don't support CIMD or anonymous DCR (Figma). The wizard resolves the
    *  env var via `mcp_oauth_resolve_client_id` and passes the value to
    *  `mcp_oauth_login`. */
   oauth_pre_registered_client_id_env: string | null;
+  /** Questions offered to try the connection, one per tool they exercise. */
+  examples?: TryExample[];
+}
+
+/** One question offered to try a connection, its texts keyed by locale. */
+export interface TryExample {
+  /** Name of the tool on the server. */
+  tool: string;
+  /** What the tool does, in a few words. */
+  label: Record<string, string>;
+  question: Record<string, string>;
 }
 
 /** Result of testing an MCP server connection without persisting a session. */
@@ -222,6 +232,58 @@ export interface McpServerConfigInput {
   url?: string;
   env: Record<string, string>;
   transport: string;
-  requires_approval: boolean;
   tags: string[];
+  /** Where the connection was found. The desktop records the selection itself. */
+  origin?: ConnectionOrigin;
+}
+
+// ── Connections ─────────────────────────────────────────────────────────────
+
+/** Where a connection was found before it was added. */
+export type ConnectionProvenance = "selection" | "registry" | "custom" | "package";
+
+/** Origin sent with an MCP server configuration when it is added. */
+export interface ConnectionOrigin {
+  provenance: ConnectionProvenance;
+  /** Recorded for a registry entry; the desktop decides it for the selection. */
+  official?: boolean;
+}
+
+/** Kind of thing a connection plugs in. */
+export type ConnectionKind = "native" | "imap" | "mcp" | "folder";
+
+/** Whether a connection can be used right now. */
+export type ConnectionState =
+  | "connected"
+  | "degraded"
+  | "needs_reauth"
+  | "unavailable"
+  | "stopped"
+  /** Forbidden by the organisation policy since the last start: not started,
+   *  its tools neither offered nor run, never deleted. */
+  | "forbidden_by_policy";
+
+/** One tool a connection brings. */
+export interface ConnectionTool {
+  id: string;
+  family: ActionFamily;
+  familySource: FamilySource;
+  /** Offered checked when the connection is granted to an agent. */
+  prechecked: boolean;
+}
+
+/** One connection, whatever its kind (`list_connections`). */
+export interface Connection {
+  id: string;
+  kind: ConnectionKind;
+  label: string;
+  account: string | null;
+  /** Folder of this machine the connection opens, for a folder. */
+  path?: string;
+  provenance: ConnectionProvenance;
+  /** Sends data off this machine; computed by the runtime. */
+  remote: boolean;
+  official: boolean;
+  state: ConnectionState;
+  tools: ConnectionTool[];
 }

@@ -12,12 +12,15 @@
   import { MessageSquare, Link } from "lucide-svelte";
   import { Spinner } from "$lib/components/ui/progress";
   import { Button } from "$lib/components/ui/button";
-  import { uiMode } from "$lib/stores/mode";
+  import { developerMode } from "$lib/stores/developerMode";
   import { contextDrawerOpen } from "$lib/stores/chatLayout";
+  import { chatDensity, chatFullWidth } from "$lib/stores/chatAppearance";
+  import { lastAnswerId } from "$lib/chat/generationStats";
   import MessageGroup from "./MessageGroup.svelte";
   import StreamingMessage from "./StreamingMessage.svelte";
   import A2ADelegationCard from "./A2ADelegationCard.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
+  import OperatorApprovalCard from "./OperatorApprovalCard.svelte";
   import AskUserCard from "./AskUserCard.svelte";
   import ChatPlanHost from "./ChatPlanHost.svelte";
   import ScrollToBottomButton from "./ScrollToBottomButton.svelte";
@@ -25,6 +28,8 @@
   import type { A2ADelegation } from "./useA2ADelegation.svelte";
   import type { ConversationScroll } from "./useConversationScroll.svelte";
   import type { LiveToolCall } from "./liveToolChain";
+  import { firstTaskIntro } from "../onboarding/firstTaskLive";
+  import { liveApprovalCall } from "./liveApprovalCall";
 
   interface Props {
     sessionId: string;
@@ -49,6 +54,14 @@
       toolCallId: string;
       toolName: string;
       inputPreview: string;
+      /** The answers the request offers, when it names them. */
+      answers?: string[];
+      /** The full arguments of the call, behind "see more". */
+      detail?: string;
+      /** The whole code of a tool that runs code. */
+      code?: string | null;
+      /** The folder the code runs in. */
+      workingDir?: string | null;
     } | null;
     pendingUserInput: {
       requestId: string;
@@ -79,22 +92,50 @@
     onregenerate,
     onedit,
   }: Props = $props();
+
+  // The answer "last message only" keeps its generation figures under.
+  const lastAnswer = $derived(lastAnswerId(messageGroups.flatMap((g) => g.messages)));
 </script>
 
 <div class="relative flex-1 min-h-0">
 <div
   bind:this={scroll.container}
   onscroll={() => scroll.onScroll()}
-  class="h-full overflow-y-auto px-4 py-5 space-y-5 [&>*]:mx-auto [&>*]:w-full {$contextDrawerOpen
-    ? '[&>*]:max-w-[680px]'
-    : '[&>*]:max-w-[860px]'}"
+  class="h-full overflow-y-auto px-6 py-6 [&>*]:mx-auto [&>*]:w-full {$chatDensity === 'compact'
+    ? 'space-y-3'
+    : 'space-y-5'} {$chatFullWidth
+    ? '[&>*]:max-w-none'
+    : $contextDrawerOpen
+      ? '[&>*]:max-w-[680px]'
+      : '[&>*]:max-w-[760px]'}"
+  data-chat-full-width={$chatFullWidth}
   data-testid="chat-messages-list"
 >
   {#if empty && !isStreaming && !isProcessing}
-    <div class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground/40">
-      <MessageSquare size={28} />
-      <p class="text-xs">{$t("chat.first_message_placeholder")}</p>
-    </div>
+    {#if $firstTaskIntro?.sessionId === sessionId}
+      <!-- The conversation the first launch closed on says what it is. -->
+      <div
+        class="flex h-full flex-col items-center justify-center gap-3 text-center"
+        data-testid="first-task-intro"
+      >
+        <span class="flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+          <MessageSquare size={18} />
+        </span>
+        <p class="m-0 text-body-sm font-medium text-foreground" data-testid="first-task-intro-title">
+          {$t("onboarding.first_task.intro_title", { values: { name: $firstTaskIntro.agentName } })}
+        </p>
+        {#if $firstTaskIntro.prefilled}
+          <p class="m-0 max-w-xs text-caption text-muted-foreground" data-testid="first-task-intro-body">
+            {$t("onboarding.first_task.intro_body")}
+          </p>
+        {/if}
+      </div>
+    {:else}
+      <div class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground/40">
+        <MessageSquare size={28} />
+        <p class="text-xs">{$t("chat.first_message_placeholder")}</p>
+      </div>
+    {/if}
   {:else}
     <!-- SummarizedMessagesBanner moved to ContextDrawer's Memory tab
          - no longer rendered inline in the message list. -->
@@ -110,11 +151,13 @@
           {group}
           {sessionId}
           agentName={sessionAgentName}
+          variant={$chatDensity === "compact" ? "compact" : "default"}
           busy={isProcessing || isStreaming}
+          lastAnswerId={lastAnswer}
           {onregenerate}
           {onedit}
         />
-        {#if $uiMode === "builder" && hasCrossSessionRefs && isSingleCrossSession}
+        {#if $developerMode && hasCrossSessionRefs && isSingleCrossSession}
           <div
             class="absolute -top-1 -right-1 flex items-center gap-1 rounded-full leading-none bg-secondary/20 px-2 py-0.5"
             data-testid="cross-session-badge"
@@ -159,13 +202,33 @@
                mount a fresh card, never inheriting the previous card's busy
                (greyed) state. -->
           {#key pendingApproval.toolCallId}
-            <ApprovalCard
-              sessionId={pendingApproval.sessionId}
-              messageId={pendingApproval.messageId}
-              toolCallId={pendingApproval.toolCallId}
-              toolName={pendingApproval.toolName}
-              inputPreview={pendingApproval.inputPreview}
-            />
+            {#if $developerMode}
+              <ApprovalCard
+                sessionId={pendingApproval.sessionId}
+                messageId={pendingApproval.messageId}
+                toolCallId={pendingApproval.toolCallId}
+                toolName={pendingApproval.toolName}
+                inputPreview={pendingApproval.inputPreview}
+                answers={pendingApproval.answers ?? null}
+                detail={pendingApproval.detail ?? ""}
+                code={pendingApproval.code ?? null}
+                workingDir={pendingApproval.workingDir ?? null}
+              />
+            {:else}
+              <OperatorApprovalCard
+                sessionId={pendingApproval.sessionId}
+                messageId={pendingApproval.messageId}
+                toolCallId={pendingApproval.toolCallId}
+                toolCall={liveApprovalCall(
+                  pendingApproval.toolName,
+                  pendingApproval.inputPreview,
+                  pendingApproval.detail,
+                )}
+                answers={pendingApproval.answers ?? null}
+                code={pendingApproval.code ?? null}
+                workingDir={pendingApproval.workingDir ?? null}
+              />
+            {/if}
           {/key}
         </div>
         <Button variant="ghost" size="sm"
@@ -225,6 +288,13 @@
       </div>
     {/if}
   {/if}
+  <!-- The room under a short answer that lets the sent message reach the top. -->
+  <div
+    class="!mt-0 shrink-0"
+    style:height="{scroll.sendSpace}px"
+    aria-hidden="true"
+    data-chat-send-spacer
+  ></div>
 </div>
 <ScrollToBottomButton
   visible={scroll.showJump}

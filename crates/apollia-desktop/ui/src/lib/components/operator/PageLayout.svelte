@@ -2,7 +2,7 @@
   /**
    * PageLayout - canonical route container.
    *
-   * Enforces the Dashboard/Chat/Agents reference layout:
+   * Enforces the Chat/Agents reference layout:
    *   • `mx-auto w-full max-w-6xl` centred container
    *   • `<PageHeader>` with kicker, title, subtitle, actions snippet
    *   • Default content padding handled by individual sections inside `children`
@@ -27,7 +27,7 @@
     /** Right-aligned action area in the header. */
     actions?: Snippet;
     /** Width cap. Override only when the route needs to break the 6xl rule. */
-    maxWidth?: "max-w-4xl" | "max-w-5xl" | "max-w-6xl" | "max-w-7xl";
+    maxWidth?: "max-w-4xl" | "max-w-5xl" | "max-w-6xl" | "max-w-7xl" | "max-w-none";
     /** Optional custom class on the container. */
     class?: string;
     /** Optional test id forwarded to the container. */

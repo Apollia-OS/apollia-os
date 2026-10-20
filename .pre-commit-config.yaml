@@ -26,13 +26,13 @@ repos:
       - id: check-toml
       - id: check-added-large-files
         args: ["--maxkb=500"]
-      # The one path excused, anchored at both ends so it names a file and
-      # not a prefix: a directory prefix here would blind the detector to
-      # the twenty-six other files of `src/api/`. The exemption sits on
-      # this entry rather than at the root of the file, where it would
-      # also excuse the fifteen other hooks.
+      # The two paths excused, each anchored at both ends so it names a file
+      # and not a prefix: a directory prefix here would blind the detector
+      # to every other file of its directory. Both hold test material only.
+      # The exemption sits on this entry rather than at the root of the
+      # file, where it would also excuse the fifteen other hooks.
       - id: detect-private-key
-        exclude: '^crates/apollia-runtime/src/api/tls_test_material\.rs$'
+        exclude: '^crates/apollia-(runtime/src/api|connectors/src/imap)/tls_test_material\.rs$'
       - id: mixed-line-ending
         args: ["--fix=lf"]
 
@@ -287,6 +287,13 @@ repos:
         files: '^(crates/apollia-desktop/ui/(src/.+|tailwind\.config\.ts)|scripts/check_design_tokens\.py)$'
         pass_filenames: false
 
+      - id: check-ui-vocabulary
+        name: no banned technical term in the interface texts outside developer mode
+        entry: python3 scripts/check_ui_vocabulary.py
+        language: system
+        files: '^(crates/apollia-desktop/ui/src/(lib/i18n/(en|fr|glossary)\.json|.+\.svelte)|scripts/check_ui_vocabulary\.py)$'
+        pass_filenames: false
+
       - id: check-eventbus-variants
         name: every RuntimeEvent variant is emitted and read, and lag stays one rule
         entry: python3 scripts/check_eventbus_variants.py
@@ -369,6 +376,16 @@ repos:
         entry: python3 scripts/check_data_layout.py
         language: system
         files: '^(crates/.+\.rs|tests/cli/seed/schemas/.+|scripts/check_data_layout\.py)$'
+        pass_filenames: false
+
+      # Reads the index, not the diff: an empty file shows no line in a
+      # review and a binary shows no content, so neither is caught by reading
+      # the change. Measured at 0.3 s on the full tree.
+      - id: check-tracked-inventory
+        name: no tracked file is empty or a binary executable
+        entry: python3 scripts/check_tracked_inventory.py
+        language: system
+        always_run: true
         pass_filenames: false
 
       - id: check-sqlite-schema-versioning
@@ -454,7 +471,7 @@ repos:
         name: artifact names bind producer and consumers
         entry: python3 scripts/check_release_artifacts.py
         language: system
-        files: '^(packaging/artifacts\.json|packaging/fetch-llama-server\.sh|\.github/workflows/release\.yml|crates/apollia-cli/src/commands/update\.rs|crates/apollia-desktop/tauri\.conf\.json|docs/site/docs/how-to/install-the-desktop-app\.md|docs/site/i18n/fr/docusaurus-plugin-content-docs/current/how-to/install-the-desktop-app\.md|scripts/check_release_artifacts\.py)$'
+        files: '^(packaging/artifacts\.json|packaging/fetch-llama-server\.sh|\.github/workflows/release\.yml|\.github/workflows/preview-channel\.yml|crates/apollia-desktop/src/commands/updates\.rs|crates/apollia-cli/src/commands/update\.rs|crates/apollia-desktop/tauri\.conf\.json|docs/site/docs/how-to/install-the-desktop-app\.md|docs/site/i18n/fr/docusaurus-plugin-content-docs/current/how-to/install-the-desktop-app\.md|scripts/check_release_artifacts\.py)$'
         pass_filenames: false
 
       # The connector replay fixtures against the operations the crate declares.
@@ -467,6 +484,17 @@ repos:
         entry: python3 scripts/check_connector_fixtures.py
         language: system
         files: '^(crates/apollia-connectors/.*|scripts/check_connector_fixtures\.py)$'
+        pass_filenames: false
+
+      # The desktop commands that serve a runtime running as a daemon. Each
+      # registered command is routed over HTTP or embedded only, and the second
+      # count is on a descending ratchet: a command added without a route, or a
+      # route added without lowering the ceiling, is refused.
+      - id: check-attached-coverage
+        name: every desktop command is routed for the attached mode or on the ratchet
+        entry: python3 scripts/check_attached_coverage.py
+        language: system
+        files: '^(crates/apollia-desktop/src/.*\.rs|scripts/check_attached_coverage\.py)$'
         pass_filenames: false
 
       # The generated API clients against the specification they come from. A

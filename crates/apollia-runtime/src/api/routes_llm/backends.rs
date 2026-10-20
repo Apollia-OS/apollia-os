@@ -24,7 +24,7 @@ use crate::coordinator::ExecutionBackend;
 pub struct CreateLlmBackendRequest {
     /// Unique name, pattern `^[a-z0-9_-]+$`.
     pub name: String,
-    /// Provider identifier: `"llama-cpp"`, `"openai"`, `"mistral"`, `"anthropic"`, `"ollama"`.
+    /// Provider identifier: `"llama-cpp"`, `"openai"` (OpenAI-compatible server), `"ollama"`.
     pub provider: String,
     /// Model identifier (e.g. `"gpt-4o"`, `"mistral-small-latest"`).
     pub model: String,
@@ -110,13 +110,11 @@ pub struct ReloadRouterResponse {
     pub default: String,
     /// Whether the rebuilt router reaches agents that are already running.
     ///
-    /// `false` today, and not a transient state: the agent execution path reads
-    /// its router from a `OnceLock` populated at boot, a different cell from the
-    /// one this route rewrites. A reload therefore reaches chat and this API,
-    /// and an already-running agent keeps the router it started with until the
-    /// daemon restarts. Reported rather than hidden, because the failure it
-    /// produces on the Python side, `'NoneType' object has no attribute
-    /// 'complete'`, names none of this.
+    /// `true`: the router this one replaces is superseded by it, and an agent
+    /// started before the reload reads the router in force at each call
+    /// (`LlmRouter::latest`), so it picks the reload up without a restart.
+    /// Kept in the response so a client that warned about the opposite can
+    /// tell the two runtimes apart.
     pub reaches_running_agents: bool,
 }
 
@@ -144,15 +142,18 @@ fn config_to_response(cfg: LlmBackendConfig) -> LlmBackendResponse {
 }
 
 /// Map [`LlmBackendError`] to an HTTP status + error body.
-fn map_backend_error(err: LlmBackendError) -> (StatusCode, Json<BackendErrorResponse>) {
+pub(crate) fn map_backend_error(err: LlmBackendError) -> (StatusCode, Json<BackendErrorResponse>) {
     let (status, msg) = match &err {
         LlmBackendError::NotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
-        LlmBackendError::DefaultAlreadyExists(_) | LlmBackendError::CannotDeleteDefault => {
-            (StatusCode::CONFLICT, err.to_string())
-        }
-        LlmBackendError::InvalidName(_) | LlmBackendError::Serialization(_) => {
-            (StatusCode::UNPROCESSABLE_ENTITY, err.to_string())
-        }
+        LlmBackendError::PresetNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
+        LlmBackendError::DefaultAlreadyExists(_)
+        | LlmBackendError::CannotDeleteDefault
+        | LlmBackendError::PresetConflict(_) => (StatusCode::CONFLICT, err.to_string()),
+        LlmBackendError::InvalidName(_)
+        | LlmBackendError::InvalidAddress(_)
+        | LlmBackendError::InvalidServerSetting(_)
+        | LlmBackendError::InvalidPreset(_)
+        | LlmBackendError::Serialization(_) => (StatusCode::UNPROCESSABLE_ENTITY, err.to_string()),
         LlmBackendError::Db(_) | LlmBackendError::Io(_) | LlmBackendError::Schema(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
         }
@@ -164,12 +165,12 @@ fn map_backend_error(err: LlmBackendError) -> (StatusCode, Json<BackendErrorResp
 }
 
 /// Sync backends from DB to `apollia.toml` after a mutation (best-effort, never fails the request).
-fn sync_toml_after_mutation<B: ExecutionBackend + Clone>(
+pub(crate) fn sync_toml_after_mutation<B: ExecutionBackend + Clone>(
     state: &AppState<B>,
     guard: &LlmBackendRepository,
 ) {
     if let Some(path) = &state.config_path {
-        if let Err(e) = guard.sync_to_toml(path) {
+        if let Err(e) = guard.sync_to_toml(path, &state.inference_governance.imposed_settings()) {
             tracing::warn!(error = %e, "llm.backends.sync.failed");
         }
     }
@@ -203,6 +204,25 @@ fn validate_config_json(
         ));
     }
     Ok(())
+}
+
+/// Move a key given in clear into the secret store before `cfg` is written.
+/// `previous` is the row being replaced, if any.
+fn seal_key(
+    open_store: &crate::inference_servers::SecretStoreOpener,
+    cfg: &mut LlmBackendConfig,
+    previous: Option<&LlmBackendConfig>,
+) -> Result<(), (StatusCode, Json<BackendErrorResponse>)> {
+    let had_stored_key =
+        previous.is_some_and(|p| crate::backend_keys::key_in_store(&p.config_json));
+    crate::backend_keys::seal_backend_key(cfg, had_stored_key, || open_store()).map_err(|e| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(BackendErrorResponse {
+                error: format!("secret store unavailable: {e}"),
+            }),
+        )
+    })
 }
 
 // ─────────────────────────────────────────────
@@ -310,14 +330,14 @@ pub async fn create_llm_backend<B: ExecutionBackend + Clone>(
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(BackendErrorResponse {
                 error: format!(
-                    "unknown provider '{}'; valid values: llama-cpp, openai, mistral, anthropic, ollama",
+                    "unknown provider '{}'; valid values: llama-cpp, openai, ollama",
                     body.provider
                 ),
             }),
         )
     })?;
 
-    let cfg = LlmBackendConfig {
+    let mut cfg = LlmBackendConfig {
         name: body.name.clone(),
         provider,
         model: body.model,
@@ -335,6 +355,8 @@ pub async fn create_llm_backend<B: ExecutionBackend + Clone>(
             }),
         )
     })?;
+    let previous = guard.find_by_name(&cfg.name).map_err(map_backend_error)?;
+    seal_key(&state.secret_store, &mut cfg, previous.as_ref())?;
     guard.save(&cfg).map_err(map_backend_error)?;
     sync_toml_after_mutation(&state, &guard);
     let created = guard
@@ -380,7 +402,7 @@ pub async fn update_llm_backend<B: ExecutionBackend + Clone>(
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(BackendErrorResponse {
                 error: format!(
-                    "unknown provider '{}'; valid values: llama-cpp, openai, mistral, anthropic, ollama",
+                    "unknown provider '{}'; valid values: llama-cpp, openai, ollama",
                     body.provider
                 ),
             }),
@@ -398,7 +420,7 @@ pub async fn update_llm_backend<B: ExecutionBackend + Clone>(
     })?;
 
     // Verify existence before updating.
-    guard
+    let previous = guard
         .find_by_name(&name)
         .map_err(map_backend_error)?
         .ok_or_else(|| {
@@ -410,7 +432,7 @@ pub async fn update_llm_backend<B: ExecutionBackend + Clone>(
             )
         })?;
 
-    let cfg = LlmBackendConfig {
+    let mut cfg = LlmBackendConfig {
         name: name.clone(),
         provider,
         model: body.model,
@@ -418,6 +440,7 @@ pub async fn update_llm_backend<B: ExecutionBackend + Clone>(
         enabled: body.enabled,
         is_default: body.is_default,
     };
+    seal_key(&state.secret_store, &mut cfg, Some(&previous))?;
     guard.save(&cfg).map_err(map_backend_error)?;
     sync_toml_after_mutation(&state, &guard);
     let updated = guard
@@ -463,7 +486,21 @@ pub async fn delete_llm_backend<B: ExecutionBackend + Clone>(
             }),
         )
     })?;
+    let had_stored_key = guard
+        .find_by_name(&name)
+        .map_err(map_backend_error)?
+        .is_some_and(|cfg| crate::backend_keys::key_in_store(&cfg.config_json));
     guard.delete(&name).map_err(map_backend_error)?;
+    if had_stored_key {
+        if let Err(e) = crate::backend_keys::forget_backend_key(&name, || (state.secret_store)()) {
+            tracing::event!(
+                tracing::Level::WARN,
+                backend = %name,
+                error = %e,
+                "llm.backend.key.forget_failed"
+            );
+        }
+    }
     sync_toml_after_mutation(&state, &guard);
     Ok(Json(DeleteBackendResponse { deleted: name }))
 }
@@ -550,12 +587,13 @@ pub async fn reload_llm_router<B: ExecutionBackend + Clone>(
                 }),
             )
         })?;
-        let all = guard.list().map_err(map_backend_error)?;
-        let default = guard
-            .find_default()
-            .map_err(map_backend_error)?
-            .map(|cfg| cfg.name)
-            .ok_or_else(|| {
+        let (all, default) = crate::backend_keys::routable_configs(
+            &guard,
+            || (state.secret_store)(),
+            &state.inference_governance,
+        )
+        .map_err(map_backend_error)?;
+        let default = default.ok_or_else(|| {
                 (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(BackendErrorResponse {
@@ -570,8 +608,11 @@ pub async fn reload_llm_router<B: ExecutionBackend + Clone>(
     // stays wired through the managed server; otherwise the rebuild would drop
     // it and local inference would become unreachable from agents and chat.
     // Shares the same factory used by the supervisor at boot.
-    let factory =
-        crate::llama_server_backend::llama_server_override(state.llama_server_supervisor.clone());
+    let factory = crate::local_engine::local_engine_override(
+        state.llama_server_supervisor.clone(),
+        state.mlx_engine.clone(),
+        Some(crate::installed_models::models_dir(&state.data_dir)),
+    );
     let new_router = apollia_llm::LlmRouter::from_backend_configs_with_override(
         all_configs,
         default_name,
@@ -587,6 +628,22 @@ pub async fn reload_llm_router<B: ExecutionBackend + Clone>(
         )
     })?;
 
+    let endpoints = match repo.lock() {
+        Ok(guard) => crate::inference_servers::server_endpoints(
+            &guard,
+            || (state.secret_store)(),
+            &state.inference_governance,
+        ),
+        Err(_) => Vec::new(),
+    };
+    let new_router = new_router.with_servers(endpoints);
+    // `system.db` does not hold `[llm.routing]` nor the agents' last
+    // fallbacks: both come from the router this one replaces.
+    let previous = state.llm_router.read().await.clone();
+    let new_router = match previous.as_ref() {
+        Some(previous) => new_router.carry_over_from(previous),
+        None => new_router,
+    };
     let backends = new_router.list();
     let default = new_router.default_name().to_owned();
     let arc_router = Arc::new(new_router);
@@ -594,6 +651,11 @@ pub async fn reload_llm_router<B: ExecutionBackend + Clone>(
     {
         let mut cell = state.llm_router.write().await;
         *cell = Some(arc_router.clone());
+    }
+    // A running agent holds the router it started with; it reaches this one
+    // at its next call.
+    if let Some(previous) = previous {
+        previous.supersede(&arc_router);
     }
 
     if let Some(chat) = state.chat_manager.as_ref() {
@@ -609,6 +671,6 @@ pub async fn reload_llm_router<B: ExecutionBackend + Clone>(
     Ok(Json(ReloadRouterResponse {
         backends,
         default,
-        reaches_running_agents: false,
+        reaches_running_agents: true,
     }))
 }

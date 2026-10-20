@@ -62,17 +62,29 @@ const SEG = "[A-Za-z0-9_]+";
  */
 export const DECLARED_INTERPOLATIONS: { pattern: RegExp; builtBy: string }[] = [
   {
-    pattern: new RegExp(`^agents\\.update_restart_(stop|start)_failed_action$`),
-    builtBy: "components/agents/useAgentActions.svelte.ts",
+    pattern: new RegExp(
+      `^batch_view\\.((state|command|tab|column|item_status|step)\\.${SEG}|schedule\\.(paused|completed|interrupted|stopped)|fact\\.written_(copy|original)|export\\.(xlsx|csv|json)(_use)?|decision\\.answer_(once|always|refuse))$`,
+    ),
+    builtBy: "components/batch/view/*.svelte",
   },
   {
-    pattern: new RegExp(`^(approvals\\.risk|hitl\\.impact)\\.${SEG}$`),
+    pattern: new RegExp(`^batch_history\\.((outcome|period)\\.${SEG}|filter\\.outcome_${SEG})$`),
+    builtBy: "components/batch/view/BatchHistory*.svelte",
+  },
+  {
+    pattern: new RegExp(
+      `^packages\\.preview\\.(access\\.family\\.${SEG}\\.(title|hint)|connections\\.(missing|present|brought)|content\\.kind_${SEG}|publisher\\.(trusted|signed_untrusted|unsigned|invalid|shipped)|refusal\\.${SEG}\\.(title|body)|origin_${SEG}|title_(install|update)|(installed|updated)_toast)$`,
+    ),
+    builtBy: "components/packages/*.svelte",
+  },
+  {
+    pattern: new RegExp(`^library\\.(kind\\.${SEG}|uninstall\\.leaving\\.${SEG})$`),
+    builtBy: "components/library/*.svelte",
+  },
+  {
+    pattern: new RegExp(`^connections\\.oauth_client\\.(title|intro|origin)\\.${SEG}$`),
     builtBy:
-      "lib/components/operator/badges/RiskBadge.svelte, components/chat/HitlFilesystemModal.svelte",
-  },
-  {
-    pattern: new RegExp(`^approvals\\.scope\\.${SEG}$`),
-    builtBy: "components/chat/ApprovalScopeSelect.svelte",
+      "components/connections/detail/NativeClientSection.svelte, lib/connections/oauthClient.ts",
   },
   {
     pattern: new RegExp(`^automations\\.humanize\\.${SEG}$`),
@@ -81,6 +93,12 @@ export const DECLARED_INTERPOLATIONS: { pattern: RegExp; builtBy: string }[] = [
   {
     pattern: new RegExp(`^chat\\.agent_status\\.${SEG}$`),
     builtBy: "components/chat/AgentStatusCard.svelte",
+  },
+  {
+    pattern: new RegExp(
+      `^guide\\.context\\.${SEG}(\\.${SEG})?\\.(name|text|question|action\\.(label|result)|secondary\\.(first|second))$`,
+    ),
+    builtBy: "lib/apolliaGuide/screenContexts.ts",
   },
   {
     pattern: new RegExp(
@@ -105,8 +123,12 @@ export const DECLARED_INTERPOLATIONS: { pattern: RegExp; builtBy: string }[] = [
     builtBy: "lib/errors/humanize.ts",
   },
   {
-    pattern: new RegExp(`^inbox\\.group\\.${SEG}$`),
-    builtBy: "components/inbox/InboxPendingList.svelte",
+    pattern: new RegExp(`^review\\.answered\\.(once|always|refuse|answer)$`),
+    builtBy: "components/inbox/ReviewItem.svelte",
+  },
+  {
+    pattern: new RegExp(`^review\\.filter\\.(all|decisions|questions|batch_items)$`),
+    builtBy: "routes/Inbox.svelte",
   },
   {
     pattern: new RegExp(`^memory\\.namespaces\\.cat_${SEG}_header$`),
@@ -119,49 +141,44 @@ export const DECLARED_INTERPOLATIONS: { pattern: RegExp; builtBy: string }[] = [
     builtBy: "lib/notifications/event-labels.ts",
   },
   {
-    pattern: new RegExp(
-      `^observability\\.plan_mutation\\.(field|kind)\\.${SEG}$`,
-    ),
-    builtBy: "components/observability/PlanMutationRow.svelte",
-  },
-  {
-    pattern: new RegExp(`^projects\\.provider_type_${SEG}$`),
-    builtBy:
-      "components/project/ProviderEditDialog.svelte, components/project/ProviderCard.svelte",
+    pattern: new RegExp(`^project_migration\\.reason\\.${SEG}$`),
+    builtBy: "components/projectMigration/ProjectMigrationNotice.svelte",
   },
   {
     pattern: new RegExp(`^settings\\.about\\.local_${SEG}$`),
-    builtBy: "routes/settings/About.svelte",
+    builtBy: "components/settings/about/AboutBlock.svelte",
   },
   {
     pattern: new RegExp(
       `^settings\\.danger\\.${SEG}\\.(button|description|dialog_desc|dialog_title|title)$`,
     ),
-    builtBy: "routes/settings/Danger.svelte",
+    builtBy: "components/settings/DangerZone.svelte",
   },
   {
     pattern: new RegExp(`^settings\\.help\\.faq_(a|q)_${SEG}$`),
-    builtBy: "routes/settings/Help.svelte",
+    builtBy: "components/settings/help/HelpBlock.svelte",
+  },
+  {
+    pattern: new RegExp(`^policy\\.reason\\.${SEG}$`),
+    builtBy: "lib/policy/policyRules.ts",
+  },
+  {
+    pattern: new RegExp(`^policy\\.section\\.${SEG}\\.(title|description)$`),
+    builtBy: "components/policy/PolicyScreen.svelte",
   },
   {
     pattern: new RegExp(
       `^settings\\.integrations\\.placeholder\\.client_id_${SEG}$`,
     ),
-    builtBy: "routes/settings/Integrations.svelte",
+    builtBy: "components/connections/detail/NativeClientSection.svelte",
   },
   {
-    pattern: new RegExp(
-      `^settings\\.integrations\\.provider(_meta)?\\.${SEG}$`,
-    ),
-    builtBy: "routes/settings/Integrations.svelte",
+    pattern: new RegExp(`^settings\\.integrations\\.status\\.${SEG}$`),
+    builtBy: "components/connections/detail/NativeClientSection.svelte",
   },
   {
     pattern: new RegExp(`^settings\\.integrations\\.source\\.${SEG}$`),
     builtBy: "components/integrations/OauthCredentialHeader.svelte",
-  },
-  {
-    pattern: new RegExp(`^settings\\.llm_dialog\\.err_${SEG}$`),
-    builtBy: "components/settings/LlmBackendDialog.svelte",
   },
   {
     pattern: new RegExp(`^settings\\.nav\\.${SEG}$`),
@@ -170,15 +187,11 @@ export const DECLARED_INTERPOLATIONS: { pattern: RegExp; builtBy: string }[] = [
   },
   {
     pattern: new RegExp(`^settings\\.observability\\.${SEG}$`),
-    builtBy: "routes/settings/Observability.svelte",
+    builtBy: "components/observability/CapturePolicyPanel.svelte",
   },
   {
     pattern: new RegExp(`^settings\\.tools_page\\.${SEG}$`),
     builtBy: "components/settings/tools/toolCatalog.ts",
-  },
-  {
-    pattern: new RegExp(`^sidebar\\.mode\\.${SEG}\\.(description|label)$`),
-    builtBy: "lib/components/app/ModeChip.svelte",
   },
   {
     pattern: new RegExp(`^stt_failure\\.${SEG}$`),
@@ -198,14 +211,18 @@ export const DECLARED_INTERPOLATIONS: { pattern: RegExp; builtBy: string }[] = [
     builtBy: "lib/tools/tool-display.ts",
   },
   {
-    pattern: new RegExp(
-      `^tour\\.band\\.milestone\\.${SEG}\\.(cta|hint|label)$`,
-    ),
-    builtBy: "components/dashboard/GettingStartedBand.svelte",
-  },
-  {
     pattern: new RegExp(`^trace\\.describe\\.${SEG}$`),
     builtBy: "lib/utils/bashDescriber.ts",
+  },
+  {
+    pattern: new RegExp(
+      `^ai\\.panel\\.((load|inference)\\.(field\\.${SEG}\\.(label|help)|section\\.${SEG})|info\\.${SEG})$`,
+    ),
+    builtBy: "components/ai/modelDetail.ts, components/ai/Model{Load,Inference}Tab.svelte",
+  },
+  {
+    pattern: new RegExp(`^dev\\.ai\\.panel\\.type\\.${SEG}\\.(label|explanation)$`),
+    builtBy: "components/ai/modelDetail.ts",
   },
   {
     pattern: new RegExp(`^transcriptions\\.source_${SEG}$`),

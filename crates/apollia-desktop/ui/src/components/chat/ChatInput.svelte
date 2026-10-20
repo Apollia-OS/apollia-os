@@ -3,7 +3,8 @@
 
   Responsibilities:
   - Multi-line textarea with auto-resize (1 → 12 lines, scroll beyond).
-  - Keyboard: Enter = send, Shift+Enter = newline, Cmd/Ctrl+Enter = force send.
+  - Keyboard: the send key of Settings > Chat (`chatSendKey`); Enter sends and
+    Shift+Enter breaks the line by default, Cmd/Ctrl+Enter sends otherwise.
   - Slash-command autocomplete (`/export`, `/rename`).
   - Attachments: paperclip button, drag & drop, preview chips above input.
   - ↑ on empty input re-opens the last user message for editing.
@@ -15,12 +16,17 @@
   import { t } from "svelte-i18n";
   import {
     InputRewriter,
+    fetchConversationWorkContext,
     fetchWorkContext,
     type RewriteFallback,
   } from "$lib/chat/rewriteInput";
   import { addToast } from "$lib/components/ui/toast";
   import { chatInputAppend } from "$lib/stores/artifacts";
-  import type { PendingAttachment } from "$lib/chat/attachments";
+  import { chatSendKey, composerEnterAction } from "$lib/stores/chatSendKey";
+  import { pendingComposer } from "$lib/stores/chat";
+  import { chatFullWidth } from "$lib/stores/chatAppearance";
+  import type { ImageSupport, PendingAttachment } from "$lib/chat/attachments";
+  import type { ChatModelCapabilities } from "$lib/types";
   import { createComposerAttachments } from "./useComposerAttachments.svelte";
   import { createComposerDictation } from "./useComposerDictation.svelte";
   import { createComposerRateLimit } from "./useComposerRateLimit.svelte";
@@ -41,6 +47,7 @@
   import MentionResourceMenu from "./MentionResourceMenu.svelte";
   import PinnedResourceChip from "./PinnedResourceChip.svelte";
   import AttachmentChip from "./AttachmentChip.svelte";
+  import ChatBatchOffer from "../batch/ChatBatchOffer.svelte";
   import InputHints from "./InputHints.svelte";
   import ChatComposerToolbar from "./ChatComposerToolbar.svelte";
 
@@ -68,6 +75,21 @@
     onplantoggle?: () => void;
     /** Disables the Plan toggle (e.g. closed session). */
     planDisabled?: boolean;
+    /** What the model of the conversation does with images; `null` unknown. */
+    imageSupport?: ImageSupport | null;
+    /** What that model can do, for the chips; `null` while unknown. */
+    capabilities?: ChatModelCapabilities | null;
+    /** Opens what was recalled for the last turn, from the context gauge. */
+    oncontextinspect?: () => void;
+    /**
+     * Conversation the composer writes in. The prompt rewrite reads the
+     * profile that conversation designates; without it, the default profile.
+     */
+    sessionId?: string | null;
+    /** The agent of the conversation, which a batch on a joined file runs. */
+    agentName?: string | null;
+    /** Whether text sent to "the composer" lands here: the one of the active pane. */
+    active?: boolean;
   }
 
   let {
@@ -82,6 +104,12 @@
     planMode = false,
     onplantoggle,
     planDisabled = false,
+    imageSupport = null,
+    capabilities = null,
+    oncontextinspect,
+    sessionId = null,
+    agentName = null,
+    active = true,
   }: Props = $props();
 
   const DEFAULT_SUGGESTION_KEYS = [
@@ -103,7 +131,19 @@
 
   let value = $state("");
   const dictation = createComposerDictation();
-  const attachments = createComposerAttachments();
+  const attachments = createComposerAttachments(() => imageSupport);
+
+  // A request another screen wrote for this conversation, with its files:
+  // taken once, into the composer, never sent on its own.
+  $effect(() => {
+    const handed = $pendingComposer;
+    if (handed === null || sessionId === null || handed.sessionId !== sessionId) return;
+    pendingComposer.set(null);
+    untrack(() => {
+      if (value.trim() === "") value = handed.text;
+      if (handed.files.length > 0) void attachments.ingest(handed.files);
+    });
+  });
   const rateLimit = createComposerRateLimit();
   let focused = $state(false);
 
@@ -166,7 +206,7 @@
 
   onMount(() => {
     const unsubscribeAppend = chatInputAppend.subscribe((req) => {
-      if (req === null) return;
+      if (req === null || !active) return;
       const suffix = value.length === 0 || value.endsWith("\n") ? "" : " ";
       value = `${value}${suffix}${req.text}`;
       autoResize();
@@ -230,8 +270,10 @@
     // WHEN: rewrite triggered
     isRewriting = true;
     try {
-      // THEN: fetch Work context from profile
-      const workContext = await fetchWorkContext();
+      // THEN: fetch the work context from the profile of the conversation
+      const workContext = sessionId
+        ? await fetchConversationWorkContext(sessionId)
+        : await fetchWorkContext();
 
       // THEN: call rewriter
       const outcome = await rewriter.rewrite(value, workContext);
@@ -501,17 +543,13 @@
       }
     }
 
-    // Cmd/Ctrl+Enter = force send (even mid-line).
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    const enterAction = composerEnterAction(event, $chatSendKey);
+    if (enterAction === "send") {
       event.preventDefault();
       send();
       return;
     }
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      send();
-      return;
-    }
+    if (enterAction === "newline") return;
     // ↑ on empty input → edit last user message.
     if (
       event.key === "ArrowUp" &&
@@ -588,7 +626,7 @@
 
   <div
     bind:this={inputCardEl}
-    class="relative flex flex-col rounded-xl border bg-surface-1 transition-colors {focused ? 'border-primary/60' : 'border-border/60'}"
+    class="relative mx-auto flex w-full flex-col rounded-xl border bg-surface-1 transition-colors {$chatFullWidth ? 'max-w-none' : 'max-w-[760px]'} {focused ? 'border-primary/60' : 'border-border/60'}"
     class:ring-2={attachments.dragOver}
     class:ring-primary={attachments.dragOver}
     ondragover={attachments.handleDragOver}
@@ -629,6 +667,7 @@
             onremove={() => attachments.remove(att.id)}
           />
         {/each}
+        <ChatBatchOffer attachments={attachments.items} {agentName} />
       </div>
     {/if}
 
@@ -644,7 +683,7 @@
       placeholder={currentPlaceholder}
       aria-label={$t("chat.input_placeholder")}
       class="chat-input-textarea block w-full resize-none bg-transparent px-3.5 pb-1 pt-3 text-sm text-foreground
-        outline-none placeholder:text-muted-foreground/40
+        outline-none placeholder:text-muted-foreground/40 focus-visible:[box-shadow:none]
         disabled:cursor-not-allowed disabled:opacity-50"
       class:placeholder-fading={!placeholderVisible}
     ></textarea>
@@ -667,6 +706,9 @@
       ontrigger={toggleTrigger}
       {onstop}
       onsend={send}
+      {sessionId}
+      {capabilities}
+      {oncontextinspect}
     />
   </div>
 

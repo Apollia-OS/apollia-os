@@ -1,64 +1,11 @@
 use super::*;
-use apollia_core::AgentManifest;
-
-/// Stub AgentLoader that always succeeds.
-struct AlwaysOkLoader;
-impl AgentLoader for AlwaysOkLoader {
-    fn load_and_validate(&self, _path: &Path) -> Result<AgentManifest, String> {
-        Ok(AgentManifest {
-            format_version: 1,
-            name: "test-agent".into(),
-            version: "0.1.0".into(),
-            description: "test".into(),
-            tools_required: vec![],
-            tools_optional: vec![],
-            supports_streaming: false,
-            supports_a2a: false,
-            memory_namespace: None,
-            shared_memory_namespaces: vec![],
-            max_concurrent_tasks: 1,
-            step_budget: None,
-            network_allowlist: None,
-            dangerous_tools_allowed: false,
-            tags: vec![],
-            skills: vec![],
-            execution_mode: "auto".into(),
-            supports_mailbox: false,
-            mailbox_allowlist: None,
-            system_prompt: None,
-            tools_requiring_approval: vec![],
-            llm_backend: None,
-            packages: vec![],
-            memory_config: None,
-            agent_type: None,
-            examples: vec![],
-            limitations: vec![],
-            setup_notes: None,
-            agent_class: None,
-            user_memory_write: false,
-            datasources: vec![],
-            templates: vec![],
-            secrets: vec![],
-            check_commands: vec![],
-        })
-    }
-}
-
-/// Stub AgentLoader that always fails.
-struct AlwaysFailLoader;
-impl AgentLoader for AlwaysFailLoader {
-    fn load_and_validate(&self, _path: &Path) -> Result<AgentManifest, String> {
-        Err("agent not found".into())
-    }
-}
 
 /// Spawn a ChatSessionManager backed by a temp SQLite database.
 fn spawn_test_manager(
     dir: &tempfile::TempDir,
     llm_router: Option<Arc<LlmRouter>>,
-    agent_loader: Arc<dyn AgentLoader>,
 ) -> ChatSessionManagerHandle {
-    spawn_test_manager_with_plan_default(dir, llm_router, agent_loader, false)
+    spawn_test_manager_with_plan_default(dir, llm_router, false)
 }
 
 /// Spawn a ChatSessionManager with an explicit plan-mode default, so a test
@@ -66,7 +13,6 @@ fn spawn_test_manager(
 fn spawn_test_manager_with_plan_default(
     dir: &tempfile::TempDir,
     llm_router: Option<Arc<LlmRouter>>,
-    agent_loader: Arc<dyn AgentLoader>,
     plan_mode_default: bool,
 ) -> ChatSessionManagerHandle {
     let db_path = dir.path().join("chat.db");
@@ -77,15 +23,12 @@ fn spawn_test_manager_with_plan_default(
         &db_path,
         llm_router,
         tool_registry,
-        agent_loader,
         None, // no agent runner in basic tests
         event_tx,
         StepBudgetConfig::default(),
         None, // no user memory in basic tests
         registry_handle,
         None, // no A2A invoker in basic tests
-        None, // no project context in basic tests
-        None, // no project repo in basic tests
         None, // no mcp handle in basic tests
         None, // no chat tools config in basic tests
         LoadingMode::Eager,
@@ -107,7 +50,7 @@ fn libre_session_params() -> CreateSessionParams {
         agent_name: None,
         system_prompt: None,
         tools: vec![],
-        project_id: None,
+        model: None,
     }
 }
 
@@ -115,7 +58,7 @@ fn libre_session_params() -> CreateSessionParams {
 async fn test_create_session_libre() {
     // GIVEN a ChatSessionManager with LLM configured
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     // WHEN create_session mode=Libre
     let info = handle
@@ -124,7 +67,7 @@ async fn test_create_session_libre() {
             agent_name: None,
             system_prompt: None,
             tools: vec!["bash_executor".into()],
-            project_id: None,
+            model: None,
         })
         .await
         .expect("create_session");
@@ -141,7 +84,7 @@ async fn test_create_session_libre() {
 async fn test_create_session_agent_without_name() {
     // GIVEN a ChatSessionManager
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     // WHEN create_session mode=Agent, agent_name=None
     let result = handle
@@ -150,7 +93,7 @@ async fn test_create_session_agent_without_name() {
             agent_name: None,
             system_prompt: None,
             tools: vec![],
-            project_id: None,
+            model: None,
         })
         .await;
 
@@ -164,7 +107,7 @@ async fn test_create_session_agent_without_name() {
 async fn test_create_session_no_llm() {
     // GIVEN a ChatSessionManager without LLM
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, None, Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, None);
 
     // WHEN create_session mode=Libre
     let result = handle.create_session(libre_session_params()).await;
@@ -179,7 +122,7 @@ async fn test_create_session_no_llm() {
 async fn test_list_sessions() {
     // GIVEN 2 sessions created
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     handle
         .create_session(libre_session_params())
@@ -203,7 +146,7 @@ async fn test_list_sessions() {
 async fn test_get_session_detail() {
     // GIVEN session with 3 messages
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     let info = handle
         .create_session(libre_session_params())
@@ -232,7 +175,7 @@ async fn test_get_session_detail() {
 async fn test_get_session_todo_empty_and_unknown() {
     // GIVEN a freshly created session with no todo items
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
     let info = handle
         .create_session(libre_session_params())
         .await
@@ -268,14 +211,11 @@ async fn test_close_session() {
         &db_path,
         fake_llm_router(),
         tool_registry,
-        Arc::new(AlwaysOkLoader),
         None,
         event_tx,
         StepBudgetConfig::default(),
         None,
         registry_handle,
-        None,
-        None,
         None,
         None,
         None,
@@ -312,7 +252,7 @@ async fn test_close_session() {
 async fn test_send_message_to_closed_session() {
     // GIVEN session closed
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     let info = handle
         .create_session(libre_session_params())
@@ -333,7 +273,7 @@ async fn test_send_message_to_closed_session() {
 async fn test_send_message_returns_message_id() {
     // GIVEN active session
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     let info = handle
         .create_session(libre_session_params())
@@ -376,7 +316,6 @@ async fn test_resolve_tool_approval() {
         runtime_budget: StepBudgetConfig::default(),
         plan_mode_default: false,
         pending_chat_approvals: pending,
-        pending_fs_approvals: PendingFilesystemApprovals::new(),
         pending_user_inputs: apollia_tools::tools::ask_user::PendingUserInputs::new(),
         mcp_handle: None,
         chat_tools_config: None,
@@ -387,17 +326,22 @@ async fn test_resolve_tool_approval() {
         enrichment_extractor: None,
         tx,
         a2a_invoker: None,
-        project_context: None,
-        project_repo: None,
         mcp_loading: LoadingMode::Eager,
         tool_search_limit: 20,
         todo_handle: None,
         plan_handle: None,
         hook_executor: None,
+        package_tools: None,
+        composer: None,
+        governance: None,
         pause_tokens: HashMap::new(),
         pause_states: HashMap::new(),
         pending_injections: HashMap::new(),
+        answer_prefills: HashMap::new(),
         pending_plan_continuations: HashMap::new(),
+        config_feed: None,
+        plan_mode_default_tx: tokio::sync::watch::Sender::new(false),
+        hook_executor_tx: tokio::sync::watch::Sender::new(None),
     };
 
     // Insert a dummy session so the lookup succeeds
@@ -405,7 +349,6 @@ async fn test_resolve_tool_approval() {
         id: "sess-1".into(),
         mode: ChatMode::Libre,
         agent_name: None,
-        system_prompt: String::new(),
         status: SessionStatus::Processing,
         history: vec![],
         authorized_tools: std::collections::HashSet::new(),
@@ -416,13 +359,12 @@ async fn test_resolve_tool_approval() {
         title: None,
         parent_session_id: None,
         fork_depth: 0,
-        project_id: None,
-        force_project_context_inject: false,
-        fs_allow_rules: std::sync::Arc::new(
-            std::sync::Mutex::new(std::collections::HashSet::new()),
-        ),
         plan_mode: false,
         plan_phase: PlanPhase::Done,
+        profile_id: None,
+        use_profile: true,
+        settings: crate::chat::SessionSettings::default(),
+        notes: String::new(),
     };
     manager.sessions.insert("sess-1".into(), session);
 
@@ -439,7 +381,7 @@ async fn test_resolve_tool_approval() {
 }
 
 #[tokio::test]
-async fn test_always_accept_not_honored_for_code_executor() {
+async fn test_always_accept_grants_no_tool_by_name() {
     // GIVEN a manager with pending approvals for a code executor and a normal tool
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("chat.db");
@@ -462,7 +404,6 @@ async fn test_always_accept_not_honored_for_code_executor() {
         runtime_budget: StepBudgetConfig::default(),
         plan_mode_default: false,
         pending_chat_approvals: pending,
-        pending_fs_approvals: PendingFilesystemApprovals::new(),
         pending_user_inputs: apollia_tools::tools::ask_user::PendingUserInputs::new(),
         mcp_handle: None,
         chat_tools_config: None,
@@ -473,24 +414,28 @@ async fn test_always_accept_not_honored_for_code_executor() {
         enrichment_extractor: None,
         tx,
         a2a_invoker: None,
-        project_context: None,
-        project_repo: None,
         mcp_loading: LoadingMode::Eager,
         tool_search_limit: 20,
         todo_handle: None,
         plan_handle: None,
         hook_executor: None,
+        package_tools: None,
+        composer: None,
+        governance: None,
         pause_tokens: HashMap::new(),
         pause_states: HashMap::new(),
         pending_injections: HashMap::new(),
+        answer_prefills: HashMap::new(),
         pending_plan_continuations: HashMap::new(),
+        config_feed: None,
+        plan_mode_default_tx: tokio::sync::watch::Sender::new(false),
+        hook_executor_tx: tokio::sync::watch::Sender::new(None),
     };
 
     let session = ChatSession {
         id: "sess-1".into(),
         mode: ChatMode::Libre,
         agent_name: None,
-        system_prompt: String::new(),
         status: SessionStatus::Processing,
         history: vec![],
         authorized_tools: std::collections::HashSet::new(),
@@ -501,19 +446,16 @@ async fn test_always_accept_not_honored_for_code_executor() {
         title: None,
         parent_session_id: None,
         fork_depth: 0,
-        project_id: None,
-        force_project_context_inject: false,
-        fs_allow_rules: std::sync::Arc::new(
-            std::sync::Mutex::new(std::collections::HashSet::new()),
-        ),
         plan_mode: false,
         plan_phase: PlanPhase::Done,
+        profile_id: None,
+        use_profile: true,
+        settings: crate::chat::SessionSettings::default(),
+        notes: String::new(),
     };
     manager.sessions.insert("sess-1".into(), session);
 
-    let always = ToolDecision::AlwaysAccept {
-        scope: crate::chat::AlwaysAcceptScope::ThisSession,
-    };
+    let always = ToolDecision::AlwaysAccept;
 
     // WHEN "always accept" resolves for the code executor
     manager
@@ -534,17 +476,23 @@ async fn test_always_accept_not_honored_for_code_executor() {
     assert!(rx_bash.await.expect("bash decision").is_always_accept());
     assert!(rx_web.await.expect("web decision").is_always_accept());
 
-    // AND the code executor is NOT blanket-authorized, while the normal tool is
+    // AND neither tool is authorized by name, in the session or in chat.db:
+    // the run that asked turns "always" into a standing consent of its agent
+    // for the family of the tool
     let session = manager.sessions.get("sess-1").expect("session");
-    assert!(!session.authorized_tools.contains("bash_executor"));
-    assert!(session.authorized_tools.contains("web_read"));
+    assert!(session.authorized_tools.is_empty());
+    assert!(manager
+        .repository
+        .get_authorized_tools("sess-1")
+        .expect("read authorized tools")
+        .is_empty());
 }
 
 #[tokio::test]
 async fn test_shutdown() {
     // GIVEN a ChatSessionManager spawned
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     // WHEN shutdown
     handle.shutdown().await;
@@ -558,7 +506,7 @@ async fn test_shutdown() {
 async fn test_close_already_closed_session() {
     // GIVEN a closed session
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     let info = handle
         .create_session(libre_session_params())
@@ -605,7 +553,7 @@ async fn test_cross_session_context_substantive_message() {
         ),
     ] {
         repository
-            .create_session(id, &ChatMode::Libre, None, "", &[], ts, None, None)
+            .create_session(id, &ChatMode::Libre, None, "", &[], ts, None)
             .expect("create");
         repository.close_session(id, ts).expect("close");
         repository.update_summary(id, summary).expect("summary");
@@ -622,7 +570,6 @@ async fn test_cross_session_context_substantive_message() {
         runtime_budget: StepBudgetConfig::default(),
         plan_mode_default: false,
         pending_chat_approvals: PendingChatApprovals::new(),
-        pending_fs_approvals: PendingFilesystemApprovals::new(),
         pending_user_inputs: apollia_tools::tools::ask_user::PendingUserInputs::new(),
         mcp_handle: None,
         chat_tools_config: None,
@@ -633,17 +580,22 @@ async fn test_cross_session_context_substantive_message() {
         enrichment_extractor: None,
         tx,
         a2a_invoker: None,
-        project_context: None,
-        project_repo: None,
         mcp_loading: LoadingMode::Eager,
         tool_search_limit: 20,
         todo_handle: None,
         plan_handle: None,
         hook_executor: None,
+        package_tools: None,
+        composer: None,
+        governance: None,
         pause_tokens: HashMap::new(),
         pause_states: HashMap::new(),
         pending_injections: HashMap::new(),
+        answer_prefills: HashMap::new(),
         pending_plan_continuations: HashMap::new(),
+        config_feed: None,
+        plan_mode_default_tx: tokio::sync::watch::Sender::new(false),
+        hook_executor_tx: tokio::sync::watch::Sender::new(None),
     };
 
     // WHEN building cross-session context with a substantive first message
@@ -676,7 +628,6 @@ async fn test_cross_session_context_trivial_message() {
             &[],
             "2026-03-20T10:00:00Z",
             None,
-            None,
         )
         .expect("create");
     repository
@@ -697,7 +648,6 @@ async fn test_cross_session_context_trivial_message() {
         runtime_budget: StepBudgetConfig::default(),
         plan_mode_default: false,
         pending_chat_approvals: PendingChatApprovals::new(),
-        pending_fs_approvals: PendingFilesystemApprovals::new(),
         pending_user_inputs: apollia_tools::tools::ask_user::PendingUserInputs::new(),
         mcp_handle: None,
         chat_tools_config: None,
@@ -708,17 +658,22 @@ async fn test_cross_session_context_trivial_message() {
         enrichment_extractor: None,
         tx,
         a2a_invoker: None,
-        project_context: None,
-        project_repo: None,
         mcp_loading: LoadingMode::Eager,
         tool_search_limit: 20,
         todo_handle: None,
         plan_handle: None,
         hook_executor: None,
+        package_tools: None,
+        composer: None,
+        governance: None,
         pause_tokens: HashMap::new(),
         pause_states: HashMap::new(),
         pending_injections: HashMap::new(),
+        answer_prefills: HashMap::new(),
         pending_plan_continuations: HashMap::new(),
+        config_feed: None,
+        plan_mode_default_tx: tokio::sync::watch::Sender::new(false),
+        hook_executor_tx: tokio::sync::watch::Sender::new(None),
     };
 
     // WHEN building cross-session context with a trivial message
@@ -750,7 +705,6 @@ async fn test_cross_session_context_no_relevant_sessions() {
         runtime_budget: StepBudgetConfig::default(),
         plan_mode_default: false,
         pending_chat_approvals: PendingChatApprovals::new(),
-        pending_fs_approvals: PendingFilesystemApprovals::new(),
         pending_user_inputs: apollia_tools::tools::ask_user::PendingUserInputs::new(),
         mcp_handle: None,
         chat_tools_config: None,
@@ -761,17 +715,22 @@ async fn test_cross_session_context_no_relevant_sessions() {
         enrichment_extractor: None,
         tx,
         a2a_invoker: None,
-        project_context: None,
-        project_repo: None,
         mcp_loading: LoadingMode::Eager,
         tool_search_limit: 20,
         todo_handle: None,
         plan_handle: None,
         hook_executor: None,
+        package_tools: None,
+        composer: None,
+        governance: None,
         pause_tokens: HashMap::new(),
         pause_states: HashMap::new(),
         pending_injections: HashMap::new(),
+        answer_prefills: HashMap::new(),
         pending_plan_continuations: HashMap::new(),
+        config_feed: None,
+        plan_mode_default_tx: tokio::sync::watch::Sender::new(false),
+        hook_executor_tx: tokio::sync::watch::Sender::new(None),
     };
 
     // WHEN building cross-session context with a substantive message but no past sessions
@@ -785,7 +744,7 @@ async fn test_cross_session_context_no_relevant_sessions() {
 async fn test_set_plan_mode_toggles_and_persists() {
     // GIVEN a freshly created Libre session (plan mode off by default)
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
     let info = handle
         .create_session(libre_session_params())
         .await
@@ -820,12 +779,7 @@ async fn test_set_plan_mode_toggles_and_persists() {
 async fn test_new_session_inherits_plan_mode_default_off() {
     // GIVEN a manager with the plan-mode default off (the standard case)
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager_with_plan_default(
-        &dir,
-        fake_llm_router(),
-        Arc::new(AlwaysOkLoader),
-        false,
-    );
+    let handle = spawn_test_manager_with_plan_default(&dir, fake_llm_router(), false);
 
     // WHEN a new session is created
     let info = handle
@@ -845,12 +799,7 @@ async fn test_new_session_inherits_plan_mode_default_off() {
 async fn test_new_session_inherits_plan_mode_default_on() {
     // GIVEN a manager with the plan-mode default enabled
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager_with_plan_default(
-        &dir,
-        fake_llm_router(),
-        Arc::new(AlwaysOkLoader),
-        true,
-    );
+    let handle = spawn_test_manager_with_plan_default(&dir, fake_llm_router(), true);
 
     // WHEN a new session is created
     let info = handle
@@ -879,7 +828,7 @@ async fn test_new_session_inherits_plan_mode_default_on() {
 async fn test_set_plan_mode_survives_reload() {
     // GIVEN a session with plan mode enabled, persisted to SQLite
     let dir = tempfile::tempdir().expect("tempdir");
-    let first = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let first = spawn_test_manager(&dir, fake_llm_router());
     let info = first
         .create_session(libre_session_params())
         .await
@@ -891,7 +840,7 @@ async fn test_set_plan_mode_survives_reload() {
     first.shutdown().await;
 
     // WHEN a brand-new manager reopens the same database and resumes it
-    let second = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let second = spawn_test_manager(&dir, fake_llm_router());
     let detail = second
         .resume_session(info.id.clone())
         .await
@@ -927,7 +876,6 @@ pub(super) fn manager_with_session_in_phase(
             &["bash".to_string()],
             "2026-03-20T10:00:00Z",
             None,
-            None,
         )
         .expect("create row");
     repository
@@ -946,7 +894,6 @@ pub(super) fn manager_with_session_in_phase(
         runtime_budget: StepBudgetConfig::default(),
         plan_mode_default: false,
         pending_chat_approvals: PendingChatApprovals::new(),
-        pending_fs_approvals: PendingFilesystemApprovals::new(),
         pending_user_inputs: apollia_tools::tools::ask_user::PendingUserInputs::new(),
         mcp_handle: None,
         chat_tools_config: None,
@@ -957,23 +904,27 @@ pub(super) fn manager_with_session_in_phase(
         enrichment_extractor: None,
         tx,
         a2a_invoker: None,
-        project_context: None,
-        project_repo: None,
         mcp_loading: LoadingMode::Eager,
         tool_search_limit: 20,
         todo_handle: None,
         plan_handle: None,
         hook_executor: None,
+        package_tools: None,
+        composer: None,
+        governance: None,
         pause_tokens: HashMap::new(),
         pause_states: HashMap::new(),
         pending_injections: HashMap::new(),
+        answer_prefills: HashMap::new(),
         pending_plan_continuations: HashMap::new(),
+        config_feed: None,
+        plan_mode_default_tx: tokio::sync::watch::Sender::new(false),
+        hook_executor_tx: tokio::sync::watch::Sender::new(None),
     };
     let session = ChatSession {
         id: "sess-1".into(),
         mode: ChatMode::Libre,
         agent_name: None,
-        system_prompt: String::new(),
         status: SessionStatus::Active,
         history: vec![],
         authorized_tools: std::collections::HashSet::new(),
@@ -984,13 +935,12 @@ pub(super) fn manager_with_session_in_phase(
         title: None,
         parent_session_id: None,
         fork_depth: 0,
-        project_id: None,
-        force_project_context_inject: false,
-        fs_allow_rules: std::sync::Arc::new(
-            std::sync::Mutex::new(std::collections::HashSet::new()),
-        ),
         plan_mode: true,
         plan_phase: phase,
+        profile_id: None,
+        use_profile: true,
+        settings: crate::chat::SessionSettings::default(),
+        notes: String::new(),
     };
     manager.sessions.insert("sess-1".into(), session);
     (manager, event_rx)
@@ -1187,6 +1137,8 @@ async fn test_message_during_awaiting_starts_revision_turn() {
         .handle_send_message(
             "sess-1",
             "Please plan the work: audit the repo, fix the tests, then open a PR",
+            Vec::new(),
+            None,
         )
         .expect("send ok");
 
@@ -1272,6 +1224,7 @@ async fn exchange_complete_records_paused_state() {
         paused: true,
         context_window_tokens: None,
         context_tokens_used: 0,
+        llm_calls: Vec::new(),
     };
 
     // WHEN the exchange completes as paused
@@ -1279,6 +1232,75 @@ async fn exchange_complete_records_paused_state() {
 
     // THEN the session is recorded Paused, ready to resume
     assert_eq!(manager.pause_state("sess-1"), Some(PauseState::Paused));
+}
+
+#[tokio::test]
+async fn exchange_complete_writes_the_generation_total_under_the_turn_answer() {
+    // GIVEN a session whose exchange started with an answer identifier, and a
+    // response that made three model calls
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mut manager, _rx) = manager_with_session_in_phase(&dir, PlanPhase::Executing);
+    let started = (chrono::Utc::now() - chrono::Duration::seconds(3)).to_rfc3339();
+    manager.sessions.get_mut("sess-1").unwrap().active_exchange = Some(ExchangeState {
+        message_id: "msg-1".into(),
+        started_at: started,
+        run_id: RunId::new(),
+        answer_id: Some("answer-1".into()),
+    });
+    let call =
+        |tokens: u32, ttft: Option<u64>, end: apollia_llm::CallEnd| apollia_llm::CallMeasure {
+            usage: apollia_llm::types::TokenUsage {
+                completion_tokens: tokens,
+                ..Default::default()
+            },
+            latency_ms: 1_000,
+            ttft_ms: ttft,
+            generation_ms: Some(500),
+            end,
+        };
+    let response = ChatAgentResponse {
+        content: "Voici.".into(),
+        tool_calls: vec![],
+        newly_authorized: vec![],
+        tokens_used: apollia_llm::types::TokenUsage::default(),
+        thinking_trace: None,
+        reasoning_boundaries: vec![],
+        verification_report: None,
+        frontier_ceiling_reached: false,
+        final_plan_phase: None,
+        paused: false,
+        context_window_tokens: None,
+        context_tokens_used: 0,
+        llm_calls: vec![
+            call(10, Some(250), apollia_llm::CallEnd::ToolCalls),
+            call(20, Some(90), apollia_llm::CallEnd::ToolCalls),
+            call(30, Some(80), apollia_llm::CallEnd::Length),
+        ],
+    };
+
+    // WHEN the exchange completes
+    manager.handle_exchange_complete("sess-1", "msg-1", response);
+
+    // THEN the answer is stored under the turn's identifier, with the total of
+    // its three calls under `generation`
+    let answer = manager
+        .sessions
+        .get("sess-1")
+        .unwrap()
+        .history
+        .last()
+        .cloned()
+        .expect("an answer");
+    assert_eq!(answer.id, "answer-1");
+    let generation = &answer.metadata.expect("metadata")["generation"];
+    assert_eq!(generation["calls"], 3);
+    assert_eq!(generation["output_tokens"], 60);
+    assert_eq!(generation["tokens_per_second"], 40.0);
+    assert_eq!(generation["ttft_ms"], 250);
+    assert_eq!(generation["stop_reason"], "length");
+    assert!(generation["duration_ms"]
+        .as_u64()
+        .is_some_and(|ms| ms >= 3_000));
 }
 
 #[tokio::test]
@@ -1425,7 +1447,7 @@ async fn test_reject_unknown_session_returns_not_found() {
 async fn test_set_plan_mode_missing_session_returns_typed_error() {
     // GIVEN a manager with no matching session
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysOkLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     // WHEN toggling plan mode on an unknown session id
     let result = handle.set_plan_mode("ghost".into(), true).await;
@@ -1440,7 +1462,7 @@ async fn test_set_plan_mode_missing_session_returns_typed_error() {
 async fn test_create_session_agent_invalid_agent() {
     // GIVEN a manager with a loader that always fails
     let dir = tempfile::tempdir().expect("tempdir");
-    let handle = spawn_test_manager(&dir, fake_llm_router(), Arc::new(AlwaysFailLoader));
+    let handle = spawn_test_manager(&dir, fake_llm_router());
 
     // WHEN create_session mode=Agent with an agent name
     let result = handle
@@ -1449,7 +1471,7 @@ async fn test_create_session_agent_invalid_agent() {
             agent_name: Some("nonexistent".into()),
             system_prompt: None,
             tools: vec![],
-            project_id: None,
+            model: None,
         })
         .await;
 
@@ -1473,6 +1495,7 @@ fn make_response(paused: bool) -> ChatAgentResponse {
         paused,
         context_window_tokens: None,
         context_tokens_used: 0,
+        llm_calls: Vec::new(),
     }
 }
 
@@ -1557,7 +1580,7 @@ async fn test_companion_send_without_llm_resets_status_to_active() {
     }
 
     // WHEN a message is sent and the dispatch fails
-    let result = manager.handle_send_message("sess-1", "hello");
+    let result = manager.handle_send_message("sess-1", "hello", Vec::new(), None);
 
     // THEN the error surfaces AND the session is reset to Active (not stuck
     // Processing), with the active exchange cleared
@@ -1579,11 +1602,70 @@ async fn test_validate_create_request_companion_requires_llm() {
         false,
         ChatMode::Companion,
         None,
+        None,
     )
     .await;
 
     // THEN it fails fast with NoLlmConfigured, like Libre mode
     assert!(matches!(result, Err(ChatError::NoLlmConfigured)));
+}
+
+#[tokio::test]
+async fn test_validate_create_request_accepts_a_declarative_agent_outside_the_registry() {
+    // GIVEN an Agent-mode request on a declarative agent the registry does
+    // not hold, enabled, then disabled
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (manager, _rx) = manager_with_session_in_phase(&dir, PlanPhase::Done);
+    let mut agent = apollia_tools::ResolvedAgent {
+        id: "guide".into(),
+        origin: apollia_tools::AgentOrigin::Package,
+        package: Some("guide".into()),
+        version: "1.0.0".into(),
+        enabled: true,
+        name: "Guide".into(),
+        mission: "Explain the product.".into(),
+        examples: Vec::new(),
+        access: Vec::new(),
+        sources: Vec::new(),
+        model: None,
+        autonomy: apollia_core::AutonomyLevel::Assisted,
+        planning: apollia_tools::PlanningMode::Auto,
+        profile: None,
+        overridden: Vec::new(),
+        definition: serde_json::json!({}),
+    };
+
+    // WHEN it is validated with and without an LLM, then disabled
+    let accepted = ChatSessionManager::validate_create_request(
+        &manager.registry_handle,
+        true,
+        ChatMode::Agent,
+        Some("guide"),
+        Some(&agent),
+    )
+    .await;
+    let without_llm = ChatSessionManager::validate_create_request(
+        &manager.registry_handle,
+        false,
+        ChatMode::Agent,
+        Some("guide"),
+        Some(&agent),
+    )
+    .await;
+    agent.enabled = false;
+    let disabled = ChatSessionManager::validate_create_request(
+        &manager.registry_handle,
+        true,
+        ChatMode::Agent,
+        Some("guide"),
+        Some(&agent),
+    )
+    .await;
+
+    // THEN it is accepted with an LLM, needs one, and is refused once disabled
+    assert!(accepted.is_ok(), "{accepted:?}");
+    assert!(matches!(without_llm, Err(ChatError::NoLlmConfigured)));
+    assert!(matches!(disabled, Err(ChatError::AgentLoadFailed(_))));
 }
 
 #[tokio::test]
@@ -1613,52 +1695,4 @@ async fn test_approve_plan_emits_executing_phase_changed() {
 
     // THEN a phase-changed event announces the Executing phase
     assert_eq!(next_phase_event(&mut rx).as_deref(), Some("executing"));
-}
-
-#[test]
-fn test_agent_scoped_prefix_rule_does_not_seed_the_name_set() {
-    use apollia_permissions::{PermissionScope, PrefixRule, PrefixRuleEngine, RuleAction};
-
-    // GIVEN one agent-scoped allow rule carrying an arg_prefix and one
-    // name-only, both for the chat agent
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("governance.db");
-    let mut engine = PrefixRuleEngine::new(&db).expect("open engine");
-    engine
-        .add_rule(&PrefixRule {
-            tool_name: "file_read".to_string(),
-            arg_prefix: Some("/tmp/safe".to_string()),
-            action: RuleAction::Allow,
-            scope: PermissionScope::Agent,
-            agent_id: Some(APOLLIA_CHAT_AGENT_ID.to_string()),
-            ..PrefixRule::default()
-        })
-        .expect("seed prefixed rule");
-    engine
-        .add_rule(&PrefixRule {
-            tool_name: "web_search".to_string(),
-            arg_prefix: None,
-            action: RuleAction::Allow,
-            scope: PermissionScope::Agent,
-            agent_id: Some(APOLLIA_CHAT_AGENT_ID.to_string()),
-            ..PrefixRule::default()
-        })
-        .expect("seed name-only rule");
-
-    // WHEN the chat overrides are seeded from the store
-    let mut out = ChatLibreOverrides::default();
-    super::libre::apply_chat_prefix_allow_rules(&mut out, &db);
-
-    // THEN the prefixed rule does not authorize the whole tool name (it is
-    // evaluated per invocation instead), while the name-only rule does
-    assert!(
-        !out.pre_authorized_tools.contains("file_read"),
-        "a prefixed rule must not widen into a tool-wide authorization: {:?}",
-        out.pre_authorized_tools
-    );
-    assert!(
-        out.pre_authorized_tools.contains("web_search"),
-        "{:?}",
-        out.pre_authorized_tools
-    );
 }

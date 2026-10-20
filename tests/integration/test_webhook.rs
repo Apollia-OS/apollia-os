@@ -22,13 +22,12 @@ use sha2::Sha256;
 
 use apollia_core::{AIPInput, ObservabilityConfig, TaskId};
 use apollia_runtime::{
-    api::routes_agents::StubAgentLoader, api::APIServer, api::APIServerConfig,
-    api::APIServerHandle, api::AppState, coordinator::DynBackend, coordinator::ExecutionBackend,
-    eventbus::EventBus, registry::AgentRegistry, router::TaskRouterHandle,
+    api::APIServer, api::APIServerConfig, api::APIServerHandle, api::AppState,
+    coordinator::DynBackend, coordinator::ExecutionBackend, eventbus::EventBus,
+    registry::AgentRegistry, router::TaskRouterHandle,
 };
 use apollia_triggers::{
-    InputTemplate, OnBusyPolicy, TaskSubmitter, TriggerDefinition, TriggerEngineHandle,
-    TriggerSourceConfig,
+    OnBusyPolicy, TaskSubmitter, TriggerDefinition, TriggerEngineHandle, TriggerSourceConfig,
 };
 
 // ─── MockTaskSubmitter ────────────────────────────────────────────────────
@@ -115,13 +114,12 @@ fn compute_hmac(secret: &str, body: &[u8]) -> String {
 fn webhook_def(id: &str, secret: &str) -> TriggerDefinition {
     TriggerDefinition {
         id: id.into(),
-        agent: "crm-agent".into(),
+        target: apollia_triggers::TriggerTarget::agent("crm-agent", "{{body}}"),
         enabled: true,
         on_busy: OnBusyPolicy::Queue { max_depth: 16 },
         source: TriggerSourceConfig::Webhook {
             secret: secret.into(),
         },
-        input_template: InputTemplate("{{body}}".into()),
     }
 }
 
@@ -150,9 +148,11 @@ async fn build_webhook_state(
         router_handle,
         registry_handle,
         event_sender,
-        agent_loader: Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         backend: MockBackend,
         llm_router: apollia_runtime::api::server::empty_shared_llm_router(),
         trigger_engine: Some(engine_handle),
@@ -160,10 +160,9 @@ async fn build_webhook_state(
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -183,6 +182,12 @@ async fn build_webhook_state(
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     };
     (state, submit_count)
 }
@@ -200,6 +205,7 @@ async fn start_test_server(state: AppState<MockBackend>) -> (APIServerHandle, u1
     let config = APIServerConfig {
         socket_path: socket_path.clone(),
         tcp_port: Some(port),
+        tcp_listener: None,
         bind_addr: "127.0.0.1".to_string(),
         api_token: None,
         tls_cert_path: None,

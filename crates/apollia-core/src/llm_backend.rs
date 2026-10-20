@@ -49,12 +49,9 @@ pub struct LlmBackendConfig {
 pub enum LlmProvider {
     /// Embedded llama.cpp backend (local GGUF).
     LlamaCpp,
-    /// OpenAI API or OpenAI-compatible API (LM Studio, vLLM).
+    /// OpenAI-compatible server, reached at the address the organization
+    /// designates (vLLM, LM Studio, a LiteLLM gateway...). Stored as `openai`.
     OpenAi,
-    /// Mistral AI API.
-    Mistral,
-    /// Anthropic API.
-    Anthropic,
     /// Local Ollama.
     Ollama,
 }
@@ -64,8 +61,6 @@ impl std::fmt::Display for LlmProvider {
         let s = match self {
             LlmProvider::LlamaCpp => "llama-cpp",
             LlmProvider::OpenAi => "openai",
-            LlmProvider::Mistral => "mistral",
-            LlmProvider::Anthropic => "anthropic",
             LlmProvider::Ollama => "ollama",
         };
         f.write_str(s)
@@ -79,8 +74,6 @@ impl TryFrom<&str> for LlmProvider {
         match s {
             "llama-cpp" => Ok(LlmProvider::LlamaCpp),
             "openai" => Ok(LlmProvider::OpenAi),
-            "mistral" => Ok(LlmProvider::Mistral),
-            "anthropic" => Ok(LlmProvider::Anthropic),
             "ollama" => Ok(LlmProvider::Ollama),
             other => Err(LlmBackendError::Serialization(format!(
                 "unknown provider: {other}"
@@ -113,6 +106,29 @@ pub enum LlmBackendError {
     #[error("invalid backend name '{0}': only [a-z0-9_-] allowed")]
     InvalidName(String),
 
+    /// Invalid inference server address (must be an `http://` or `https://` URL
+    /// with a host).
+    #[error("invalid server address '{0}': expected an http:// or https:// URL")]
+    InvalidAddress(String),
+
+    /// A setting of an inference server that cannot be stored: a timeout out
+    /// of bounds, or extra parameters that carry a reserved field.
+    #[error("invalid server setting: {0}")]
+    InvalidServerSetting(String),
+
+    /// No model preset with this identifier.
+    #[error("preset {0} not found")]
+    PresetNotFound(i64),
+
+    /// A preset, an agent assignment or a default designation that cannot be
+    /// stored as given.
+    #[error("invalid model setting: {0}")]
+    InvalidPreset(String),
+
+    /// The model already has a preset of this name.
+    #[error("the model already has a preset named '{0}'")]
+    PresetConflict(String),
+
     /// Underlying SQLite error.
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
@@ -128,13 +144,17 @@ pub enum LlmBackendError {
     /// I/O error while syncing to `apollia.toml`.
     #[error("io error syncing to toml: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The configuration writer refused the mirrored `apollia.toml`.
+    #[error("apollia.toml not written: {0}")]
+    ConfigWrite(#[from] crate::config::writer::ConfigWriteError),
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Validation
 // ────────────────────────────────────────────────────────────────────────────
 
-fn validate_name(name: &str) -> Result<(), LlmBackendError> {
+pub(crate) fn validate_name(name: &str) -> Result<(), LlmBackendError> {
     // No `OnceLock` needed: validation runs rarely (write operations only),
     // so recompiling the pattern each call is acceptable.
     // SAFETY: the pattern is a literal fixed in this line, so it compiles or
@@ -160,7 +180,7 @@ fn validate_name(name: &str) -> Result<(), LlmBackendError> {
 /// `RefCell`). It must be created and used on the same thread, or passed to
 /// `spawn_blocking`.
 pub struct LlmBackendRepository {
-    conn: RefCell<Connection>,
+    pub(crate) conn: RefCell<Connection>,
 }
 
 impl LlmBackendRepository {
@@ -533,7 +553,15 @@ fn strip_llm_backends_blocks(content: &str) -> String {
 /// `RunnerLlmBackend`; emitting them here as `type = "embedded"` produced a config
 /// the runtime rejects at startup (`unknown variant "embedded"`), breaking boot.
 fn backend_to_toml_block(cfg: &LlmBackendConfig) -> Option<String> {
-    if cfg.provider == LlmProvider::LlamaCpp {
+    // A row that names a declared server takes its key from that server, which
+    // `[[llm.backends]]` cannot express: like an embedded one, it stays in
+    // system.db.
+    if cfg.provider == LlmProvider::LlamaCpp
+        || cfg
+            .config_json
+            .get(crate::model_preset::SERVER_REF_FIELD)
+            .is_some()
+    {
         return None;
     }
 
@@ -611,32 +639,43 @@ fn insert_empty_backends_key(content: &str) -> String {
 impl LlmBackendRepository {
     /// Syncs every DB backend into the `[[llm.backends]]` section of `apollia.toml`.
     ///
-    /// - Reads `toml_path` (creates the file if absent).
+    /// - Reads `toml_path` (an absent file reads as empty).
     /// - Removes the old `[[llm.backends]]` blocks.
     /// - Appends an auto-generated block for each backend present in the DB.
-    /// - Rewrites the file atomically.
+    /// - Hands the text to the configuration writer
+    ///   ([`crate::config::writer`]), which validates it, holds it to `policy`,
+    ///   refuses a file modified since it was read, and replaces it atomically.
+    ///
+    /// With nothing to mirror and no `[llm]` table in the file, the file is
+    /// left as it is: an `[llm]` table holding only `backends = []` would lack
+    /// its required `default` and stop the daemon at its next start.
     ///
     /// A sentinel comment marks the section as automatically managed.
     ///
     /// # Errors
     /// - [`LlmBackendError::Db`] if the DB read fails.
-    /// - [`LlmBackendError::Io`] if the file cannot be read or written.
-    pub fn sync_to_toml(&self, toml_path: &Path) -> Result<(), LlmBackendError> {
+    /// - [`LlmBackendError::ConfigWrite`] if the writer refuses the text or
+    ///   cannot read or write the file.
+    pub fn sync_to_toml(
+        &self,
+        toml_path: &Path,
+        policy: &crate::config::PolicySettings,
+    ) -> Result<(), LlmBackendError> {
+        use crate::config::writer::{read_snapshot, write_config, ConfigEdit};
+
         let backends = self.list()?;
+        let existing = read_snapshot(toml_path)?;
 
-        let existing = if toml_path.exists() {
-            std::fs::read_to_string(toml_path)?
-        } else {
-            String::new()
-        };
-
-        let base = strip_llm_backends_blocks(&existing);
+        let base = strip_llm_backends_blocks(&existing.text);
 
         // Only API backends are representable as `[[llm.backends]]`; embedded ones
         // yield `None` and stay in system.db (injected via RunnerLlmBackend).
         let blocks: Vec<String> = backends.iter().filter_map(backend_to_toml_block).collect();
 
         let output = if blocks.is_empty() {
+            if !has_llm_header(&base) {
+                return Ok(());
+            }
             // Nothing to mirror: keep the required `backends` field as an empty
             // inline array (the strip step removed any previous inline key).
             insert_empty_backends_key(&base)
@@ -653,7 +692,12 @@ impl LlmBackendRepository {
             out
         };
 
-        std::fs::write(toml_path, output)?;
+        write_config(
+            toml_path,
+            ConfigEdit::Text(output),
+            &existing.sha256,
+            policy,
+        )?;
 
         tracing::debug!(
             path = %toml_path.display(),
@@ -662,6 +706,11 @@ impl LlmBackendRepository {
         );
         Ok(())
     }
+}
+
+/// Whether `content` declares the `[llm]` table.
+fn has_llm_header(content: &str) -> bool {
+    content.lines().any(|line| line.trim() == "[llm]")
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -993,7 +1042,9 @@ mod tests {
         repo.save(&make_config("remote", true)).unwrap();
 
         let toml_path = dir.path().join("apollia.toml");
-        repo.sync_to_toml(&toml_path).unwrap();
+        std::fs::write(&toml_path, "[llm]\ndefault = \"remote\"\n").unwrap();
+        repo.sync_to_toml(&toml_path, &crate::config::PolicySettings::none())
+            .unwrap();
 
         let content = std::fs::read_to_string(&toml_path).unwrap();
         assert!(content.contains("[[llm.backends]]"));
@@ -1020,7 +1071,8 @@ mod tests {
             is_default: true,
         };
         repo.save(&cfg).unwrap();
-        repo.sync_to_toml(&toml_path).unwrap();
+        repo.sync_to_toml(&toml_path, &crate::config::PolicySettings::none())
+            .unwrap();
 
         let content = std::fs::read_to_string(&toml_path).unwrap();
         toml::from_str::<toml::Value>(&content).expect("valid TOML");
@@ -1045,12 +1097,13 @@ mod tests {
 
         std::fs::write(
             &toml_path,
-            "[runtime]\ndata_dir = \"~/.apollia\"\n\n[[llm.backends]]\nname = \"old\"\ntype = \"embedded\"\nmodel_path = \"old.gguf\"\nquantization = \"q8_0\"\n",
+            "[runtime]\neventbus_capacity = 1024\n\n[llm]\ndefault = \"new\"\n\n[[llm.backends]]\nname = \"old\"\ntype = \"api\"\nmodel = \"m\"\napi_url = \"http://127.0.0.1:1/v1\"\napi_key_env = \"\"\n",
         )
         .unwrap();
 
         repo.save(&make_config("new", true)).unwrap();
-        repo.sync_to_toml(&toml_path).unwrap();
+        repo.sync_to_toml(&toml_path, &crate::config::PolicySettings::none())
+            .unwrap();
 
         let content = std::fs::read_to_string(&toml_path).unwrap();
         assert!(content.contains("[runtime]"), "runtime section preserved");
@@ -1073,7 +1126,8 @@ mod tests {
         .unwrap();
 
         repo.save(&make_config("local", true)).unwrap();
-        repo.sync_to_toml(&toml_path).unwrap();
+        repo.sync_to_toml(&toml_path, &crate::config::PolicySettings::none())
+            .unwrap();
 
         let content = std::fs::read_to_string(&toml_path).unwrap();
         // Must parse: the inline `backends` and `[[llm.backends]]` share a path,
@@ -1091,6 +1145,56 @@ mod tests {
         assert!(content.contains("[api]"), "unrelated sections preserved");
     }
 
+    // GIVEN an API backend and a file whose `[llm]` names no default
+    // WHEN  sync_to_toml()
+    // THEN  the writer refuses the text, which the daemon would refuse at its
+    //       start, and the file is left byte for byte
+    #[test]
+    fn test_sync_to_toml_refuses_a_text_the_daemon_would_refuse() {
+        let (repo, dir) = make_repo();
+        let toml_path = dir.path().join("apollia.toml");
+        std::fs::write(&toml_path, "# mine\n[api]\nport = 7771\n").unwrap();
+        repo.save(&make_config("remote", true)).unwrap();
+
+        let refused = repo.sync_to_toml(&toml_path, &crate::config::PolicySettings::none());
+
+        assert!(
+            matches!(refused, Err(LlmBackendError::ConfigWrite(_))),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&toml_path).unwrap(),
+            "# mine\n[api]\nport = 7771\n"
+        );
+    }
+
+    // GIVEN only an embedded backend and a file without `[llm]`
+    // WHEN  sync_to_toml()
+    // THEN  nothing is mirrored and the file is left as it is
+    #[test]
+    fn test_sync_to_toml_leaves_a_file_without_llm_when_nothing_is_mirrored() {
+        let (repo, dir) = make_repo();
+        let toml_path = dir.path().join("apollia.toml");
+        std::fs::write(&toml_path, "[api]\nport = 7771\n").unwrap();
+        let cfg = LlmBackendConfig {
+            name: "local".to_string(),
+            provider: LlmProvider::LlamaCpp,
+            model: "model.gguf".to_string(),
+            config_json: serde_json::json!({}),
+            enabled: true,
+            is_default: true,
+        };
+        repo.save(&cfg).unwrap();
+
+        repo.sync_to_toml(&toml_path, &crate::config::PolicySettings::none())
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&toml_path).unwrap(),
+            "[api]\nport = 7771\n"
+        );
+    }
+
     // GIVEN sync_to_toml() run twice on the same file
     // WHEN  the second sync strips what the first wrote
     // THEN  the file stays valid and the sentinel comment appears exactly once
@@ -1101,8 +1205,10 @@ mod tests {
         std::fs::write(&toml_path, "[llm]\ndefault = \"local\"\nbackends = []\n").unwrap();
 
         repo.save(&make_config("local", true)).unwrap();
-        repo.sync_to_toml(&toml_path).unwrap();
-        repo.sync_to_toml(&toml_path).unwrap();
+        repo.sync_to_toml(&toml_path, &crate::config::PolicySettings::none())
+            .unwrap();
+        repo.sync_to_toml(&toml_path, &crate::config::PolicySettings::none())
+            .unwrap();
 
         let content = std::fs::read_to_string(&toml_path).unwrap();
         toml::from_str::<toml::Value>(&content).expect("valid TOML after re-sync");

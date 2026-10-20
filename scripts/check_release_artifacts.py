@@ -37,6 +37,11 @@ Rules:
   channel-endpoint  a desktop entry on a channel other than the default is
                     built by a job that points the updater there, so an
                     installed variant asks its own manifest for updates
+  manifest-alias    every manifest the contract declares either has a bundle
+                    built for it or is declared in `manifest_aliases` as the
+                    copy of one that has, and the manifest step reads those
+                    aliases; a manifest with neither is published empty, and
+                    every installed copy that asks it stops updating
   manifest-published every channel the contract declares is matched by an upload
                     pattern of the release job, so a composed manifest reaches
                     the release rather than staying in the runner
@@ -54,6 +59,11 @@ Rules:
   flat-uploads      every upload-artifact path of the cli and desktop jobs
                     sits in one flat directory, because the release job reads
                     the merged artifacts with flat globs
+  preview-channel   the contract's preview channel maps every stable manifest
+                    to `<stem>-preview.json`, the manifest step reads it, the
+                    preview-channel workflow copies every preview manifest to
+                    the contract's fixed release, and the desktop updater
+                    derives its preview endpoint from that release and suffix
   docs-block        the generated installer-name block of the install pages
                     matches the contract (regenerate with
                     `python3 scripts/check_release_artifacts.py --write-docs-block`,
@@ -98,13 +108,26 @@ SECURITY = Path("SECURITY.md")
 RELEASE_KEY = Path("apollia-release-key.asc")
 UPDATE_RS = Path("crates/apollia-cli/src/commands/update.rs")
 TAURI_CONF = Path("crates/apollia-desktop/tauri.conf.json")
+PREVIEW_WORKFLOW = Path(".github/workflows/preview-channel.yml")
+DESKTOP_UPDATES_RS = Path("crates/apollia-desktop/src/commands/updates.rs")
 DOCS_EN = Path("docs/site/docs/how-to/install-the-desktop-app.md")
 DOCS_FR = Path(
     "docs/site/i18n/fr/docusaurus-plugin-content-docs/current/how-to/"
     "install-the-desktop-app.md"
 )
 
-FILES = (CONTRACT, WORKFLOW, UPDATE_RS, TAURI_CONF, DOCS_EN, DOCS_FR, SECURITY, RELEASE_KEY)
+FILES = (
+    CONTRACT,
+    WORKFLOW,
+    UPDATE_RS,
+    TAURI_CONF,
+    DOCS_EN,
+    DOCS_FR,
+    SECURITY,
+    RELEASE_KEY,
+    PREVIEW_WORKFLOW,
+    DESKTOP_UPDATES_RS,
+)
 
 BLOCK_BEGIN = "<!-- release-artifacts:begin"
 BLOCK_END = "<!-- release-artifacts:end -->"
@@ -117,10 +140,9 @@ HARDCODED_ASSET = re.compile(
 
 # The desktop job that builds a platform is named by the contract itself, in
 # each entry's `job`. It used to be a table keyed on `os` here, which stopped
-# working the day one system got two variants: Windows and Linux each ship a
-# Vulkan bundle and a CUDA one, and an operating system no longer identifies a
-# producer. Naming the job in the contract also puts the two sides of the
-# question in one file rather than two.
+# working the day one system got two variants: an operating system then no
+# longer identifies a producer. Naming the job in the contract also puts the
+# two sides of the question in one file rather than two.
 
 
 def shell_lines(run: str) -> list[str]:
@@ -169,8 +191,6 @@ def render_block(contract: dict, version: str, lang: str) -> str:
             "darwin-aarch64": "macOS (Apple Silicon)",
             "linux-x86_64": "Linux (x86-64)",
             "windows-x86_64": "Windows (x86-64)",
-            "linux-x86_64-cuda": "Linux (x86-64), moteur CUDA",
-            "windows-x86_64-cuda": "Windows (x86-64), moteur CUDA",
         }
         origin = (
             f"{BLOCK_BEGIN} - genere depuis packaging/artifacts.json par "
@@ -182,8 +202,6 @@ def render_block(contract: dict, version: str, lang: str) -> str:
             "darwin-aarch64": "macOS (Apple Silicon)",
             "linux-x86_64": "Linux (x86-64)",
             "windows-x86_64": "Windows (x86-64)",
-            "linux-x86_64-cuda": "Linux (x86-64), CUDA engine",
-            "windows-x86_64-cuda": "Windows (x86-64), CUDA engine",
         }
         origin = (
             f"{BLOCK_BEGIN} - generated from packaging/artifacts.json by "
@@ -385,6 +403,56 @@ def check(root: Path) -> list[str] | int:
                 f"offered another variant"
             )
 
+    # ── manifest-alias ────────────────────────────────────────────────────
+    # A manifest outlives the bundle that was built to ask it: the copies
+    # already installed keep asking the same file. `latest-cuda.json` is that
+    # case. The installers that bundled a CUDA engine are no longer produced,
+    # and a manifest composed from no bundle is an empty one, which tells
+    # every such machine that nothing is available, for good. So a declared
+    # manifest either has a producer or is declared as the copy of one that
+    # has, and the step that composes the manifests reads that declaration.
+    aliases = contract.get("manifest_aliases") or {}
+    declared_manifests = list(contract.get("updater_manifests", []))
+    built_for = {
+        entry.get("manifest", default_manifest) for entry in contract.get("desktop", [])
+    }
+    for name in declared_manifests:
+        if name not in built_for and name not in aliases:
+            defects.append(
+                f"{CONTRACT}: manifest-alias: no desktop entry is built for the "
+                f"manifest {name!r} and manifest_aliases does not say what it is a "
+                f"copy of, so it would be published with no platform"
+            )
+    for alias, source in aliases.items():
+        if alias not in declared_manifests:
+            defects.append(
+                f"{CONTRACT}: manifest-alias: {alias!r} is an alias and "
+                f"updater_manifests does not declare it, so nothing publishes it"
+            )
+        if alias in built_for:
+            defects.append(
+                f"{CONTRACT}: manifest-alias: {alias!r} is an alias and a desktop "
+                f"entry is still built for it; it is one or the other"
+            )
+        if source not in built_for or source in aliases:
+            defects.append(
+                f"{CONTRACT}: manifest-alias: {alias!r} is a copy of {source!r}, "
+                f"which no desktop entry is built for"
+            )
+    if aliases:
+        compose_reads_aliases = any(
+            isinstance(step.get("run"), str)
+            and any("updater_manifests" in line for line in shell_lines(step["run"]))
+            and any("manifest_aliases" in line for line in shell_lines(step["run"]))
+            for step in release_job.get("steps", [])
+        )
+        if not compose_reads_aliases:
+            defects.append(
+                f"{WORKFLOW}: manifest-alias: the contract declares manifest aliases "
+                f"and the manifest step does not read them, so each alias is "
+                f"published with no platform"
+            )
+
     # ── updater-uploads ───────────────────────────────────────────────────
     for entry in contract.get("desktop", []):
         job_id = entry.get("job")
@@ -396,9 +464,7 @@ def check(root: Path) -> list[str] | int:
             continue
         job = jobs[job_id]
         # `updater: null` is a bundle that does not self-update, and says so
-        # rather than leaving the reader to infer it from a missing key. The
-        # CUDA variants are that case: Tauri resolves one manifest per platform
-        # triple, so two bundles for one triple cannot both be offered by it.
+        # rather than leaving the reader to infer it from a missing key.
         if entry.get("updater") is None:
             continue
         sig = entry["updater"]["signature"]
@@ -531,9 +597,9 @@ def check(root: Path) -> list[str] | int:
             )
 
     # ── publication-list ──────────────────────────────────────────────────
-    # `artifacts/` holds more than the release ships: the CUDA engine job
-    # uploads its whole engine/ directory, consumed by the desktop bundle and
-    # published by nothing. Steps that walked the directory rather than the
+    # `artifacts/` can hold more than the release ships: a job once uploaded
+    # a build input there, consumed by a desktop bundle and published by
+    # nothing. Steps that walked the directory rather than the
     # publication list signed twelve files nobody could download and listed
     # them in SHA256SUMS, so the verification command SECURITY.md documents
     # failed twelve times on a correctly built release. One list now decides,
@@ -602,6 +668,76 @@ def check(root: Path) -> list[str] | int:
                 f"this file, so a verifier holding SHA256SUMS.asc has no key to verify it "
                 f"with, and the file itself reads as clutter"
             )
+
+    # ── preview-channel ───────────────────────────────────────────────────
+    # The preview channel spans four files: the contract names the manifests,
+    # the release job composes them, a second workflow moves them to the fixed
+    # release, and the desktop app derives the address it asks. Each was written
+    # alone; a rename in one sends every preview machine to a 404.
+    preview = contract.get("preview") or {}
+    preview_manifests = preview.get("manifests") or {}
+    preview_release = preview.get("release", "")
+    if not preview or not preview_release or not preview.get("tag"):
+        defects.append(
+            f"{CONTRACT}: preview-channel: no preview channel (tag, release, manifests)"
+        )
+    if sorted(preview_manifests) != sorted(contract.get("updater_manifests", [])):
+        defects.append(
+            f"{CONTRACT}: preview-channel: the preview manifests map "
+            f"{sorted(preview_manifests)}, the stable channels are "
+            f"{sorted(contract.get('updater_manifests', []))}"
+        )
+    for stable_name, preview_name in preview_manifests.items():
+        stem, _, ext = stable_name.rpartition(".")
+        if preview_name != f"{stem}-preview.{ext}":
+            defects.append(
+                f"{CONTRACT}: preview-channel: {preview_name!r} is not the "
+                f"{stem}-preview.{ext} the desktop app derives from {stable_name!r}"
+            )
+    compose_reads_preview = any(
+        isinstance(step.get("run"), str)
+        and any("updater_manifests" in line for line in shell_lines(step["run"]))
+        and any('["preview"]' in line for line in shell_lines(step["run"]))
+        for step in release_job.get("steps", [])
+    )
+    if not compose_reads_preview:
+        defects.append(
+            f"{WORKFLOW}: preview-channel: the manifest step does not read the "
+            f"contract's preview channel, so a trial tag would overwrite the stable "
+            f"manifests"
+        )
+    preview_wf = yaml.safe_load((root / PREVIEW_WORKFLOW).read_text(encoding="utf-8")) or {}
+    preview_lines = [
+        line
+        for job in (preview_wf.get("jobs") or {}).values()
+        for step in job.get("steps", [])
+        if isinstance(step.get("run"), str)
+        for line in shell_lines(step["run"])
+    ]
+    uploads = [
+        line for line in preview_lines if f"release upload {preview_release} " in line
+    ]
+    if not uploads:
+        defects.append(
+            f"{PREVIEW_WORKFLOW}: preview-channel: no run line uploads to the "
+            f"fixed release {preview_release!r}"
+        )
+    for preview_name in preview_manifests.values():
+        if uploads and not any(preview_name in line for line in uploads):
+            defects.append(
+                f"{PREVIEW_WORKFLOW}: preview-channel: the upload to the preview "
+                f"release does not carry {preview_name!r}"
+            )
+    updates_src = (root / DESKTOP_UPDATES_RS).read_text(encoding="utf-8")
+    updates_prod = updates_src.split("#[cfg(test)]", 1)[0]
+    if f'"/releases/download/{preview_release}/"' not in updates_prod or (
+        '"-preview"' not in updates_prod
+    ):
+        defects.append(
+            f"{DESKTOP_UPDATES_RS}: preview-channel: the desktop updater does not "
+            f"derive its preview endpoint from the release {preview_release!r} and "
+            f"the suffix '-preview'"
+        )
 
     # ── docs-block ────────────────────────────────────────────────────────
     version = conf.get("version", "")
@@ -720,7 +856,27 @@ def selftest() -> int:
             text.replace(".dmg`", ".dmg-renamed`"), encoding="utf-8"
         )
 
+    def drop_a_preview_copy(root: Path) -> None:
+        text = (root / PREVIEW_WORKFLOW).read_text(encoding="utf-8")
+        (root / PREVIEW_WORKFLOW).write_text(
+            text.replace(" manifests/latest-cuda-preview.json", ""), encoding="utf-8"
+        )
+
+    def drop_the_alias(root: Path) -> None:
+        contract = json.loads((root / CONTRACT).read_text(encoding="utf-8"))
+        contract.pop("manifest_aliases", None)
+        (root / CONTRACT).write_text(json.dumps(contract, indent=2), encoding="utf-8")
+
+    def compose_ignores_the_alias(root: Path) -> None:
+        text = (root / WORKFLOW).read_text(encoding="utf-8")
+        (root / WORKFLOW).write_text(
+            text.replace('contract.get("manifest_aliases", {})', "{}"), encoding="utf-8"
+        )
+
     print("selftest: each rule fires on a mutated copy")
+    case("a manifest no bundle is built for is reported", drop_the_alias, "manifest-alias")
+    case("an alias the manifest step ignores is reported", compose_ignores_the_alias, "manifest-alias")
+    case("a preview manifest nobody copies is reported", drop_a_preview_copy, "preview-channel")
     case("a manifest without a step is reported", drop_manifest_step, "manifest-step")
     case("a comment naming the manifest does not count", comment_only_manifest, "manifest-step")
     case("a contract preset without a producer is reported", drop_a_preset, "matrix-bijection")

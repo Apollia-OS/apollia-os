@@ -5,13 +5,13 @@
 //! date suffixes of Anthropic models (e.g. `claude-sonnet-4-5-20261015`
 //! matches the `claude-sonnet-4-5` entry).
 //!
-//! Operator overrides are supported via `[llm.pricing_overrides]` in
-//! `apollia.toml`; they take priority over the default table.
+//! [`lookup_pricing`] also takes a table of overrides, consulted first; no
+//! production path fills it.
 
 use std::collections::HashMap;
 
 /// Pricing of an LLM model in dollars per million tokens.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PricingTier {
     /// Cost per million input (prompt) tokens.
     pub input_per_mtok: f64,
@@ -19,6 +19,9 @@ pub struct PricingTier {
     pub output_per_mtok: f64,
 }
 
+// TEST-ONLY: no client prices from this table any more; the OpenAI-compatible
+// client prices through its own `estimate_cost_usd`, and the Ollama client
+// records a zero cost. Kept, with `lookup_pricing`, as the reference rates.
 /// Return the default pricing table for known models.
 ///
 /// Keys are `model_id` prefixes: a model whose identifier starts with a key
@@ -104,6 +107,8 @@ pub fn default_pricing() -> HashMap<&'static str, PricingTier> {
     m
 }
 
+// TEST-ONLY: reached by tests alone, for the reason given above
+// `default_pricing`.
 /// Look up a model's pricing by exact match or by prefix.
 ///
 /// Priority order:
@@ -233,30 +238,6 @@ mod tests {
 
         assert_eq!(tier.input_per_mtok, 1.0);
         assert_eq!(tier.output_per_mtok, 5.0);
-    }
-
-    // GIVEN the codebase after implementation
-    // WHEN inspecting anthropic.rs
-    // THEN there is no longer any call to estimate_cost_usd
-    #[test]
-    fn test_no_model_contains_in_pricing_logic() {
-        let source = include_str!("backends/anthropic.rs");
-        assert!(
-            !source.contains("estimate_cost_usd"),
-            "estimate_cost_usd must no longer exist in anthropic.rs"
-        );
-        assert!(
-            !source.contains(".contains(\"haiku\")"),
-            "model.contains() must not be used for pricing in anthropic.rs"
-        );
-        assert!(
-            !source.contains(".contains(\"sonnet\")"),
-            "model.contains() must not be used for pricing in anthropic.rs"
-        );
-        assert!(
-            !source.contains(".contains(\"opus\")"),
-            "model.contains() must not be used for pricing in anthropic.rs"
-        );
     }
 
     // GIVEN the table with "claude-sonnet-4-5" and a hypothetical "claude-sonnet"

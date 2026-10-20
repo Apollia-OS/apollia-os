@@ -1,0 +1,761 @@
+{
+  "name": "agent-create-det (Create an agent from the Agents screen: the default model on a server that does not answer, the conversation that cannot start, the sheet written by hand and refused, the draft read in the conversation, reviewed in the form, saved with a model that cannot be assigned)",
+  "stopOnError": false,
+  "steps": [
+    {
+      "kind": "click",
+      "testid": "onboarding-skip",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "onboarding-skip",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 30000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "agent_draft_offer",
+      "resolve": {
+        "accesses": [
+          {
+            "id": "file_read",
+            "description": "Read a file.",
+            "family": "read",
+            "sensitive": false,
+            "by_default": true
+          },
+          {
+            "id": "web_search",
+            "description": "Search the web.",
+            "family": "read",
+            "sensitive": false,
+            "by_default": false
+          },
+          {
+            "id": "file_write",
+            "description": "Write a file.",
+            "family": "write_or_delete",
+            "sensitive": true,
+            "by_default": false
+          }
+        ],
+        "sources": [
+          {
+            "id": "profile",
+            "label": "the profile of the person"
+          },
+          {
+            "id": "memory",
+            "label": "the memory the agent keeps across its runs"
+          }
+        ],
+        "models": []
+      }
+    },
+    {
+      "kind": "goto",
+      "route": "agents"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-page",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-list",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "expect",
+      "testid": "agents-create-button"
+    },
+    {
+      "kind": "screenshot",
+      "label": "01-agents-with-create-button"
+    },
+    {
+      "kind": "click",
+      "testid": "agents-create-button"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-form",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-result"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-rules"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-examples"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-sources",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-source"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-rights"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-right"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-cancel"
+    },
+    {
+      "kind": "fill",
+      "testid": "agent-create-purpose",
+      "text": "Summarise the press every morning."
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-source"
+    },
+    {
+      "kind": "screenshot",
+      "label": "02-form-filled"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_default_model",
+      "resolve": {
+        "backend": "office-server",
+        "model_source": "server",
+        "model_id": "office-server/qwen"
+      },
+      "once": true
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_llm_server_models",
+      "reject": "the server does not answer",
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-prepare"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-server-down",
+      "timeoutMs": 6000,
+      "contains": "office-server"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-open-ai"
+    },
+    {
+      "kind": "screenshot",
+      "label": "03-default-model-server-down"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_default_model",
+      "resolve": null
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "launch_workflow",
+      "reject": "workflow 'agent-builder/draft' is not installed",
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-server-retry"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-run-error",
+      "timeoutMs": 6000,
+      "contains": "not installed"
+    },
+    {
+      "kind": "screenshot",
+      "label": "04-workshop-could-not-start"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-by-hand"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-review",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-review-notice"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-save"
+    },
+    {
+      "kind": "fill",
+      "testid": "agent-create-name",
+      "text": "Notes helper"
+    },
+    {
+      "kind": "fill",
+      "testid": "agent-adjust-mission",
+      "text": "Answer the questions about the notes."
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "create_agent_definition",
+      "reject": "audit journal not available: an agent is not created without its record",
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-save"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-save-error",
+      "timeoutMs": 6000,
+      "contains": "audit journal"
+    },
+    {
+      "kind": "screenshot",
+      "label": "05-sheet-by-hand-save-refused"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-review-back"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-form",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "launch_workflow",
+      "resolve": {
+        "runId": "run-create",
+        "workflowId": "agent-builder/draft",
+        "parentRunId": null,
+        "depth": 0,
+        "inputs": {},
+        "status": "running",
+        "output": null,
+        "error": null,
+        "startedAt": "2026-10-09T10:00:00Z",
+        "endedAt": null
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_workflow_run",
+      "resolve": {
+        "run": {
+          "runId": "run-create",
+          "workflowId": "agent-builder/draft",
+          "parentRunId": null,
+          "depth": 0,
+          "inputs": {},
+          "status": "running",
+          "output": null,
+          "error": null,
+          "startedAt": "2026-10-09T10:00:00Z",
+          "endedAt": null
+        },
+        "steps": [
+          {
+            "rank": 0,
+            "name": "understand",
+            "status": "completed",
+            "startedAt": null,
+            "endedAt": null,
+            "output": null,
+            "error": null
+          },
+          {
+            "rank": 1,
+            "name": "ask",
+            "status": "running",
+            "startedAt": null,
+            "endedAt": null,
+            "output": null,
+            "error": null
+          },
+          {
+            "rank": 2,
+            "name": "write",
+            "status": "pending",
+            "startedAt": null,
+            "endedAt": null,
+            "output": null,
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_pending_decisions",
+      "resolve": {
+        "items": [
+          {
+            "id": "workflow-question:req-create",
+            "kind": "question",
+            "agentId": null,
+            "summary": "Which form should the summary take?",
+            "access": null,
+            "family": null,
+            "answers": [
+              "answer",
+              "refuse"
+            ],
+            "questions": [
+              {
+                "id": "answer",
+                "question": "Which form should the summary take?",
+                "type": "single_choice",
+                "options": [
+                  "A short list",
+                  "A table"
+                ]
+              }
+            ],
+            "allowOther": true,
+            "origin": {
+              "requestId": "req-create",
+              "runId": "run-create",
+              "workflowId": "agent-builder/draft",
+              "step": "ask"
+            },
+            "askedAt": "2026-10-09T10:00:01Z"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "cancel_workflow_run",
+      "resolve": {
+        "runId": "run-create",
+        "workflowId": "agent-builder/draft",
+        "parentRunId": null,
+        "depth": 0,
+        "inputs": {},
+        "status": "canceled",
+        "output": null,
+        "error": null,
+        "startedAt": "2026-10-09T10:00:00Z",
+        "endedAt": null
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-prepare"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-progress",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-step"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-question",
+      "timeoutMs": 8000,
+      "contains": "Which form"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-question-text"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-question-option"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-question-own"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-question-send"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-drafting-back"
+    },
+    {
+      "kind": "screenshot",
+      "label": "06-workshop-asks"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "decide_pending_decision",
+      "reject": "the question is no longer waiting",
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-question-skip"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-answer-error",
+      "timeoutMs": 6000,
+      "contains": "no longer waiting"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "decide_pending_decision",
+      "resolve": {
+        "id": "workflow-question:req-create",
+        "answer": "answer",
+        "resumed": 1,
+        "batchItemsResumed": 0,
+        "message": "Answered."
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "check_agent_draft",
+      "resolve": {
+        "name": "Press watch",
+        "mission": "Summarise the press every morning.",
+        "examples": [
+          "What is new today?"
+        ],
+        "model": null,
+        "access": [
+          {
+            "id": "web_search",
+            "checked": true,
+            "sensitive": false,
+            "by_default": false
+          },
+          {
+            "id": "file_write",
+            "checked": false,
+            "sensitive": true,
+            "by_default": false
+          },
+          {
+            "id": "file_read",
+            "checked": true,
+            "sensitive": false,
+            "by_default": true
+          }
+        ],
+        "sources": [
+          "profile"
+        ],
+        "unavailable": [
+          "calendar_read"
+        ]
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-question-option"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_pending_decisions"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_pending_decisions",
+      "resolve": {
+        "items": []
+      }
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_workflow_run"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_workflow_run",
+      "resolve": {
+        "run": {
+          "runId": "run-create",
+          "workflowId": "agent-builder/draft",
+          "parentRunId": null,
+          "depth": 0,
+          "inputs": {},
+          "status": "completed",
+          "output": {
+            "name": "Press watch",
+            "mission": "Summarise the press every morning.",
+            "examples": [
+              "What is new today?"
+            ],
+            "access": [
+              "web_search",
+              "calendar_read"
+            ],
+            "sources": [
+              "profile"
+            ],
+            "answers": []
+          },
+          "error": null,
+          "startedAt": "2026-10-09T10:00:00Z",
+          "endedAt": null
+        },
+        "steps": [
+          {
+            "rank": 0,
+            "name": "understand",
+            "status": "completed",
+            "startedAt": null,
+            "endedAt": null,
+            "output": null,
+            "error": null
+          },
+          {
+            "rank": 1,
+            "name": "ask",
+            "status": "completed",
+            "startedAt": null,
+            "endedAt": null,
+            "output": null,
+            "error": null
+          },
+          {
+            "rank": 2,
+            "name": "write",
+            "status": "completed",
+            "startedAt": null,
+            "endedAt": null,
+            "output": null,
+            "error": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-review",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-unavailable",
+      "timeoutMs": 4000,
+      "contains": "calendar_read"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-adjust-access-row",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-adjust-access-note"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-adjust-access-switch"
+    },
+    {
+      "kind": "screenshot",
+      "label": "07-sheet-in-the-form"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-review-back"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-form",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-review-resume"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-review",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "agent-adjust-model",
+      "value": "local-llama-server"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "create_agent_definition",
+      "resolve": {
+        "id": "press-watch",
+        "origin": "interface",
+        "package": null,
+        "version": "1",
+        "enabled": true,
+        "name": "Press watch",
+        "mission": "Summarise the press every morning.",
+        "examples": [
+          "What is new today?"
+        ],
+        "access": [
+          "web_search"
+        ],
+        "sources": [
+          "profile"
+        ],
+        "model": null,
+        "autonomy": "supervised",
+        "planning": "auto",
+        "profile": null,
+        "overridden": [],
+        "definition": {
+          "id": "press-watch",
+          "name": "Press watch",
+          "mission": "Summarise the press every morning.",
+          "examples": [
+            "What is new today?"
+          ],
+          "defaults": {
+            "access": [
+              "web_search"
+            ],
+            "sources": [
+              "profile"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_agent_definition",
+      "resolve": {
+        "id": "press-watch",
+        "origin": "interface",
+        "package": null,
+        "version": "1",
+        "enabled": true,
+        "name": "Press watch",
+        "mission": "Summarise the press every morning.",
+        "examples": [
+          "What is new today?"
+        ],
+        "access": [
+          "web_search"
+        ],
+        "sources": [
+          "profile"
+        ],
+        "model": null,
+        "autonomy": "supervised",
+        "planning": "auto",
+        "profile": null,
+        "overridden": [],
+        "definition": {
+          "id": "press-watch",
+          "name": "Press watch",
+          "mission": "Summarise the press every morning.",
+          "examples": [
+            "What is new today?"
+          ],
+          "defaults": {
+            "access": [
+              "web_search"
+            ],
+            "sources": [
+              "profile"
+            ]
+          }
+        }
+      },
+      "argsMatch": {
+        "name": "press-watch"
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "set_agent_model",
+      "reject": "model 'local-llama-server' cannot be assigned"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-save"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-create-saved",
+      "timeoutMs": 6000,
+      "contains": "Press watch"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-saved-title"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-model-error"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-create-try"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "08-agent-saved"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-create-back"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-list",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs"
+    }
+  ],
+  "notes": [
+    "Code-verified against routes/Agents.svelte, components/agents/AgentsOverview.svelte, components/agents/create/CreateAgent.svelte, CreateAgentForm.svelte, CreateAgentProgress.svelte, CreateAgentReview.svelte, agentDraft.ts and components/agents/sheet/AdjustAccess.svelte.",
+    "No model answers in a deterministic book, so the sheet is not written by a model: the run of the agent workshop is stubbed. launch_workflow and cancel_workflow_run imitate WorkflowRun, get_workflow_run imitates WorkflowRunDetail (crates/apollia-desktop/ui/src/lib/ipc/workflows.ts), list_pending_decisions imitates the PendingDecision a workflow question becomes (crates/apollia-runtime/src/api/routes_pending/collect.rs), agent_draft_offer imitates DraftOffer and check_agent_draft imitates AgentDraft (crates/apollia-runtime/src/agents/draft.rs). The output of the completed run imitates the sheet agents/system/agent-builder/workflows/draft.py returns.",
+    "The workshop itself, the offer and the check are proven without stubs by tests/test_agent_builder_workflow.py and by the Rust tests of crates/apollia-runtime/src/agents/draft and src/api/routes_agent_definitions/tests_draft.rs.",
+    "The table of stubs answers a call with the first stub that matches it, so a command stubbed a second time is cleared first (clearStubs) or the first answer keeps being served: the run read as running and its question read as waiting are dropped before the completed run and the empty list are armed. The proposed answer is clicked before that swap, so the question is still on screen when the click lands.",
+    "The save uses the real form: create_agent_definition is refused once to show the error, then stubbed with a ResolvedAgent, and set_agent_model is refused to show that the agent stays on the default model.",
+    "agent-create-try is observed, not clicked: it opens a conversation with an agent the stub did not store. The grant dialogs of the form are played by agents-det.",
+    "Not folded into master-det: this book has not been through a runtime round yet. Add it to ORDER in tools/regen_master.py after its first green solo run: just automation-seeded scripts/automation/agent-create-det.json."
+  ]
+}

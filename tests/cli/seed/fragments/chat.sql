@@ -4,11 +4,9 @@
 --   * chat_sessions  -> conversation-row-* / chat-active-list is populated,
 --                        so the session list is not the empty state.
 --   * chat_messages  -> seed-session-1 renders a real conversation history.
---   * chat_tool_authorizations -> session-auths-list in Settings > Permissions
---                        renders (restore_sessions hydrates these in-memory at
---                        boot, then list_active_chat_session_authorizations
---                        surfaces them; only status='active' sessions are
---                        restored, hence every seeded session is 'active').
+--   * chat_tool_authorizations -> restore_sessions hydrates these in-memory
+--                        at boot; only status='active' sessions are restored,
+--                        hence every seeded session is 'active'.
 --   * session_plans + session_plan_steps -> chat-inspector-plan-tab shows a
 --                        plan for seed-session-2.
 --
@@ -103,8 +101,7 @@ VALUES
 -- The table was created empty, so this half of the screen had never been seen
 -- (InboxPendingTab used to render the history only while a pending item was on
 -- screen; it now renders it whenever a decision exists). Timestamps are
--- relative for the same reason as audit.sql: the 14-day window would drop
--- anything pinned to a fixed date.
+-- relative: the 14-day window would drop anything pinned to a fixed date.
 --
 -- One of each decision, because the row renders a different icon and label per
 -- decision (Approved / Always approved / Rejected), and a rejection carries the

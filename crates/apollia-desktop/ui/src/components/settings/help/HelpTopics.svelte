@@ -1,3 +1,32 @@
+<script module lang="ts">
+  import { navigateTo, type Route } from "$lib/stores/navigation";
+  import { navigateToSettings } from "$lib/router";
+  import type { SettingsSubRoute } from "$lib/stores/settings";
+
+  /** Where a topic leads: a screen of the application, or a settings section. */
+  export type HelpTopicTarget = { route: Route } | { settings: SettingsSubRoute };
+
+  /**
+   * The model topic leads to the AI screen, where models are chosen and run;
+   * dictation and profile stay settings sections.
+   */
+  export const HELP_TOPIC_TARGETS: Readonly<Record<string, HelpTopicTarget>> = {
+    model: { route: "llm" },
+    chat: { route: "chat" },
+    stt: { settings: "stt" },
+    plan: { route: "chat" },
+    profile: { settings: "profile" },
+  };
+
+  /** Follow a topic: a screen closes the settings window, a section shows in it. */
+  export function openHelpTopic(id: string): void {
+    const target = HELP_TOPIC_TARGETS[id];
+    if (!target) return;
+    if ("route" in target) navigateTo(target.route);
+    else navigateToSettings(target.settings);
+  }
+</script>
+
 <script lang="ts">
   /**
    * HelpTopics - the "getting started" list of in-app shortcuts.
@@ -7,7 +36,6 @@
    */
   import { t } from "svelte-i18n";
   import {
-    Compass,
     Cpu,
     MessageSquare,
     Mic,
@@ -15,9 +43,6 @@
     UserRound,
     ChevronRight,
   } from "lucide-svelte";
-  import { navigateTo } from "$lib/stores/navigation";
-  import { navigateToSettings } from "$lib/router";
-  import { restoreBand } from "$lib/tour/persistence";
 
   type Icon = typeof Cpu;
 
@@ -32,26 +57,12 @@
 
   const topics: HelpTopic[] = [
     {
-      // Restores the Getting started band and sends the user to it. It is the
-      // single entry point of the tour system, so it has to be reachable again
-      // once dismissed.
-      id: "tour",
-      icon: Compass,
-      titleKey: "tour.help_topic.title",
-      bodyKey: "tour.help_topic.body",
-      actionKey: "tour.help_topic.action",
-      run: () => {
-        restoreBand();
-        navigateTo("dashboard");
-      },
-    },
-    {
       id: "model",
       icon: Cpu,
       titleKey: "settings.help.topic_model_title",
       bodyKey: "settings.help.topic_model_body",
       actionKey: "settings.help.topic_model_action",
-      run: () => navigateToSettings("model-hub"),
+      run: () => openHelpTopic("model"),
     },
     {
       id: "chat",
@@ -59,7 +70,7 @@
       titleKey: "settings.help.topic_chat_title",
       bodyKey: "settings.help.topic_chat_body",
       actionKey: "settings.help.topic_chat_action",
-      run: () => navigateTo("chat"),
+      run: () => openHelpTopic("chat"),
     },
     {
       id: "stt",
@@ -67,7 +78,7 @@
       titleKey: "settings.help.topic_stt_title",
       bodyKey: "settings.help.topic_stt_body",
       actionKey: "settings.help.topic_stt_action",
-      run: () => navigateToSettings("stt"),
+      run: () => openHelpTopic("stt"),
     },
     {
       id: "plan",
@@ -75,7 +86,7 @@
       titleKey: "settings.help.topic_plan_title",
       bodyKey: "settings.help.topic_plan_body",
       actionKey: "settings.help.topic_plan_action",
-      run: () => navigateTo("chat"),
+      run: () => openHelpTopic("plan"),
     },
     {
       id: "profile",
@@ -83,7 +94,7 @@
       titleKey: "settings.help.topic_profile_title",
       bodyKey: "settings.help.topic_profile_body",
       actionKey: "settings.help.topic_profile_action",
-      run: () => navigateToSettings("profile"),
+      run: () => openHelpTopic("profile"),
     },
   ];
 </script>

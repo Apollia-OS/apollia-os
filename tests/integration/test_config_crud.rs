@@ -25,7 +25,6 @@ use apollia_notifications::{
     NotificationChannelRow, NotificationConfigRepository, NotificationLogRow,
 };
 use apollia_runtime::{
-    api::routes_agents::StubAgentLoader,
     api::{APIServer, APIServerConfig, APIServerHandle, AppState},
     coordinator::ExecutionBackend,
     eventbus::EventBus,
@@ -127,9 +126,11 @@ async fn build_app_state_with_repos(
         router_handle,
         registry_handle,
         event_sender,
-        agent_loader: Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         backend: MockBackend,
         llm_router: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         trigger_engine: Some(engine_handle),
@@ -137,10 +138,9 @@ async fn build_app_state_with_repos(
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         obs_config: ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: Some(trigger_def_repo),
         notification_repo: Some(notification_repo),
@@ -160,6 +160,12 @@ async fn build_app_state_with_repos(
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     }
 }
 
@@ -175,6 +181,7 @@ async fn start_test_server_with_repos(
     let config = APIServerConfig {
         socket_path: socket_path.clone(),
         tcp_port: Some(port),
+        tcp_listener: None,
         bind_addr: "127.0.0.1".to_string(),
         api_token: None,
         tls_cert_path: None,
@@ -630,6 +637,8 @@ async fn test_boot_with_prepopulated_db() {
         let row = TriggerDefinitionRow {
             id: "pre-existing-trigger".into(),
             agent: Some("hello-agent".into()),
+            workflow: None,
+            workflow_inputs: None,
             enabled: true,
             on_busy: OnBusy::Queue,
             source_type: "interval".into(),

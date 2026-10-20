@@ -29,7 +29,21 @@ impl ChatSessionManager {
         }
 
         let now = now_rfc3339();
-        let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+        // The answer is persisted under the identifier the turn's model calls
+        // were stamped with, so its calls can be read back by turn.
+        let assistant_msg_id = session
+            .active_exchange
+            .as_ref()
+            .and_then(|exchange| exchange.answer_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let generation = crate::chat::generation::aggregate(
+            &response.llm_calls,
+            session
+                .active_exchange
+                .as_ref()
+                .and_then(|exchange| crate::chat::generation::elapsed_since(&exchange.started_at)),
+            response.paused,
+        );
         let tokens_used = response.tokens_used.clone();
         let context_window_tokens = response.context_window_tokens;
         let context_tokens_used = response.context_tokens_used;
@@ -48,51 +62,115 @@ impl ChatSessionManager {
 
         // Serialize thinking trace (and its per-fragment tool-call boundaries,
         // when present) as JSON metadata so the UI can interleave each reasoning
-        // fragment with the tool calls of its step.
-        let metadata_json = response.thinking_trace.as_ref().map(|t| {
-            if response.reasoning_boundaries.is_empty() {
-                serde_json::json!({ "thinking_trace": t }).to_string()
-            } else {
-                serde_json::json!({
-                    "thinking_trace": t,
-                    "reasoning_boundaries": response.reasoning_boundaries,
-                })
-                .to_string()
+        // fragment with the tool calls of its step. The generation total of the
+        // turn goes beside it, under `generation`.
+        let mut metadata = serde_json::Map::new();
+        if let Some(t) = response.thinking_trace.as_ref() {
+            metadata.insert(
+                crate::chat::types::THINKING_TRACE_KEY.into(),
+                serde_json::json!(t),
+            );
+            if !response.reasoning_boundaries.is_empty() {
+                metadata.insert(
+                    "reasoning_boundaries".into(),
+                    serde_json::json!(response.reasoning_boundaries),
+                );
             }
-        });
+        }
+        if let Some(total) = generation.as_ref() {
+            match serde_json::to_value(total) {
+                Ok(value) => {
+                    metadata.insert("generation".into(), value);
+                }
+                Err(e) => warn!(error = %e, "chat.generation.serialize.failed"),
+            }
+        }
+        let metadata_json =
+            (!metadata.is_empty()).then(|| serde_json::Value::Object(metadata).to_string());
 
-        // Persist assistant response message
-        match self.repository.append_message(&AppendMessageParams {
-            id: &assistant_msg_id,
-            session_id,
-            role: &ChatRole::Assistant,
-            content: &response.content,
-            tool_calls_json: tool_calls_json.as_deref(),
-            tool_name: None,
-            created_at: &now,
-            metadata: metadata_json.as_deref(),
-        }) {
-            Ok(seq) => {
-                let metadata_value = metadata_json
-                    .as_ref()
-                    .and_then(|s| serde_json::from_str(s).ok());
-                session.history.push(ChatMessage {
-                    id: assistant_msg_id,
-                    role: ChatRole::Assistant,
-                    content: response.content,
-                    tool_calls: if response.tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(response.tool_calls)
-                    },
-                    tool_name: None,
-                    created_at: now,
-                    seq,
-                    metadata: metadata_value,
-                });
+        // A continued answer is already in the history, under the identifier
+        // this exchange was started with: it is rewritten in place, with the
+        // tool calls of the continuation after its own and the generation
+        // total of the continuation in place of its own.
+        let mut response = response;
+        if let Some(at) = session
+            .history
+            .iter()
+            .position(|m| m.id == assistant_msg_id)
+        {
+            let earlier = &session.history[at];
+            let content =
+                super::super::answers::continued_text(&earlier.content, &response.content);
+            let mut tool_calls = earlier.tool_calls.clone().unwrap_or_default();
+            tool_calls.append(&mut response.tool_calls);
+            let mut merged = match earlier.metadata.clone() {
+                Some(serde_json::Value::Object(fields)) => fields,
+                _ => serde_json::Map::new(),
+            };
+            if let Some(total) = generation
+                .as_ref()
+                .and_then(|total| serde_json::to_value(total).ok())
+            {
+                merged.insert("generation".into(), total);
             }
-            Err(e) => {
-                error!(error = %e, "chat.message.persist.failed");
+            let merged = serde_json::Value::Object(merged);
+            let tool_calls_json = if tool_calls.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&tool_calls).ok()
+            };
+            match self.repository.rewrite_message(
+                session_id,
+                &assistant_msg_id,
+                crate::chat::repository::MessageRewrite {
+                    content: &content,
+                    tool_calls_json: tool_calls_json.as_deref(),
+                    metadata: Some(&merged.to_string()),
+                    drop_summary: false,
+                },
+            ) {
+                Ok(()) => {
+                    let message = &mut session.history[at];
+                    message.content = content;
+                    message.tool_calls = (!tool_calls.is_empty()).then_some(tool_calls);
+                    message.metadata = Some(merged);
+                }
+                Err(e) => error!(error = %e, "chat.message.persist.failed"),
+            }
+        } else {
+            // Persist assistant response message
+            match self.repository.append_message(&AppendMessageParams {
+                id: &assistant_msg_id,
+                session_id,
+                role: &ChatRole::Assistant,
+                content: &response.content,
+                tool_calls_json: tool_calls_json.as_deref(),
+                tool_name: None,
+                created_at: &now,
+                metadata: metadata_json.as_deref(),
+            }) {
+                Ok(seq) => {
+                    let metadata_value = metadata_json
+                        .as_ref()
+                        .and_then(|s| serde_json::from_str(s).ok());
+                    session.history.push(ChatMessage {
+                        id: assistant_msg_id,
+                        role: ChatRole::Assistant,
+                        content: response.content,
+                        tool_calls: if response.tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(response.tool_calls)
+                        },
+                        tool_name: None,
+                        created_at: now,
+                        seq,
+                        metadata: metadata_value,
+                    });
+                }
+                Err(e) => {
+                    error!(error = %e, "chat.message.persist.failed");
+                }
             }
         }
 

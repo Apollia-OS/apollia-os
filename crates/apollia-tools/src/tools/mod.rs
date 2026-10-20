@@ -6,6 +6,7 @@
 pub mod ask_user;
 pub mod bash_executor;
 pub mod bash_validator;
+pub mod code_context;
 pub mod file_edit;
 pub mod file_glob;
 pub mod file_grep;
@@ -16,51 +17,65 @@ pub mod file_write;
 pub mod http_fetch;
 #[cfg(feature = "memory-search")]
 pub mod memory_search;
+#[cfg(feature = "memory-search")]
+pub mod memory_write;
 pub mod notebook_edit;
 pub mod notebook_read;
-pub mod permission_rules;
+#[cfg(feature = "memory-search")]
+pub mod profile_propose;
 pub mod python_discovery;
 pub mod python_executor;
 pub mod risk_classifier;
 pub mod rlimits;
 pub mod shell_discovery;
+pub mod source_search;
 #[cfg(feature = "web-read")]
 pub mod web_read;
 #[cfg(feature = "web-search")]
 pub mod web_search;
+
+/// Every native tool descriptor this build ships, feature gates included.
+///
+/// The family a governance decision reads for a native tool is the one stated
+/// here.
+pub fn native_descriptors() -> Vec<crate::descriptor::ToolDescriptor> {
+    let mut d = vec![
+        ask_user::AskUser::descriptor(),
+        bash_executor::BashExecutor::descriptor(),
+        code_context::CodeContext::descriptor(),
+        file_edit::FileEdit::descriptor(),
+        file_glob::FileGlob::descriptor(),
+        file_grep::FileGrep::descriptor(),
+        file_list::FileList::descriptor(),
+        file_read::FileRead::descriptor(),
+        file_write::FileWrite::descriptor(),
+        notebook_edit::NotebookEdit::descriptor(),
+        notebook_read::NotebookRead::descriptor(),
+        python_executor::PythonExecutor::descriptor(),
+        source_search::SourceSearchTool::descriptor(),
+    ];
+    #[cfg(feature = "http")]
+    d.push(http_fetch::HttpFetch::descriptor());
+    #[cfg(feature = "memory-search")]
+    d.push(memory_search::MemorySearchTool::descriptor());
+    #[cfg(feature = "memory-search")]
+    d.push(memory_write::MemoryWriteTool::descriptor());
+    #[cfg(feature = "memory-search")]
+    d.push(profile_propose::ProfileProposeTool::descriptor());
+    #[cfg(feature = "web-read")]
+    d.push(web_read::WebRead::descriptor());
+    #[cfg(feature = "web-search")]
+    d.push(web_search::WebSearch::descriptor());
+    d
+}
 
 #[cfg(test)]
 mod tests {
     use crate::descriptor::ToolDescriptor;
     use apollia_core::SandboxProfile;
 
-    /// Every descriptor this crate ships, feature gates included.
     fn all_descriptors() -> Vec<ToolDescriptor> {
-        let mut d = vec![
-            super::ask_user::AskUser::descriptor(),
-            super::bash_executor::BashExecutor::descriptor(),
-            super::file_edit::FileEdit::descriptor(),
-            super::file_glob::FileGlob::descriptor(),
-            super::file_grep::FileGrep::descriptor(),
-            super::file_list::FileList::descriptor(),
-            super::file_read::FileRead::descriptor(),
-            super::file_write::FileWrite::descriptor(),
-            super::notebook_edit::NotebookEdit::descriptor(),
-            super::notebook_read::NotebookRead::descriptor(),
-            super::permission_rules::PermissionRuleAdd::descriptor(),
-            super::permission_rules::PermissionRuleRemove::descriptor(),
-            super::permission_rules::PermissionRuleList::descriptor(),
-            super::python_executor::PythonExecutor::descriptor(),
-        ];
-        #[cfg(feature = "http")]
-        d.push(super::http_fetch::HttpFetch::descriptor());
-        #[cfg(feature = "memory-search")]
-        d.push(super::memory_search::MemorySearchTool::descriptor());
-        #[cfg(feature = "web-read")]
-        d.push(super::web_read::WebRead::descriptor());
-        #[cfg(feature = "web-search")]
-        d.push(super::web_search::WebSearch::descriptor());
-        d
+        super::native_descriptors()
     }
 
     #[test]

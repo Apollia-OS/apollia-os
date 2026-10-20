@@ -100,8 +100,6 @@ BRIDGE_SUBTREE = Path("crates/apollia-aip/src")
 CTX_MEMBERS_THE_PROTOCOL_DOES_NOT_PUBLISH = {
     "agent_name": "the name of the running agent, a bridge-side identity the "
     "protocol has never carried",
-    "user_context": "user memory injected in chat mode, read by the built-in "
-    "assistant and by nothing an agent author writes",
     "user_memory_writable": "a permission flag the runtime sets from the "
     "manifest, not a service",
     "log": "the low-level tracing hook; agents are told to use ctx.logger",
@@ -124,16 +122,34 @@ BRIDGE_CLASSES_OUTSIDE_THE_CROSSING = {
     "TokenStream": "carries only __aiter__ and __anext__, both special methods",
     "StepBudgetView": "reachable only through ctx.step_budget, itself an "
     "unpublished bridge member",
+    "WorkflowServices": "the engine side of a workflow run, reached by the Python "
+    "wrappers of the workflow context (ctx.agents, ctx.workflows, ctx.user, the "
+    "step hook) "
+    "and never by an author; those wrappers, not this class, face the protocol",
 }
 
 PROTOCOL_CLASSES_OUTSIDE_THE_CROSSING = {
-    "SkillCard": "no bridge counterpart: the bridge hands back plain Python "
+    "MailMessage": "no bridge counterpart: the bridge hands back plain Python "
     "dicts, so there is nothing to cross",
-    "MailMessage": "no bridge counterpart, same reason",
     "ToolDescriptor": "no bridge counterpart, same reason",
     "TokenUsage": "a bridge counterpart exists but exposes its fields through "
     "#[pyo3(get)] rather than #[pymethods]",
     "LlmResponse": "same as TokenUsage",
+}
+
+# A service the protocol publishes ahead of the bridge. `sdk/AGENTS.md` allows
+# drafting the contract before the Rust side exists; each entry names what binds
+# it, and turns stale, hence red, the day the bridge binds the service or the
+# protocol drops it. Its protocol class is set aside with it.
+SERVICES_THE_BRIDGE_DOES_NOT_BIND_YET = {
+    "agents": "bound on the context of a workflow run only, by a Python wrapper "
+    "around RuntimeContext; RuntimeContext itself, the context of an agent or "
+    "a tool, does not carry it yet",
+    "workflows": "bound on the context of a workflow run only, by a Python "
+    "wrapper around RuntimeContext; RuntimeContext itself does not carry it yet",
+    "user": "bound on the context of a workflow run only, by a Python wrapper "
+    "around RuntimeContext: a question stops a workflow run, and an agent asks "
+    "through its ask_user tool instead",
 }
 
 SPECIAL_BRIDGE_MEMBERS = ("__repr__", "__aiter__", "__anext__", "__str__")
@@ -156,6 +172,7 @@ class Declared:
     bridge_classes_outside_the_crossing: dict
     protocol_classes_outside_the_crossing: dict
     service_floor: int
+    services_the_bridge_does_not_bind_yet: dict = field(default_factory=dict)
 
 
 REAL_TREE = Declared(
@@ -164,6 +181,7 @@ REAL_TREE = Declared(
     BRIDGE_CLASSES_OUTSIDE_THE_CROSSING,
     PROTOCOL_CLASSES_OUTSIDE_THE_CROSSING,
     SERVICE_FLOOR,
+    SERVICES_THE_BRIDGE_DOES_NOT_BIND_YET,
 )
 
 FABRICATED_SUBJECT = Declared({}, {}, {}, {}, 1)
@@ -687,7 +705,11 @@ def cross(sdk_root: Path, bridge_root: Path, declared: Declared = REAL_TREE) -> 
     bound = set(root.members)
     for name in sorted(published & bound):
         crossing.services.append(name)
+    unbound = declared.services_the_bridge_does_not_bind_yet
     for name in sorted(published - bound):
+        if name in unbound:
+            crossing.set_aside += 1
+            continue
         crossing.divergences.append(
             f"ctx.{name}: published by the protocol, absent from #[pymethods] impl RuntimeContext"
         )
@@ -698,6 +720,15 @@ def cross(sdk_root: Path, bridge_root: Path, declared: Declared = REAL_TREE) -> 
         crossing.divergences.append(
             f"ctx.{name}: bound by the bridge, published by no annotation on Ctx"
         )
+    for name in unbound:
+        if name in bound:
+            crossing.stale_exceptions.append(
+                f"ctx.{name} is declared not bound yet but the bridge binds it"
+            )
+        elif name not in published:
+            crossing.stale_exceptions.append(
+                f"ctx.{name} is declared not bound yet but Ctx no longer publishes it"
+            )
     for name in declared.ctx_members_the_protocol_does_not_publish:
         if name not in bound:
             crossing.stale_exceptions.append(
@@ -789,10 +820,15 @@ def cross(sdk_root: Path, bridge_root: Path, declared: Declared = REAL_TREE) -> 
             "crossed nor declared outside the crossing"
         )
     crossed_protocol = {t for t, _ in crossing.service_pairs.values()}
+    unbound_protocol = {
+        annotation.replace("| None", "").strip()
+        for name, annotation in services
+        if name in unbound and name not in bound
+    }
     for name, entry in protocol_classes.items():
         if name in crossed_protocol:
             continue
-        if name in declared.protocol_classes_outside_the_crossing:
+        if name in unbound_protocol or name in declared.protocol_classes_outside_the_crossing:
             crossing.set_aside += 1
             continue
         crossing.uninterpreted.append(
@@ -1152,6 +1188,63 @@ def selftest() -> int:
             _case(
                 "an `optional` verdict on an accessor with no null branch is a red",
                 code == 1 and "the absence it claims cannot happen" in text,
+            )
+        )
+
+        drafted = SUBJECT_TYPES.replace(
+            "from apollia.context.thing import ThingInterface\n",
+            "from apollia.context.thing import DraftInterface, ThingInterface\n",
+        ).replace("    thing: ThingInterface\n", "    thing: ThingInterface\n    draft: DraftInterface\n")
+        draft_protocol = SUBJECT_PROTOCOL + (
+            "\n\nclass DraftInterface(Protocol):\n"
+            '    """Drafted ahead of the bridge."""\n\n'
+            "    async def go(self) -> None:\n"
+            '        """Go."""\n'
+            "        ...\n"
+        )
+
+        def measure_drafted(declared: Declared) -> tuple[str, int]:
+            shutil.rmtree(sdk_root, ignore_errors=True)
+            shutil.rmtree(bridge_root, ignore_errors=True)
+            _write(sdk_root, "types.py", drafted)
+            _write(sdk_root, "context/thing.py", draft_protocol)
+            _write(bridge_root, "thing.rs", SUBJECT_BRIDGE)
+            _write(bridge_root, "context.rs", SUBJECT_CONTEXT)
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                code = report(sdk_root, bridge_root, declared)
+            return buffer.getvalue(), code
+
+        text, code = measure_drafted(FABRICATED_SUBJECT)
+        results.append(
+            _case(
+                "a published service the bridge does not bind is a red",
+                code == 1
+                and "ctx.draft: published by the protocol, absent from #[pymethods]" in text,
+            )
+        )
+        text, code = measure_drafted(
+            Declared({}, {}, {}, {}, 1, {"draft": "drafted ahead of the bridge"})
+        )
+        results.append(
+            _case(
+                "the same service declared not bound yet is set aside, its class with it",
+                code == 0,
+            )
+        )
+        shutil.rmtree(sdk_root, ignore_errors=True)
+        _write(sdk_root, "types.py", SUBJECT_TYPES)
+        _write(sdk_root, "context/thing.py", SUBJECT_PROTOCOL)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = report(
+                sdk_root, bridge_root, Declared({}, {}, {}, {}, 1, {"thing": "now bound"})
+            )
+        results.append(
+            _case(
+                "a service declared not bound yet that the bridge binds is a stale red",
+                code == 1 and "ctx.thing is declared not bound yet but the bridge binds it"
+                in buffer.getvalue(),
             )
         )
 

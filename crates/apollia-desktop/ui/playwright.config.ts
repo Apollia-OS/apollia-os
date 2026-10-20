@@ -35,8 +35,23 @@ export default defineConfig({
   },
   projects: [
     {
+      name: "agents",
+      testDir: "./tests/agents",
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
       name: "companion",
       testDir: "./tests/companion",
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "connections",
+      testDir: "./tests/connections",
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "library",
+      testDir: "./tests/library",
       use: { ...devices["Desktop Chrome"] },
     },
     {

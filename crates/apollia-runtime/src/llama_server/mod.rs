@@ -12,30 +12,58 @@
 //! This supervisor owns the `llama-server` child processes: it picks a loopback
 //! port, launches the binary, waits for `/health`, and respawns a process if it
 //! dies. A process serves exactly one model, so serving several means running
-//! several. [`ENV_MAX_LOADED`] caps how many stay resident, defaulting to one,
-//! which reproduces the historical behaviour of stopping the running server on
-//! every model change. Whisper STT still lives in `apollia-runner`; only the LLM
-//! engine moves here.
+//! several. How many stay resident is what the load guardrail admits, the
+//! footprints of the resident models added to the new one's (see `room`);
+//! [`ENV_MAX_LOADED`] is an optional explicit ceiling on top. The residency
+//! rules unload a model nothing uses any more (see [`crate::residency`]).
+//! Whisper STT still lives in `apollia-runner`; only the LLM engine moves here.
 
+mod announce;
 mod config;
+pub mod devices;
+mod draft;
+mod embeddings;
 mod engine_facts;
+mod explicit;
+mod guard;
+mod load_settings;
+mod loaded;
+pub(crate) mod locate;
+mod log_level;
 mod ngl;
+mod parallel;
+mod projector;
+mod reload;
+mod room;
 
-pub use config::{FlashAttn, LlamaServerConfig, ParseFlashAttnError};
+pub use config::{FlashAttn, LlamaServerConfig, ParseFlashAttnError, SpecType};
+#[cfg(test)]
+pub(crate) use embeddings::tests::{fake_engine, launches as fake_engine_launches};
+pub use embeddings::{embedding_window, EMBEDDING_IDLE, EMBEDDING_MAX_CTX};
+#[cfg(test)]
+pub(crate) use explicit::tests::recorded_gguf;
+pub use explicit::ExplicitEstimate;
+pub use load_settings::{LoadSettings, LOAD_KEYS};
+pub use loaded::{LoadedModel, ModelKind, ModelLease, UnloadError};
 
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+use apollia_core::EventBusSender;
 use config::{build_args, display_opt, env_getter, resolve_env_overrides};
+#[cfg(test)]
+use locate::env_or_store_binary;
+use locate::locate_for_launch;
 
 /// Errors from spawning or supervising the embedded `llama-server`.
 #[derive(Debug, Error)]
@@ -56,6 +84,10 @@ pub enum LlamaServerError {
     /// The process exited before it became healthy.
     #[error("llama-server exited during startup (status: {0})")]
     ExitedDuringStartup(String),
+
+    /// The load guardrail refused the model, and the user did not confirm.
+    #[error(transparent)]
+    GuardrailRefused(#[from] crate::local_engine::GuardrailRefusal),
 }
 
 /// One running `llama-server`, serving exactly one model.
@@ -68,15 +100,64 @@ struct Instance {
     /// instance's identity: a backend asking for another window for the same
     /// model needs another launch, not this process.
     n_ctx: u32,
+    /// Layers placed on the accelerator (`-ngl`), as planned at launch.
+    n_gpu_layers: i32,
+    /// Server slots (`-np`), `None` when the engine default was left alone.
+    n_parallel: Option<u32>,
+    /// Preset load settings the process was launched with. A request for the
+    /// same model under other settings relaunches it.
+    load: LoadSettings,
     port: u16,
     child: Child,
     /// Value of the supervisor's tick when this instance was last requested.
     /// Orders eviction; a wall clock would not, since two requests inside the
     /// same millisecond are common.
     last_used: u64,
+    /// Wall-clock time the process became healthy, for display only.
+    loaded_at: DateTime<Utc>,
+    /// Wall-clock time of the last request, for display only. Eviction reads
+    /// `last_used`, never this.
+    last_used_at: DateTime<Utc>,
+    /// Requests currently holding a [`ModelLease`] on this process. An unload
+    /// is refused while it is above zero.
+    in_flight: Arc<AtomicUsize>,
+    /// Whether the user loaded this process by hand, with settings for it
+    /// alone. Such a process serves every request for its model, whatever
+    /// window the request asks for (see `explicit`).
+    explicit: bool,
+    /// Footprint the load guardrail estimated at launch, in gigabytes; `None`
+    /// when it was not estimated.
+    footprint_gb: Option<f64>,
 }
 
 impl Instance {
+    /// A freshly healthy process launched with `config`, used once at `tick`,
+    /// serving no request yet.
+    fn new(
+        config: LlamaServerConfig,
+        load: LoadSettings,
+        port: u16,
+        child: Child,
+        tick: u64,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            model_path: config.model_path,
+            n_ctx: config.n_ctx,
+            n_gpu_layers: config.n_gpu_layers,
+            n_parallel: config.n_parallel,
+            load,
+            port,
+            child,
+            last_used: tick,
+            loaded_at: now,
+            last_used_at: now,
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            explicit: false,
+            footprint_gb: None,
+        }
+    }
+
     fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}/v1", self.port)
     }
@@ -87,37 +168,30 @@ impl Instance {
     }
 }
 
-/// Environment variable setting how many models stay resident at once.
+/// Environment variable setting an explicit ceiling on the resident models.
 const ENV_MAX_LOADED: &str = "APOLLIA_LLAMA_MAX_LOADED";
 
-/// Default number of resident models.
+/// Resolve [`ENV_MAX_LOADED`]: `None` when it is unset, so the load guardrail
+/// alone decides how many models stay resident.
 ///
-/// One, deliberately. Every additional resident model holds its weights in
-/// memory for as long as it stays loaded, and the right ceiling depends on the
-/// machine and on which models an installation actually alternates between.
-/// Auto-sizing it from total memory would silently commit gigabytes on the
-/// operator's behalf, so raising it is an explicit act.
-const DEFAULT_MAX_LOADED: usize = 1;
-
-/// Resolve [`ENV_MAX_LOADED`], floored at one.
-///
-/// A zero or unparseable value keeps the default rather than disabling local
-/// inference outright: a typo in an environment variable must not be the reason
-/// no model can load.
-fn resolve_max_loaded(get: impl Fn(&str) -> Option<String>) -> usize {
-    match get(ENV_MAX_LOADED) {
-        None => DEFAULT_MAX_LOADED,
-        Some(raw) => match raw.trim().parse::<usize>() {
-            Ok(n) if n >= 1 => n,
-            _ => {
-                tracing::warn!(
-                    var = ENV_MAX_LOADED,
-                    value = %raw,
-                    "llama.server.max_loaded.invalid"
-                );
-                DEFAULT_MAX_LOADED
-            }
-        },
+/// Every resident model holds its weights for as long as it stays loaded, so
+/// the guardrail weighs a new model with the resident ones added, and the
+/// residency rules give the memory of an unused model back. The variable is
+/// for an operator who wants a hard number on top. A zero or unparseable value
+/// is ignored rather than disabling local inference outright: a typo in an
+/// environment variable must not be the reason no model can load.
+fn resolve_max_loaded(get: impl Fn(&str) -> Option<String>) -> Option<usize> {
+    let raw = get(ENV_MAX_LOADED)?;
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n >= 1 => Some(n),
+        _ => {
+            tracing::warn!(
+                var = ENV_MAX_LOADED,
+                value = %raw,
+                "llama.server.max_loaded.invalid"
+            );
+            None
+        }
     }
 }
 
@@ -128,16 +202,20 @@ const HEALTH_TIMEOUT_SECS: u64 = 180;
 /// Interval between `/health` polls while waiting for startup.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// What a dead instance is owed: its model, window, load settings, and
+/// whether it was loaded by hand, so a respawn launches it as it was.
+type Owed = (String, u32, LoadSettings, bool);
+
 /// Interval between liveness checks of the running child.
 const SUPERVISION_POLL: Duration = Duration::from_secs(2);
 
 /// Supervisor that owns the embedded `llama-server` child processes.
 ///
-/// Holds up to [`ENV_MAX_LOADED`] models resident at once, evicting the least
-/// recently used beyond that. With the default of one this is the historical
-/// behaviour exactly: every model change stops the running process and starts
-/// another. Raising it trades memory for hand-off latency, which is the whole
-/// cost of a fleet of agents that do not share a model.
+/// Holds as many models resident as the load guardrail admits, the resident
+/// footprints counted, and up to [`ENV_MAX_LOADED`] when that ceiling is set,
+/// evicting the least recently used beyond it. A second resident model trades
+/// memory for hand-off latency, which is the whole cost of a fleet of agents
+/// that do not share a model.
 ///
 /// Cloneable state lives behind `Arc`; the supervisor itself is held behind an
 /// `Arc` by the runtime so the supervision task can respawn a dead child.
@@ -150,8 +228,9 @@ pub struct LlamaServerSupervisor {
     /// in the environment has said what they want, and it wins over what a
     /// backend asks for.
     n_ctx_pinned: bool,
-    /// How many models may stay resident simultaneously. At least one.
-    max_loaded: usize,
+    /// Explicit ceiling on the resident models, `None` when the load guardrail
+    /// alone decides. At least one when set.
+    max_loaded: Option<usize>,
     /// Launch configuration shared by every instance. Its `model_path` is a
     /// template slot: the real path is supplied per instance at spawn.
     config: Arc<Mutex<LlamaServerConfig>>,
@@ -164,6 +243,28 @@ pub struct LlamaServerSupervisor {
     respawn_lock: Arc<Mutex<()>>,
     /// Set during shutdown so the supervision task stops respawning.
     shutting_down: Arc<Mutex<bool>>,
+    /// `system.db`, where the default preset of each model is read at every
+    /// request. `None` launches every model without a preset.
+    system_db: Option<PathBuf>,
+    /// Where a relaunch under new load settings is announced.
+    events: Option<EventBusSender>,
+    /// The instance serving embeddings, outside the residency ceiling. See
+    /// [`embeddings`].
+    embedding: Mutex<Option<embeddings::EmbeddingInstance>>,
+    /// `apollia.toml`, whose `[llm.guardrails]` is read at every launch.
+    /// `None` holds every launch to the default level.
+    config_file: Option<PathBuf>,
+    /// The leases and pins that keep a model loaded, shared with the other
+    /// engine. Unset, every resident model may be unloaded to make room.
+    residency: std::sync::OnceLock<Arc<crate::residency::Residency>>,
+    /// The guardrail settings the organisation policy fixes, over the file.
+    imposed: apollia_core::config::PolicySettings,
+    /// The window each model gets from the default of the settings, kept so a
+    /// request to a resident model does not probe its file again.
+    sized_windows: Arc<crate::local_engine::context_default::SizedWindows>,
+    /// Where each line the processes print goes besides tracing: the logs of
+    /// the compatible server, once it is started.
+    line_sink: OnceLock<crate::compat_server::ServerLogsHandle>,
 }
 
 impl LlamaServerSupervisor {
@@ -175,8 +276,15 @@ impl LlamaServerSupervisor {
     /// [`ensure_model`](Self::ensure_model), so a fresh install with no model yet
     /// still yields a usable supervisor that the router factory can capture.
     /// Call [`spawn_supervision`](Self::spawn_supervision) to enable auto-respawn.
-    pub fn new(config: LlamaServerConfig) -> Result<Arc<Self>, LlamaServerError> {
-        let bin_path = locate_llama_server_binary()?;
+    pub fn new(
+        config: LlamaServerConfig,
+        system_db: Option<PathBuf>,
+        events: Option<EventBusSender>,
+        config_file: Option<PathBuf>,
+        imposed: apollia_core::config::PolicySettings,
+    ) -> Result<Arc<Self>, LlamaServerError> {
+        let choices = crate::engine_store::EngineChoices::read(config_file.as_deref(), &imposed);
+        let bin_path = locate_for_launch(choices.gguf)?;
         // The reported window must be the one the server will actually launch
         // with, otherwise an `APOLLIA_LLAMA_N_CTX` override would leave the
         // router sizing compaction against a value no process ever used. The
@@ -185,6 +293,9 @@ impl LlamaServerSupervisor {
         let n_ctx = resolve_env_overrides(&config, env_getter).n_ctx;
         let max_loaded = resolve_max_loaded(env_getter);
         let n_ctx_pinned = env_getter(config::ENV_N_CTX).is_some();
+        // The devices held back count in every estimate from the first one,
+        // before any model is loaded.
+        devices::sync_selection(config_file.as_deref(), &imposed);
         Ok(Arc::new(Self {
             bin_path,
             n_ctx,
@@ -195,6 +306,14 @@ impl LlamaServerSupervisor {
             tick: Arc::new(AtomicU64::new(0)),
             respawn_lock: Arc::new(Mutex::new(())),
             shutting_down: Arc::new(Mutex::new(false)),
+            system_db,
+            events,
+            embedding: Mutex::new(None),
+            config_file,
+            residency: std::sync::OnceLock::new(),
+            imposed,
+            sized_windows: Arc::default(),
+            line_sink: OnceLock::new(),
         }))
     }
 
@@ -203,77 +322,59 @@ impl LlamaServerSupervisor {
         self.n_ctx
     }
 
-    /// The window a backend asking for `requested` is actually launched with.
-    ///
-    /// The backend's own `context_window` (chosen at onboarding or in the
-    /// settings) wins over the default; `APOLLIA_LLAMA_N_CTX` wins over both.
-    /// Reported to the router by the backend, so compaction and the context
-    /// gauge are sized against the window the process really has.
+    /// The window a launch asking for `requested` gets, `model_default` being
+    /// what the model receives when nothing asks: `APOLLIA_LLAMA_N_CTX` wins
+    /// over both. A preset's window comes in as `requested`, see `window_for`.
     #[must_use]
-    pub fn effective_n_ctx(&self, requested: Option<u32>) -> u32 {
-        if self.n_ctx_pinned {
-            return self.n_ctx;
-        }
-        requested.filter(|n| *n > 0).unwrap_or(self.n_ctx)
+    fn effective_n_ctx(&self, requested: Option<u32>, model_default: u32) -> u32 {
+        crate::local_engine::context_default::resolve(
+            self.n_ctx_pinned.then_some(self.n_ctx),
+            requested,
+            model_default,
+        )
     }
 
-    /// Number of models kept resident at once.
-    pub fn max_loaded(&self) -> usize {
+    /// The explicit ceiling on resident models, `None` when the load
+    /// guardrail alone decides.
+    pub fn max_loaded(&self) -> Option<usize> {
         self.max_loaded
     }
 
-    /// Make `model_path` servable and return the base URL that serves it.
-    ///
-    /// Returns immediately when that model already has a live process, which is
-    /// what makes a second resident model worth having: the hand-off between two
-    /// agents on two models costs a lookup rather than a reload. Otherwise a
-    /// process is started, evicting the least recently used one first when the
-    /// residency ceiling is reached.
-    ///
-    /// The URL is returned rather than read back through a separate accessor:
-    /// with several instances alive, "the current one" is not a well-defined
-    /// question, and a caller that asked for a specific model must not receive
-    /// another one's port.
-    ///
-    /// # Errors
-    ///
-    /// [`LlamaServerError`] when the process cannot be spawned or never becomes
-    /// healthy.
-    pub async fn ensure_model(
+    /// Return a lease on a live instance for `model_path`, marking it as just
+    /// used. Drops an instance whose process has died, so the caller respawns
+    /// instead of handing out a dead port.
+    async fn touch_live_instance(
         &self,
-        model_path: String,
-        n_ctx: Option<u32>,
-    ) -> Result<String, LlamaServerError> {
-        let n_ctx = self.effective_n_ctx(n_ctx);
-        let _guard = self.respawn_lock.lock().await;
-        if let Some(url) = self.touch_live_instance(&model_path, n_ctx).await {
-            return Ok(url);
-        }
-        self.evict_until_below_ceiling().await;
-        self.spawn_instance(model_path, n_ctx).await
-    }
-
-    /// Return the base URL of a live instance for `model_path`, marking it as
-    /// just used. Drops an instance whose process has died, so the caller
-    /// respawns instead of handing out a dead port.
-    async fn touch_live_instance(&self, model_path: &str, n_ctx: u32) -> Option<String> {
+        model_path: &str,
+        n_ctx: u32,
+        load: &LoadSettings,
+    ) -> Option<ModelLease> {
         let mut instances = self.instances.lock().await;
         let idx = instances
             .iter()
-            .position(|i| i.model_path == model_path && i.n_ctx == n_ctx)?;
+            .position(|i| i.model_path == model_path && i.n_ctx == n_ctx && &i.load == load)?;
         if !instances[idx].is_running() {
             let dead = instances.remove(idx);
             tracing::warn!(model = %dead.model_path, port = dead.port, "llama.server.instance.dead");
             return None;
         }
         instances[idx].last_used = self.next_tick();
-        Some(instances[idx].base_url())
+        instances[idx].last_used_at = Utc::now();
+        Some(ModelLease::new(
+            instances[idx].base_url(),
+            instances[idx].n_ctx,
+            Arc::clone(&instances[idx].in_flight),
+        ))
     }
 
-    /// Stop least-recently-used instances until one more fits under the ceiling.
+    /// Stop least-recently-used instances until one more fits under the
+    /// explicit ceiling, when one is set.
     async fn evict_until_below_ceiling(&self) {
+        let Some(max_loaded) = self.max_loaded else {
+            return;
+        };
         let mut instances = self.instances.lock().await;
-        while instances.len() >= self.max_loaded {
+        while instances.len() >= max_loaded {
             let Some(idx) = instances
                 .iter()
                 .enumerate()
@@ -312,26 +413,27 @@ impl LlamaServerSupervisor {
             // not succeeded yet. Carried across iterations so a failure is
             // retried under backoff instead of being forgotten, which is what
             // keeps an endpoint alive between two requests.
-            let mut owed: Vec<(String, u32)> = Vec::new();
+            let mut owed: Vec<Owed> = Vec::new();
 
             loop {
                 if *self.shutting_down.lock().await {
                     return;
                 }
+                self.stop_idle_embedding(std::time::Instant::now()).await;
 
                 // An instance is only listed once it has existed, so a fresh
                 // install with no model yet has nothing to supervise and never
                 // launches llama-server without a `-m`. An evicted model is
                 // absent from this list on purpose: it was stopped deliberately
                 // and must not come back on its own.
-                for (model_path, n_ctx, reason) in self.take_dead_instances().await {
+                for (entry, reason) in self.take_dead_instances().await {
                     tracing::error!(
-                        model = %model_path,
+                        model = %entry.0,
                         reason = %reason,
                         "llama.server.exited"
                     );
-                    if !owed.contains(&(model_path.clone(), n_ctx)) {
-                        owed.push((model_path, n_ctx));
+                    if !owed.contains(&entry) {
+                        owed.push(entry);
                     }
                 }
 
@@ -349,13 +451,20 @@ impl LlamaServerSupervisor {
                 // Serialise with ensure_model so two spawns never race.
                 let _guard = self.respawn_lock.lock().await;
                 let mut still_owed = Vec::new();
-                for (model_path, n_ctx) in owed.drain(..) {
+                for (model_path, n_ctx, load, explicit) in owed.drain(..) {
                     // A caller may have re-requested this model while we waited
                     // for the lock, in which case it is live again.
-                    if self.touch_live_instance(&model_path, n_ctx).await.is_some() {
+                    if self
+                        .touch_live_instance(&model_path, n_ctx, &load)
+                        .await
+                        .is_some()
+                    {
                         continue;
                     }
-                    match self.spawn_instance(model_path.clone(), n_ctx).await {
+                    match self
+                        .spawn_instance(model_path.clone(), n_ctx, load.clone(), explicit)
+                        .await
+                    {
                         Ok(_) => tracing::info!(model = %model_path, "llama.server.respawned"),
                         Err(e) => {
                             tracing::error!(
@@ -363,7 +472,7 @@ impl LlamaServerSupervisor {
                                 error = %e,
                                 "llama.server.respawn.failed"
                             );
-                            still_owed.push((model_path, n_ctx));
+                            still_owed.push((model_path, n_ctx, load, explicit));
                         }
                     }
                 }
@@ -387,12 +496,20 @@ impl LlamaServerSupervisor {
             bin_path: PathBuf::from("/nonexistent/llama-server"),
             n_ctx: 32_768,
             n_ctx_pinned: false,
-            max_loaded: 1,
+            max_loaded: Some(1),
             config: Arc::new(Mutex::new(LlamaServerConfig::default())),
             instances: Arc::new(Mutex::new(Vec::new())),
             tick: Arc::new(AtomicU64::new(0)),
             respawn_lock: Arc::new(Mutex::new(())),
             shutting_down: Arc::new(Mutex::new(false)),
+            system_db: None,
+            events: None,
+            embedding: Mutex::new(None),
+            config_file: None,
+            residency: std::sync::OnceLock::new(),
+            imposed: apollia_core::config::PolicySettings::none(),
+            sized_windows: Arc::default(),
+            line_sink: OnceLock::new(),
         }
     }
 
@@ -412,12 +529,20 @@ impl LlamaServerSupervisor {
             bin_path: std::path::PathBuf::from("/nonexistent/llama-server"),
             n_ctx: 32_768,
             n_ctx_pinned: false,
-            max_loaded: 1,
+            max_loaded: Some(1),
             config: Arc::new(Mutex::new(LlamaServerConfig::default())),
             instances: Arc::new(Mutex::new(Vec::new())),
             tick: Arc::new(AtomicU64::new(0)),
             respawn_lock: Arc::new(Mutex::new(())),
             shutting_down: Arc::new(Mutex::new(false)),
+            system_db: None,
+            events: None,
+            embedding: Mutex::new(None),
+            config_file: None,
+            residency: std::sync::OnceLock::new(),
+            imposed: apollia_core::config::PolicySettings::none(),
+            sized_windows: Arc::default(),
+            line_sink: OnceLock::new(),
         })
     }
 
@@ -429,31 +554,31 @@ impl LlamaServerSupervisor {
             let _ = instance.child.kill().await;
             let _ = instance.child.wait().await;
         }
+        if let Some(mut resident) = self.embedding.lock().await.take() {
+            let _ = resident.instance.child.kill().await;
+            let _ = resident.instance.child.wait().await;
+        }
     }
 
     /// Remove every instance whose process has exited, returning what they were
     /// serving and why they are gone, so the caller can respawn them.
-    async fn take_dead_instances(&self) -> Vec<(String, u32, String)> {
+    async fn take_dead_instances(&self) -> Vec<(Owed, String)> {
         let mut instances = self.instances.lock().await;
         let mut dead = Vec::new();
-        instances.retain_mut(|instance| match instance.child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(status)) => {
-                dead.push((
-                    instance.model_path.clone(),
-                    instance.n_ctx,
-                    status.to_string(),
-                ));
-                false
-            }
-            Err(e) => {
-                dead.push((
-                    instance.model_path.clone(),
-                    instance.n_ctx,
-                    format!("try_wait failed: {e}"),
-                ));
-                false
-            }
+        instances.retain_mut(|instance| {
+            let reason = match instance.child.try_wait() {
+                Ok(None) => return true,
+                Ok(Some(status)) => status.to_string(),
+                Err(e) => format!("try_wait failed: {e}"),
+            };
+            let owed = (
+                instance.model_path.clone(),
+                instance.n_ctx,
+                instance.load.clone(),
+                instance.explicit,
+            );
+            dead.push((owed, reason));
+            false
         });
         dead
     }
@@ -462,34 +587,43 @@ impl LlamaServerSupervisor {
     ///
     /// Picks a free loopback port, resolves the `APOLLIA_LLAMA_` overrides onto
     /// the stored configuration, launches, drains the logs into tracing, and
-    /// polls `/health`. Returns the base URL that serves the model.
+    /// polls `/health`. Returns a lease on the process that serves the model.
     async fn spawn_instance(
         &self,
         model_path: String,
         n_ctx: u32,
-    ) -> Result<String, LlamaServerError> {
-        let mut config = resolve_env_overrides(&*self.config.lock().await, env_getter);
-        config.model_path = model_path;
-        // Already resolved by `effective_n_ctx`: the environment, then the
-        // backend's own window, then the default.
-        config.n_ctx = n_ctx;
+        load: LoadSettings,
+        explicit: bool,
+    ) -> Result<ModelLease, LlamaServerError> {
+        let config = self.launch_config(model_path, n_ctx, &load).await;
+        self.spawn_configured(config, load, explicit, None).await
+    }
 
-        // The count is planned from the model and the machine on a discrete
-        // accelerator; see `ngl` for why the literal 999 was wrong there.
-        ngl::apply_offload_plan(&mut config);
-
+    /// Launch `llama-server` with `config`, already composed by
+    /// [`Self::launch_config`], and wait until it is healthy. `explicit` says
+    /// whether the user loaded it by hand, `footprint_gb` what the guardrail
+    /// estimated it holds.
+    async fn spawn_configured(
+        &self,
+        config: LlamaServerConfig,
+        load: LoadSettings,
+        explicit: bool,
+        footprint_gb: Option<f64>,
+    ) -> Result<ModelLease, LlamaServerError> {
         let port = pick_free_port()?;
         let args = build_args(&config, port);
 
         tracing::info!(
             binary = %self.bin_path.display(),
             model = %config.model_path,
+            mmproj = %display_opt(config.mmproj_path.as_ref()),
             port,
             n_ctx = config.n_ctx,
             n_gpu_layers = config.n_gpu_layers,
             n_batch = %display_opt(config.n_batch.as_ref()),
             n_ubatch = %display_opt(config.n_ubatch.as_ref()),
             n_parallel = %display_opt(config.n_parallel.as_ref()),
+            kv_unified = config.kv_unified,
             cont_batching = %display_opt(config.cont_batching.as_ref()),
             cache_type_k = %display_opt(config.cache_type_k.as_ref()),
             cache_type_v = %display_opt(config.cache_type_v.as_ref()),
@@ -507,11 +641,13 @@ impl LlamaServerSupervisor {
         // vector reveals that.
         crate::perf_trace::set_launch_config(serde_json::json!({
             "model_path": config.model_path,
+            "mmproj_path": config.mmproj_path,
             "n_ctx": config.n_ctx,
             "n_gpu_layers": config.n_gpu_layers,
             "n_batch": config.n_batch,
             "n_ubatch": config.n_ubatch,
             "n_parallel": config.n_parallel,
+            "kv_unified": config.kv_unified,
             "cont_batching": config.cont_batching,
             "cache_type_k": config.cache_type_k,
             "cache_type_v": config.cache_type_v,
@@ -523,13 +659,51 @@ impl LlamaServerSupervisor {
             "llama_server_path": self.bin_path.display().to_string(),
         }));
 
+        self.announce_loading(&config.model_path);
+        let child = match self.start_and_wait(&args, port).await {
+            Ok(child) => child,
+            Err(error) => {
+                self.announce_failed(&config.model_path, &error);
+                return Err(error);
+            }
+        };
+        self.announce_ready(&config.model_path);
+
+        let mut instance = Instance::new(config, load, port, child, self.next_tick());
+        instance.explicit = explicit;
+        instance.footprint_gb = footprint_gb;
+        let lease = ModelLease::new(
+            instance.base_url(),
+            instance.n_ctx,
+            Arc::clone(&instance.in_flight),
+        );
+        tracing::info!(port, model = %instance.model_path, "llama.server.healthy");
+        self.instances.lock().await.push(instance);
+        Ok(lease)
+    }
+
+    /// Start the binary with `args` and wait until it answers on `port`.
+    async fn start_and_wait(&self, args: &[String], port: u16) -> Result<Child, LlamaServerError> {
+        let mut child = self.spawn_child(args)?;
+        self.wait_until_healthy(&mut child, port).await?;
+        Ok(child)
+    }
+
+    /// Sends every line a process launched from now on prints to `logs` as
+    /// well as to tracing. Only the first call counts.
+    pub fn send_lines_to(&self, logs: crate::compat_server::ServerLogsHandle) {
+        let _ = self.line_sink.set(logs);
+    }
+
+    /// Launch the binary with `args`, its output drained into tracing.
+    fn spawn_child(&self, args: &[String]) -> Result<Child, LlamaServerError> {
         let mut server_cmd = Command::new(&self.bin_path);
         // Same reason as the runner: a console-subsystem child of a GUI parent
         // gets its own terminal window on Windows, one per resident model, and
         // the supervision loop below reopens it on every respawn.
         apollia_core::subprocess_window::hide_console_async(&mut server_cmd);
         let mut child = server_cmd
-            .args(&args)
+            .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -538,29 +712,23 @@ impl LlamaServerSupervisor {
                 tracing::error!(error = %e, "llama.server.spawn.failed");
                 LlamaServerError::Io(e)
             })?;
+        crate::engine_pids::record(child.id());
 
         // Drain the child's pipes into tracing so a load failure is visible and
         // the OS pipe buffer never fills (which would stall the load).
         if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(drain_pipe(BufReader::new(stdout)));
+            tokio::spawn(drain_pipe(
+                BufReader::new(stdout),
+                self.line_sink.get().cloned(),
+            ));
         }
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(drain_pipe(BufReader::new(stderr)));
+            tokio::spawn(drain_pipe(
+                BufReader::new(stderr),
+                self.line_sink.get().cloned(),
+            ));
         }
-
-        self.wait_until_healthy(&mut child, port).await?;
-
-        let instance = Instance {
-            model_path: config.model_path,
-            n_ctx: config.n_ctx,
-            port,
-            child,
-            last_used: self.next_tick(),
-        };
-        let url = instance.base_url();
-        tracing::info!(port, model = %instance.model_path, "llama.server.healthy");
-        self.instances.lock().await.push(instance);
-        Ok(url)
+        Ok(child)
     }
 
     /// Poll `GET /health` until the server answers or the deadline elapses,
@@ -604,105 +772,22 @@ impl LlamaServerSupervisor {
 /// A brief window exists between release and `llama-server` binding the port; on
 /// loopback with an ephemeral port the collision risk is negligible, and a
 /// failed bind surfaces as a startup exit that the supervisor respawns.
-fn pick_free_port() -> Result<u16, LlamaServerError> {
+pub(crate) fn pick_free_port() -> Result<u16, LlamaServerError> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     Ok(port)
 }
 
-/// Locate the bundled `llama-server` binary, falling back to `PATH` in dev.
-///
-/// Resolution order: the `APOLLIA_LLAMA_SERVER_BIN` override, then the bundle
-/// layouts (next to the executable, a `runners/` sibling, the macOS
-/// `Contents/Resources/runners/`, and the Linux product directory), then
-/// the ambient `PATH`, then the common install dirs. The override lets a
-/// developer whose `llama-server` lives in a non-standard directory (a llama.cpp
-/// build tree) point the app at it, which a GUI launch cannot reach via `PATH`.
-fn locate_llama_server_binary() -> Result<PathBuf, LlamaServerError> {
-    let ext = if cfg!(windows) { ".exe" } else { "" };
-    let name = format!("llama-server{ext}");
-
-    // Explicit override wins: `APOLLIA_LLAMA_SERVER_BIN=/path/to/llama-server`.
-    if let Some(bin) = std::env::var_os("APOLLIA_LLAMA_SERVER_BIN") {
-        let path = PathBuf::from(bin);
-        if path.is_file() {
-            tracing::info!(path = %path.display(), "llama.server.binary.from_env");
-            return Ok(path);
-        }
-        tracing::warn!(
-            path = %path.display(),
-            detail = "falling back to auto-detection", "llama.server.binary.env_invalid"
-        );
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let mut candidates = vec![dir.join(&name)];
-            candidates.extend(
-                apollia_core::paths::bundled_resource_dirs(dir, "runners")
-                    .into_iter()
-                    .map(|d| d.join(&name)),
-            );
-            if let Some(found) = candidates.iter().find(|c| c.exists()) {
-                return Ok(found.clone());
-            }
-        }
-    }
-
-    if let Ok(path) = which_on_path(&name) {
-        tracing::warn!(
-            path = %path.display(),
-            detail = "bundled binary absent, dev fallback", "llama.server.binary.path_fallback"
-        );
-        return Ok(path);
-    }
-
-    // A GUI launch (Finder / .desktop) inherits a minimal PATH that omits the
-    // usual install dirs, so a developer's system llama-server is invisible to
-    // `which_on_path`. Probe the common locations explicitly as a last resort.
-    let home = apollia_core::paths::home_string().unwrap_or_default();
-    let common = [
-        format!("/opt/homebrew/bin/{name}"),
-        format!("/usr/local/bin/{name}"),
-        format!("/usr/bin/{name}"),
-        format!("{home}/.local/bin/{name}"),
-        format!("{home}/.cargo/bin/{name}"),
-    ];
-    if let Some(found) = common.iter().map(PathBuf::from).find(|c| c.is_file()) {
-        tracing::warn!(
-            path = %found.display(),
-            detail = "bundled binary absent, dev fallback", "llama.server.binary.system_fallback"
-        );
-        return Ok(found);
-    }
-
-    Err(LlamaServerError::BinaryNotFound(format!(
-        "{name} not found next to the executable, in a bundled runners/ dir, on PATH, \
-         or in the common install directories"
-    )))
-}
-
-/// Minimal `PATH` lookup, avoiding a dependency on an external `which` crate.
-fn which_on_path(name: &str) -> Result<PathBuf, LlamaServerError> {
-    let path_var = std::env::var_os("PATH")
-        .ok_or_else(|| LlamaServerError::BinaryNotFound("PATH is unset".to_owned()))?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(LlamaServerError::BinaryNotFound(format!(
-        "{name} not on PATH"
-    )))
-}
-
-/// Forward a child pipe line-by-line into the daemon's tracing log.
+/// Forward a child pipe line-by-line into the daemon's tracing log, and into
+/// `sink`, the logs of the compatible server, when there is one.
 ///
 /// Uses lossy UTF-8 decoding and never stops on a decode error (llama.cpp can
 /// emit non-UTF-8 bytes): a stalled drain would fill the OS pipe buffer and
 /// block the server. Stops only on EOF or a read error (process gone).
-async fn drain_pipe<R: AsyncBufRead + Unpin>(mut reader: R) {
+pub(crate) async fn drain_pipe<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+    sink: Option<crate::compat_server::ServerLogsHandle>,
+) {
     let mut buf = Vec::with_capacity(256);
     loop {
         buf.clear();
@@ -712,6 +797,9 @@ async fn drain_pipe<R: AsyncBufRead + Unpin>(mut reader: R) {
                 let line = String::from_utf8_lossy(&buf);
                 let line = line.trim_end_matches(['\r', '\n']);
                 tracing::info!(target: "llama-server", line = %line, "llama.server.line");
+                if let Some(sink) = &sink {
+                    sink.engine_line(line);
+                }
                 // The placement facts are the lines an operator needs when the
                 // default filter drops the target above: where the model
                 // loaded, and how much of it.
@@ -723,52 +811,162 @@ async fn drain_pipe<R: AsyncBufRead + Unpin>(mut reader: R) {
     }
 }
 
+/// Fixtures shared by the supervisor's test modules.
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod locate_tests;
+
+#[cfg(test)]
+mod test_support {
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    use tokio::process::Command;
+    use tokio::sync::Mutex;
+
+    use super::{Instance, LlamaServerConfig, LlamaServerSupervisor, ModelLease};
 
     /// Build a supervisor without touching the filesystem or spawning anything.
     ///
     /// `LlamaServerSupervisor::new` locates the binary, which is absent on a CI
     /// runner; these tests exercise the residency bookkeeping, not the process
     /// lifecycle, so the struct is assembled directly.
-    fn supervisor_with_ceiling(max_loaded: usize) -> LlamaServerSupervisor {
+    pub(super) fn supervisor_with_ceiling(max_loaded: usize) -> LlamaServerSupervisor {
         LlamaServerSupervisor {
             bin_path: PathBuf::from("/nonexistent/llama-server"),
             n_ctx: 32_768,
             n_ctx_pinned: false,
-            max_loaded,
+            max_loaded: Some(max_loaded),
             config: Arc::new(Mutex::new(LlamaServerConfig::default())),
             instances: Arc::new(Mutex::new(Vec::new())),
             tick: Arc::new(AtomicU64::new(0)),
             respawn_lock: Arc::new(Mutex::new(())),
             shutting_down: Arc::new(Mutex::new(false)),
+            system_db: None,
+            events: None,
+            embedding: Mutex::new(None),
+            config_file: None,
+            residency: std::sync::OnceLock::new(),
+            imposed: apollia_core::config::PolicySettings::none(),
+            sized_windows: Arc::default(),
+            line_sink: std::sync::OnceLock::new(),
         }
     }
 
-    /// A instance backed by a long-lived child, so liveness checks see it alive.
-    async fn live_instance(sup: &LlamaServerSupervisor, model: &str, port: u16) -> Instance {
+    /// An instance backed by a long-lived child, so liveness checks see it alive.
+    pub(super) async fn live_instance(
+        sup: &LlamaServerSupervisor,
+        model: &str,
+        port: u16,
+    ) -> Instance {
         let child = Command::new("sleep")
             .arg("60")
             .kill_on_drop(true)
             .spawn()
             .expect("spawning sleep must succeed");
-        Instance {
+        let config = LlamaServerConfig {
             model_path: model.to_owned(),
             n_ctx: sup.n_ctx(),
+            n_gpu_layers: 99,
+            n_parallel: Some(1),
+            ..LlamaServerConfig::default()
+        };
+        Instance::new(
+            config,
+            super::LoadSettings::default(),
             port,
             child,
-            last_used: sup.next_tick(),
+            sup.next_tick(),
+        )
+    }
+
+    impl LlamaServerSupervisor {
+        /// A supervisor whose resident models are stand-in processes, one per
+        /// path, for tests outside this module that need a populated pool.
+        pub(crate) async fn with_stand_in_models(models: &[&str]) -> Arc<Self> {
+            let sup = supervisor_with_ceiling(models.len().max(1));
+            for (offset, model) in (0_u16..).zip(models) {
+                let instance = live_instance(&sup, model, 9001 + offset).await;
+                sup.instances.lock().await.push(instance);
+            }
+            Arc::new(sup)
+        }
+
+        /// A supervisor holding one stand-in chat model, `model`, listed on
+        /// `port`, for tests that put a listener of their own behind it.
+        pub(crate) async fn with_stand_in_on_port(model: &str, port: u16) -> Arc<Self> {
+            let sup = supervisor_with_ceiling(1);
+            let instance = live_instance(&sup, model, port).await;
+            sup.instances.lock().await.push(instance);
+            Arc::new(sup)
+        }
+
+        /// A supervisor launching `bin` as its engine, under a ceiling of
+        /// `max_loaded`, holding the stand-in chat models `models`.
+        pub(crate) async fn with_binary_for_test(
+            bin: PathBuf,
+            max_loaded: usize,
+            models: &[&str],
+        ) -> Arc<Self> {
+            let mut sup = supervisor_with_ceiling(max_loaded);
+            sup.bin_path = bin;
+            for (offset, model) in (0_u16..).zip(models) {
+                let instance = live_instance(&sup, model, 9001 + offset).await;
+                sup.instances.lock().await.push(instance);
+            }
+            Arc::new(sup)
+        }
+
+        /// A supervisor launching `bin`, reading the presets of the
+        /// `system.db` and the guardrail of the `apollia.toml` in `dir`, with
+        /// nothing resident, for the route tests that load by hand.
+        pub(crate) fn with_engine_in_dir_for_test(
+            bin: PathBuf,
+            dir: &std::path::Path,
+        ) -> Arc<Self> {
+            let mut sup = supervisor_with_ceiling(1);
+            sup.bin_path = bin;
+            sup.system_db = Some(dir.join("system.db"));
+            sup.config_file = Some(dir.join("apollia.toml"));
+            Arc::new(sup)
+        }
+
+        /// The same as [`Self::with_engine_in_dir_for_test`], without a
+        /// fixed ceiling: the load guardrail alone decides how many stay.
+        pub(crate) fn with_uncapped_engine_in_dir_for_test(
+            bin: PathBuf,
+            dir: &std::path::Path,
+        ) -> Arc<Self> {
+            let mut sup = supervisor_with_ceiling(1);
+            sup.max_loaded = None;
+            sup.bin_path = bin;
+            sup.system_db = Some(dir.join("system.db"));
+            sup.config_file = Some(dir.join("apollia.toml"));
+            Arc::new(sup)
+        }
+
+        /// Take a lease on a resident model the way a request does, without the
+        /// spawn path `ensure_model` would fall back to.
+        pub(crate) async fn lease_for_test(&self, model_path: &str) -> Option<ModelLease> {
+            self.touch_live_instance(model_path, self.n_ctx(), &super::LoadSettings::default())
+                .await
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use super::test_support::{live_instance, supervisor_with_ceiling};
 
     // GIVEN no environment override
     // WHEN the residency ceiling is resolved
-    // THEN exactly one model stays resident, which is the historical behaviour:
-    //      raising memory use must never be a side effect of an upgrade
+    // THEN there is none: the load guardrail alone decides how many models
+    //      stay resident
     #[test]
-    fn test_residency_defaults_to_a_single_model() {
-        assert_eq!(resolve_max_loaded(|_| None), 1);
+    fn test_residency_has_no_fixed_ceiling_by_default() {
+        assert_eq!(resolve_max_loaded(|_| None), None);
     }
 
     // GIVEN an explicit ceiling
@@ -776,19 +974,19 @@ mod tests {
     // THEN it is honoured verbatim
     #[test]
     fn test_residency_honours_an_explicit_ceiling() {
-        assert_eq!(resolve_max_loaded(|_| Some("3".to_owned())), 3);
-        assert_eq!(resolve_max_loaded(|_| Some(" 2 ".to_owned())), 2);
+        assert_eq!(resolve_max_loaded(|_| Some("3".to_owned())), Some(3));
+        assert_eq!(resolve_max_loaded(|_| Some(" 2 ".to_owned())), Some(2));
     }
 
     // GIVEN a value that is zero or unparseable
     // WHEN it is resolved
-    // THEN the default holds, because a typo must not be the reason no model
-    //      can load at all
+    // THEN it is ignored, because a typo must not be the reason no model can
+    //      load at all
     #[test]
     fn test_residency_rejects_zero_and_garbage_without_disabling_inference() {
-        assert_eq!(resolve_max_loaded(|_| Some("0".to_owned())), 1);
-        assert_eq!(resolve_max_loaded(|_| Some("many".to_owned())), 1);
-        assert_eq!(resolve_max_loaded(|_| Some(String::new())), 1);
+        assert_eq!(resolve_max_loaded(|_| Some("0".to_owned())), None);
+        assert_eq!(resolve_max_loaded(|_| Some("many".to_owned())), None);
+        assert_eq!(resolve_max_loaded(|_| Some(String::new())), None);
     }
 
     // GIVEN a live instance for a model
@@ -801,9 +999,14 @@ mod tests {
         let instance = live_instance(&sup, "/models/a.gguf", 9001).await;
         sup.instances.lock().await.push(instance);
 
-        let url = sup.touch_live_instance("/models/a.gguf", sup.n_ctx()).await;
+        let lease = sup
+            .touch_live_instance("/models/a.gguf", sup.n_ctx(), &LoadSettings::default())
+            .await;
 
-        assert_eq!(url.as_deref(), Some("http://127.0.0.1:9001/v1"));
+        assert_eq!(
+            lease.as_ref().map(ModelLease::base_url),
+            Some("http://127.0.0.1:9001/v1")
+        );
         assert_eq!(sup.instances.lock().await.len(), 1);
     }
 
@@ -819,7 +1022,8 @@ mod tests {
         sup.instances.lock().await.push(a);
         sup.instances.lock().await.push(b);
         // Re-request A, making B the least recently used.
-        sup.touch_live_instance("/models/a.gguf", sup.n_ctx()).await;
+        sup.touch_live_instance("/models/a.gguf", sup.n_ctx(), &LoadSettings::default())
+            .await;
 
         sup.evict_until_below_ceiling().await;
 
@@ -855,9 +1059,11 @@ mod tests {
         instance.child.wait().await.expect("wait must succeed");
         sup.instances.lock().await.push(instance);
 
-        let url = sup.touch_live_instance("/models/a.gguf", sup.n_ctx()).await;
+        let lease = sup
+            .touch_live_instance("/models/a.gguf", sup.n_ctx(), &LoadSettings::default())
+            .await;
 
-        assert!(url.is_none());
+        assert!(lease.is_none());
         assert!(sup.instances.lock().await.is_empty());
     }
 
@@ -878,7 +1084,7 @@ mod tests {
         let collected = sup.take_dead_instances().await;
 
         assert_eq!(collected.len(), 1);
-        assert_eq!(collected[0].0, "/models/dead.gguf");
+        assert_eq!(collected[0].0 .0, "/models/dead.gguf");
         let instances = sup.instances.lock().await;
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].model_path, "/models/live.gguf");

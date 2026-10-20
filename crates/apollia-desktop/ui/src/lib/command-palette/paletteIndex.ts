@@ -3,14 +3,14 @@
  *
  * Builds the groups that feed the `<CommandPalette>` component:
  *   - Recently used  (MRU, when the input is empty)
- *   - Pages          (navigation routes, persona-filtered)
- *   - Actions        (commands that do something, persona-filtered)
+ *   - Pages          (navigation routes, filtered by the developer mode)
+ *   - Actions        (commands that do something, filtered by the developer mode)
  *   - Sessions       (10 most recent chats)
  *   - Settings       (9 sub-routes under /settings)
  *   - Help           (shortcuts, about, docs, onboarding reset, quit)
  *
  * The result is a derived `paletteGroups` store, re-computed whenever
- * the underlying sources (actions, sessions, recency, persona) change.
+ * the underlying sources (actions, sessions, recency, developer mode) change.
  */
 import { derived, writable, type Readable } from "svelte/store";
 import { t } from "svelte-i18n";
@@ -18,16 +18,18 @@ import { get } from "svelte/store";
 import { MessageSquare, Settings as SettingsIcon } from "lucide-svelte";
 import type { CommandPaletteGroup } from "$lib/components/ui/command";
 import { commands, type CommandItem } from "$lib/stores/commandPalette";
-import { uiMode, type UIMode } from "$lib/stores/mode";
+import { developerMode } from "$lib/stores/developerMode";
 import { recentActionIds, touchRecentAction } from "$lib/stores/recentActionsStore";
 import { recentSessions, touchRecentSession } from "$lib/stores/recentSessionsStore";
 import { navigateTo } from "$lib/stores/navigation";
 import { pendingChatSessionId } from "$lib/stores/chat";
 import {
   SETTINGS_SUB_ROUTES,
-  goToSettingsSubRoute,
+  settingsSubRouteVisible,
   type SettingsSubRoute,
 } from "$lib/stores/settings";
+import { navigateToSettings } from "$lib/router";
+import { settingsSubRouteLabelKey } from "$lib/navigation/breadcrumbSegments";
 import type { PaletteAction } from "./actions";
 
 const _actions = writable<PaletteAction[]>([]);
@@ -46,7 +48,7 @@ function tr(key: string): string {
 }
 
 function settingsSubRouteLabel(route: SettingsSubRoute): string {
-  return tr(`settings.nav.${route}`);
+  return tr(settingsSubRouteLabelKey(route));
 }
 
 function actionToCommandItem(action: PaletteAction, group: string): CommandItem {
@@ -65,8 +67,12 @@ function actionToCommandItem(action: PaletteAction, group: string): CommandItem 
   };
 }
 
-function filterByPersona<T extends { persona?: UIMode }>(list: T[], mode: UIMode): T[] {
-  return list.filter((x) => !x.persona || x.persona === mode);
+/** Drops the technical actions while the developer mode is off. */
+export function filterByDeveloperMode<T extends { developer?: boolean }>(
+  list: T[],
+  developerModeOn: boolean,
+): T[] {
+  return list.filter((x) => developerModeOn || !x.developer);
 }
 
 function buildRecentGroup(
@@ -123,9 +129,10 @@ function buildSessionsGroup(
   return { label, items };
 }
 
-function buildSettingsGroup(): CommandPaletteGroup {
+function buildSettingsGroup(developerModeOn: boolean): CommandPaletteGroup {
   const label = tr("commandPalette.groups.settings");
-  const items: CommandItem[] = SETTINGS_SUB_ROUTES.map((sub) => ({
+  const shown = SETTINGS_SUB_ROUTES.filter((sub) => settingsSubRouteVisible(sub, developerModeOn));
+  const items: CommandItem[] = shown.map((sub) => ({
     id: `settings.${sub}`,
     label: `${tr("nav.settings")} → ${settingsSubRouteLabel(sub)}`,
     icon: SettingsIcon,
@@ -133,8 +140,7 @@ function buildSettingsGroup(): CommandPaletteGroup {
     keywords: ["settings", "preferences", sub],
     action: () => {
       touchRecentAction(`settings.${sub}`);
-      navigateTo("settings");
-      goToSettingsSubRoute(sub);
+      navigateToSettings(sub);
     },
   }));
   return { label, items };
@@ -155,18 +161,17 @@ function buildExtraGroups(extras: CommandItem[]): CommandPaletteGroup[] {
   return groups;
 }
 
-/** Groups shown by the palette - reactive to stores + persona. */
+/** Groups shown by the palette - reactive to stores + developer mode. */
 export const paletteGroups: Readable<CommandPaletteGroup[]> = derived(
   [
     _actions,
-    uiMode,
+    developerMode,
     recentActionIds,
     recentSessions,
     commands,
   ],
-  ([$actions, $mode, $recentIds, $recentSessions, $extra]) => {
-    // Persona-filtered catalogue.
-    const visible = filterByPersona($actions, $mode);
+  ([$actions, $developerMode, $recentIds, $recentSessions, $extra]) => {
+    const visible = filterByDeveloperMode($actions, $developerMode);
 
     // Build the ordered sequence of candidate groups in one expression, then
     // filter out absent (null) buckets. Avoids multiple chained `push` calls.
@@ -178,7 +183,7 @@ export const paletteGroups: Readable<CommandPaletteGroup[]> = derived(
       buildKindGroup(visible, "pages", tr("commandPalette.groups.pages")),
       buildKindGroup(visible, "actions", tr("commandPalette.groups.actions")),
       buildSessionsGroup($recentSessions),
-      buildSettingsGroup(),
+      buildSettingsGroup($developerMode),
       ...buildExtraGroups($extra),
       buildKindGroup(visible, "help", tr("commandPalette.groups.help")),
     ];

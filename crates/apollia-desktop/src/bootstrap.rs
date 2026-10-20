@@ -5,53 +5,60 @@
 
 use std::sync::Arc;
 
-use apollia_core::{PendingApprovals, SttConfigRepository, ToolsConfig};
-use apollia_llm::LlmRouter;
-use apollia_memory::user_memory::UserMemoryRepository;
-use apollia_runtime::api::routes_agents::{AgentBackendFactory, AgentLoader};
-use apollia_runtime::coordinator::DynBackend;
+use apollia_core::SttConfigRepository;
 use apollia_runtime::embedded::{EmbeddedConfig, RuntimeHandle};
-use apollia_runtime::eventbus::EventBusSender;
-use apollia_runtime::mailbox::AgentMailboxHandle;
-use apollia_runtime::registry::AgentRegistryHandle;
-use apollia_runtime::router::TaskRouterHandle;
-use apollia_tools::tools::ask_user::PendingUserInputs;
-use apollia_tools::{AgentRepository, AuditTrailHandle, TaskRepository, ToolRegistryHandle};
 
-/// Searches for `apollia.toml` in priority order and applies all parsable sections
-/// (llm, triggers, notifications) to the provided `EmbeddedConfig`.
+/// Reads `~/.apollia/apollia.toml` and applies all parsable sections (llm,
+/// triggers, notifications) to the provided `EmbeddedConfig`.
 ///
-/// Search order (first match wins):
-///   1. `~/.apollia/apollia.toml` : canonical desktop config (the same file
-///      `crate::commands::config` reads/writes and `sync_to_toml` mirrors backends to)
-///   2. `./apollia.toml`          : CWD (useful when running from workspace root)
+/// It is the one file every surface reads and writes (the CLI, the daemon,
+/// `crate::commands::config`, and `sync_to_toml` which mirrors backends to
+/// it). The working directory is not searched: an agent package keeps its
+/// manifest under the same name. The former XDG location
+/// `~/.config/apollia/apollia.toml` is not searched either: a stale copy left
+/// there would be resolved on a clean profile (after `rm -rf ~/.apollia`) and
+/// its `[[llm.backends]]` entries silently imported into a fresh `system.db`
+/// by the supervisor's TOML-to-`system.db` migration, resurrecting a backend
+/// the user never configured.
 ///
-/// The legacy XDG location `~/.config/apollia/apollia.toml` is deliberately NOT
-/// searched. It is not the desktop's canonical config path, yet a stale copy
-/// left there on a developer machine would be resolved on a clean profile
-/// (after `rm -rf ~/.apollia`) and its `[[llm.backends]]` entries would be
-/// silently imported into a fresh `system.db` by the supervisor's
-/// TOML-to-`system.db` migration, resurrecting a backend the user never
-/// configured. `system.db` is the source of truth for LLM backends; a clean
-/// install must start with none.
+/// On a first start the file is absent: the documented default file is
+/// written first, every key commented at its default, then read like any
+/// other. An existing file is never written over.
 ///
-/// Returns the config unchanged if no file is found.
+/// Returns the config unchanged if no file can be found or written.
 pub(crate) fn load_toml_config(config: EmbeddedConfig) -> EmbeddedConfig {
-    let candidates = [
-        apollia_core::paths::data_dir().map(|d| d.join("apollia.toml")),
-        std::env::current_dir().ok().map(|d| d.join("apollia.toml")),
-    ];
+    let Some(path) = apollia_core::paths::config_file() else {
+        return config;
+    };
+    load_toml_config_at(config, &path)
+}
 
-    for maybe_path in candidates.into_iter().flatten() {
-        if maybe_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&maybe_path) {
-                let mut updated = config.apply_toml(&content);
-                updated.config_path = Some(maybe_path);
-                return updated;
-            }
-        }
+/// [`load_toml_config`] at an explicit location, for a test under a
+/// throwaway home.
+pub(crate) fn load_toml_config_at(
+    config: EmbeddedConfig,
+    path: &std::path::Path,
+) -> EmbeddedConfig {
+    if let Err(e) = apollia_core::config::write_default_file_if_absent(path) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            detail = "starting with the defaults",
+            "config.default_file.write_failed"
+        );
     }
-    config
+    if !path.exists() {
+        return config;
+    }
+    let path = path.to_path_buf();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let mut updated = config.apply_toml(&content);
+            updated.config_path = Some(path);
+            updated
+        }
+        Err(_) => config,
+    }
 }
 
 /// Point the embedded Python interpreter at the bundled `python-build-standalone`
@@ -218,183 +225,6 @@ pub(crate) fn load_stt_config(
     }
 }
 
-/// Borrowed references to the shared `OnceLock`s / `RwLock` populated from the
-/// `RuntimeHandle` once the supervisor is running.
-pub(crate) struct RuntimeLocks<'a> {
-    pub(crate) event_bus: &'a std::sync::OnceLock<EventBusSender>,
-    pub(crate) llm_router: &'a std::sync::RwLock<Option<Arc<LlmRouter>>>,
-    pub(crate) tool_registry: &'a std::sync::OnceLock<ToolRegistryHandle>,
-    pub(crate) audit_trail: &'a std::sync::OnceLock<AuditTrailHandle>,
-    pub(crate) pending_approvals: &'a std::sync::OnceLock<Arc<PendingApprovals>>,
-    pub(crate) task_repository: &'a std::sync::OnceLock<Arc<TaskRepository>>,
-    pub(crate) pending_user_inputs: &'a std::sync::OnceLock<PendingUserInputs>,
-    pub(crate) mcp_handle: &'a std::sync::OnceLock<apollia_mcp::manager::McpClientManagerHandle>,
-    pub(crate) agent_registry: &'a std::sync::OnceLock<AgentRegistryHandle>,
-    pub(crate) task_router: &'a std::sync::OnceLock<TaskRouterHandle<DynBackend>>,
-    pub(crate) mailbox_handle: &'a std::sync::OnceLock<AgentMailboxHandle>,
-    pub(crate) user_memory: &'a std::sync::OnceLock<Arc<std::sync::Mutex<UserMemoryRepository>>>,
-    pub(crate) tools_config: &'a std::sync::OnceLock<ToolsConfig>,
-}
-
-/// Populate the shared locks from the running `RuntimeHandle`.
-///
-/// Required for parity between Chat Libre, Chat Agent, and task-mode flows.
-/// Without these, Python agents in non-chat-libre flows lose `ctx.a2a_invoke`,
-/// `ctx.mailbox`, `ctx.user_context`, and apollia.toml's `[tools]` overrides.
-pub(crate) fn populate_runtime_locks(runtime_handle: &RuntimeHandle, locks: RuntimeLocks<'_>) {
-    let _ = locks.event_bus.set(runtime_handle.event_sender.clone());
-    *locks
-        .llm_router
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime_handle.llm_router.clone();
-    let _ = locks
-        .tool_registry
-        .set(runtime_handle.tool_registry_handle.clone());
-    if let Some(audit) = runtime_handle.audit_trail.clone() {
-        let _ = locks.audit_trail.set(audit);
-    }
-    if let Some(pa) = runtime_handle.pending_approvals.clone() {
-        let _ = locks.pending_approvals.set(pa);
-    }
-    if let Some(repo) = runtime_handle.task_repository.clone() {
-        let _ = locks.task_repository.set(repo);
-    }
-    if let Some(chat) = runtime_handle.chat_manager.as_ref() {
-        let _ = locks.pending_user_inputs.set(chat.pending_user_inputs());
-    }
-    if let Some(mcp) = runtime_handle.mcp_handle.clone() {
-        let _ = locks.mcp_handle.set(mcp);
-    }
-    let _ = locks
-        .agent_registry
-        .set(runtime_handle.registry_handle.clone());
-    let _ = locks.task_router.set(runtime_handle.router_handle.clone());
-    if let Some(mailbox) = runtime_handle.mailbox_handle.clone() {
-        let _ = locks.mailbox_handle.set(mailbox);
-    }
-    if let Some(um) = runtime_handle.user_memory.clone() {
-        let _ = locks.user_memory.set(um);
-    }
-    let _ = locks.tools_config.set(runtime_handle.tools_config.clone());
-}
-
-/// Auto-load every enabled installed agent into the running supervisor.
-///
-/// Runs after the `OnceLock`s are populated so the `ProductionBackendFactory`
-/// can build real backends. Failures per agent are logged and skipped: one
-/// broken agent must not abort boot of the others.
-pub(crate) fn auto_load_installed_agents(
-    repo: AgentRepository,
-    factory: &Arc<dyn AgentBackendFactory>,
-    runtime_handle: &RuntimeHandle,
-) {
-    let agent_loader_for_boot: Arc<dyn AgentLoader> = Arc::new(crate::backend::AIPAgentLoader);
-    let agents = match repo.list_enabled() {
-        Ok(agents) => agents,
-        Err(e) => {
-            tracing::warn!(error = %e, detail = "the auto-load is skipped", "agent.list.failed");
-            return;
-        }
-    };
-
-    for agent in &agents {
-        if !agent.enabled {
-            continue;
-        }
-        let manifest = match agent_loader_for_boot.load_and_validate(&agent.install_path) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(name = %agent.name, error = %e, "agent.load.failed");
-                let _ = runtime_handle.event_sender.send(
-                    apollia_core::events::RuntimeEvent::AgentLoadFailed {
-                        name: agent.name.clone(),
-                        error: e.to_string(),
-                    },
-                );
-                continue;
-            }
-        };
-
-        // Register in AgentRegistry. We're on the main thread (not inside
-        // Tokio); reuse the current handle or build a small current-thread
-        // runtime to drive the async registration to completion.
-        let rt = match tokio::runtime::Handle::try_current().or_else(|_| {
-            Ok::<_, std::io::Error>(
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?
-                    .handle()
-                    .clone(),
-            )
-        }) {
-            Ok(handle) => handle,
-            Err(e) => {
-                // The contract of this loop is per-agent: a runtime that will
-                // not build is the same class of failure as a manifest that
-                // will not load, and used to abort the boot of every agent.
-                tracing::warn!(
-                    name = %agent.name,
-                    error = %e,
-                    detail = "the auto-load is skipped",
-                    "agent.autoload.no_runtime"
-                );
-                continue;
-            }
-        };
-
-        let registry_handle = runtime_handle.registry_handle.clone();
-        let router_handle = runtime_handle.router_handle.clone();
-        let event_sender = runtime_handle.event_sender.clone();
-        let task_repository = runtime_handle.task_repository.clone();
-        let factory_ref = factory.clone();
-        let install_path = agent.install_path.clone();
-        let agent_manifest = agent.manifest.clone();
-        let max_concurrent = manifest.max_concurrent_tasks;
-        let agent_name = manifest.name.clone();
-
-        rt.block_on(async move {
-            let agent_id = match registry_handle.register(manifest).await {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::warn!(name = %agent_name, error = %e, "agent.register.failed");
-                    return;
-                }
-            };
-
-            if let Err(e) = registry_handle
-                .update_state(
-                    agent_id.as_str(),
-                    apollia_core::process::ProcessState::Active,
-                )
-                .await
-            {
-                tracing::warn!(name = %agent_name, error = %e, "agent.activate.failed");
-                return;
-            }
-
-            let agent_backend = factory_ref.create_for_agent(&install_path, &agent_manifest);
-            let mut coordinator = apollia_runtime::coordinator::ExecutionCoordinator::new(
-                agent_id.clone(),
-                max_concurrent,
-                event_sender,
-                agent_backend,
-            )
-            .with_agent_name(agent_name.clone());
-            if let Some(ref repo) = task_repository {
-                coordinator = coordinator.with_task_repository(
-                    Arc::clone(repo),
-                    apollia_core::observability::ObservabilityConfig::default(),
-                );
-            }
-
-            let _ = router_handle
-                .register_coordinator(agent_id.clone(), coordinator)
-                .await;
-            tracing::info!(name = %agent_name, id = %agent_id, "agent.autoloaded");
-        });
-    }
-}
-
 /// Wire the global STT hotkey + recording overlay to the full `SttFlow`
 /// pipeline. Best-effort: each failure degrades gracefully with a warning.
 ///
@@ -417,7 +247,7 @@ pub(crate) fn setup_stt_hotkey(
 
     let flow = Arc::new(crate::stt::flow::SttFlow::new(
         stt_cfg.clone(),
-        runtime_handle.stt_engine.clone(),
+        crate::stt::transcriber::Transcriber::Local(runtime_handle.stt_engine.clone()),
         runtime_handle.event_sender.clone(),
         app.clone(),
     ));
@@ -474,6 +304,24 @@ pub(crate) fn setup_stt_hotkey(
     }
 }
 
+/// Record an origin for every MCP server stored without one (see
+/// [`crate::mcp::origin::backfill_origins`]). Never fatal: a server left
+/// without origin reads as custom.
+pub(crate) fn backfill_mcp_origins(data_dir: &std::path::Path) {
+    let path = data_dir.join(apollia_core::paths::DataFile::Mcp.file_name());
+    let result = apollia_mcp::McpServerRepository::open(&path).and_then(|repo| {
+        crate::mcp::origin::backfill_origins(&repo, &crate::mcp::load_builtin_enrichments())
+    });
+    match result {
+        Ok(written) => tracing::info!(written, "mcp.origin.backfill.completed"),
+        Err(e) => tracing::warn!(
+            error = %e,
+            detail = "servers without origin read as custom",
+            "mcp.origin.backfill.failed"
+        ),
+    }
+}
+
 /// Returns `value`, or ends the process on a startup step that has no recovery.
 ///
 /// `main` has no caller to return an error to, and the six steps that used
@@ -487,5 +335,44 @@ pub(crate) fn or_exit<T, E: std::fmt::Display>(result: Result<T, E>, step: &str)
             tracing::error!(error = %error, step = %step, "desktop.startup.failed");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_first_start_of_the_application_writes_the_default_file() {
+        // GIVEN a home with no data folder
+        let home = tempfile::tempdir().unwrap();
+        let path = apollia_core::paths::config_file_under(home.path());
+
+        // WHEN the application reads its configuration
+        let config = load_toml_config_at(EmbeddedConfig::default(), &path);
+
+        // THEN the documented default file exists, and it is the file read
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# apollia.toml, the configuration of Apollia OS."));
+        assert_eq!(config.config_path.as_deref(), Some(path.as_path()));
+        assert!(config.config_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn a_start_over_an_existing_file_leaves_its_bytes() {
+        // GIVEN a configuration the user wrote
+        let home = tempfile::tempdir().unwrap();
+        let path = apollia_core::paths::config_file_under(home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[hitl]\nscan_interval_secs = 30\n").unwrap();
+
+        // WHEN the application reads its configuration
+        let _ = load_toml_config_at(EmbeddedConfig::default(), &path);
+
+        // THEN its bytes are unchanged
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[hitl]\nscan_interval_secs = 30\n"
+        );
     }
 }

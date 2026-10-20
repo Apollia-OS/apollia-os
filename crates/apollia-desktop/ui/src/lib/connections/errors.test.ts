@@ -3,8 +3,11 @@ import {
   formatTauriError,
   isMissingClientError,
   isMissingSecretError,
-  isSovereigntyBlocked,
+  isPolicyRefusal,
+  isRefusedByPolicy,
 } from "./errors";
+import fr from "$lib/i18n/fr.json";
+import en from "$lib/i18n/en.json";
 
 /** Identity translator: asserts on the key rather than on localized copy. */
 const echo = (key: string): string => key;
@@ -42,6 +45,17 @@ describe("isMissingSecretError", () => {
 });
 
 describe("formatTauriError", () => {
+  it("shows a refusal of the attached daemon in its own words", () => {
+    // GIVEN the error a command returns when the daemon refused the request
+    const raw = { kind: "service", detail: "invalid OAuth client file: no client_id field" };
+
+    // WHEN it is formatted
+    const text = formatTauriError(raw, echo);
+
+    // THEN the daemon's sentence is shown unchanged, without the kind
+    expect(text).toBe("invalid OAuth client file: no client_id field");
+  });
+
   it("maps the missing-secret kind to its own copy", () => {
     // GIVEN the missing-secret refusal
     const raw = { kind: "oauth_client_secret_missing", detail: "google" };
@@ -87,15 +101,62 @@ describe("formatTauriError", () => {
   });
 });
 
-describe("isSovereigntyBlocked", () => {
-  it("recognises the sovereignty refusal and nothing else", () => {
-    // GIVEN the refusal the command returns under a local-only profile, and
-    // two other shapes. The two others are the control: a helper answering
-    // true on any error would offer to allow cloud for a missing client id.
+describe("isRefusedByPolicy", () => {
+  it("recognises the policy refusal and nothing else", () => {
+    // GIVEN the refusal the command returns under a policy that denies remote
+    // connections, and two other shapes as the control
     // WHEN each is classified
-    // THEN only the sovereignty refusal is recognised
-    expect(isSovereigntyBlocked({ kind: "sovereignty_blocked" })).toBe(true);
-    expect(isSovereigntyBlocked({ kind: "oauth_client_not_configured" })).toBe(false);
-    expect(isSovereigntyBlocked("network down")).toBe(false);
+    // THEN only the policy refusal is recognised
+    expect(isRefusedByPolicy({ kind: "refused_by_policy", detail: "denied" })).toBe(true);
+    expect(isRefusedByPolicy({ kind: "oauth_client_not_configured" })).toBe(false);
+    expect(isRefusedByPolicy("network down")).toBe(false);
+  });
+
+  it("formats the policy refusal with its catalogue key", () => {
+    // GIVEN a policy refusal carrying the runtime's English reason
+    const err = { kind: "refused_by_policy", detail: "refused by the organisation policy" };
+    // WHEN it is formatted
+    const text = formatTauriError(err, echo);
+    // THEN the localized key is used, not the raw reason
+    expect(text).toBe("connections.error_refused_by_policy");
+  });
+});
+
+describe("a refusal of the organisation policy relayed as text", () => {
+  /** The runtime's refusal of an MCP server, as the add command relays it. */
+  const relayed = "refused by the organisation policy: this connection is refused";
+
+  /** A translator reading the `connections` keys of one catalogue. */
+  const from =
+    (catalogue: typeof en) =>
+    (key: string): string =>
+      (catalogue.connections as unknown as Record<string, string>)[
+        key.replace("connections.", "")
+      ] ?? key;
+
+  it("is recognised in a string, an Error or a structured detail", () => {
+    // GIVEN the same refusal in the three shapes a command can throw
+    // WHEN classified
+    // THEN each is a policy refusal, and an unrelated error is not
+    expect(isPolicyRefusal(relayed)).toBe(true);
+    expect(isPolicyRefusal(new Error(`HTTP 403: ${relayed}`))).toBe(true);
+    expect(isPolicyRefusal({ kind: "service", detail: relayed })).toBe(true);
+    expect(isPolicyRefusal("server 'calc' already exists")).toBe(false);
+  });
+
+  it("reads refused by the policy in French", () => {
+    // GIVEN the interface in French
+    // WHEN the relayed refusal is formatted for the add flow
+    const text = formatTauriError(relayed, from(fr));
+    // THEN it says the policy refused it, in French
+    expect(text).toBe(fr.connections.error_refused_by_policy);
+  });
+
+  it("reads refused by the policy in English", () => {
+    // GIVEN the interface in English
+    // WHEN the relayed refusal is formatted for the add flow
+    const text = formatTauriError(relayed, from(en));
+    // THEN it says the policy refused it, in English
+    expect(text).toBe(en.connections.error_refused_by_policy);
   });
 });

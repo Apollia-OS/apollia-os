@@ -29,25 +29,38 @@ check_json    "agent show --json"                  "${Q[@]}" agent show apollia-
 check_content "trigger list has daily-digest" "seed-trigger-daily-digest" "${Q[@]}" trigger list
 check_content "notify list has seed-channel-desktop" "seed-channel-desktop" "${Q[@]}" notify list
 # The seed writes exactly three backends (seed/fragments/system.sql):
-# local-llama-server (the default), openai-gpt4o-mini and anthropic-claude.
+# local-llama-server (the default), vllm-qwen and gpu-server.
 # Assert the default and one non-default, so the list is proven to carry more
 # than the row Track 3 repoints.
 check_content "llm backends lists local-llama-server" "local-llama-server" "${Q[@]}" llm backends list
-check_content "llm backends lists anthropic-claude" "anthropic-claude"  "${Q[@]}" llm backends list
+check_content "llm backends lists gpu-server" "gpu-server"  "${Q[@]}" llm backends list
 check_content "mcp list has filesystem connected" "filesystem"  "${Q[@]}" mcp list
 check_content "notify events get has task.completed" "task.completed" "${Q[@]}" notify events get
-# Seeded agents auto-start at boot, so seed-classifier exposes its A2A skill.
-check_content "a2a skills exposes classify_text" "classify_text" "${Q[@]}" a2a skills
-check         "a2a invoke classify_text completes" "${Q[@]}" a2a invoke classify_text --args '{"text":"the app crashes on login","labels":["bug","feature"]}' --timeout 60
+# A seeded agent is on the card under its identifier, read from the store with
+# nothing started.
+check_content "a2a skills exposes agent:seed-classifier" "agent:seed-classifier" "${Q[@]}" a2a skills
+skip          "a2a invoke agent:seed-classifier" "an agent answers through a model; the invocation of a packaged workflow, which needs none, is asserted in the packaged phase"
 
 # Empty-but-valid runtime reads (seeded elsewhere, not surfaced by these paths).
 check         "task list (empty ok)"               "${Q[@]}" task list
-check         "audit list (empty ok)"              "${Q[@]}" audit list --limit 5
-check_json    "audit stats --json"                 "${Q[@]}" audit stats --json
+check         "audit journal (empty ok)"           "${Q[@]}" audit journal --limit 5
+check_json    "audit journal --json"               "${Q[@]}" audit journal --limit 5 --json
 check_exit    "audit show (unknown id) → 1"  1     "${Q[@]}" audit show nonexistent-run
 check         "resilience list"                    "${Q[@]}" resilience list
 check         "model hardware (daemon on)"         "${Q[@]}" model hardware
 check_json    "model hardware --json"              "${Q[@]}" model hardware --json
+check_content "model embeddings show (none set)" "keywords alone" "${Q[@]}" model embeddings show
+check_exit    "model embeddings set-default (chat model) → 1" 1 "${Q[@]}" model embeddings set-default qwen3-8b
+check_content "model embeddings set-default" "multilingual-e5-small" "${Q[@]}" model embeddings set-default multilingual-e5-small
+check_json    "model embeddings show --json"       "${Q[@]}" model embeddings show --json
+# The registry of sources: a folder is added, listed and removed by its
+# identifier; a mailbox without a reference is refused with 1.
+check_exit    "source create mail without reference → 1" 1 "${Q[@]}" source create --kind mail --label Inbox
+SRCID=$("${Q[@]}" -q source create --kind folder --label E2E-Contracts --reference conn-e2e 2>/dev/null)
+check_content "source list shows the folder" "E2E-Contracts" "${Q[@]}" source list
+check_json    "source list --json"                 "${Q[@]}" source list --json
+check_exit    "source delete the folder → 0" 0     "${Q[@]}" source delete "$SRCID" --confirm
+check_exit    "source delete again → 1"      1     "${Q[@]}" source delete "$SRCID" --confirm
 check         "digest --since 24h"                 "${Q[@]}" digest --since 24h
 check_json    "digest --json"                      "${Q[@]}" digest --since 24h --json
 
@@ -59,8 +72,11 @@ check         "mcp show filesystem"                "${Q[@]}" mcp show filesystem
 check_content "mcp show reports connected" "connected|healthy|yes" "${Q[@]}" mcp show filesystem
 check         "mcp test filesystem"                "${Q[@]}" mcp test filesystem
 check         "mcp raw-config filesystem"          "${Q[@]}" mcp raw-config filesystem
-check         "mcp update filesystem"              "${Q[@]}" mcp update filesystem --require-approval true
-check_content "mcp update persisted requires_approval" "requires_approval.*true|true" "${Q[@]}" mcp raw-config filesystem
+# The update writes back the command the server already runs: the patch is
+# accepted and persisted, and the stub keeps answering.
+MCP_FS_COMMAND="$("${Q[@]}" mcp raw-config filesystem --json | "${E2E_PYTHON:-python3}" -c "import sys,json;print(json.load(sys.stdin)['command'])" 2>/dev/null || true)"
+check         "mcp update filesystem"              "${Q[@]}" mcp update filesystem --command "$MCP_FS_COMMAND"
+check_json_field "mcp update persisted the command" "d['command'] != ''" "True" "${Q[@]}" mcp raw-config filesystem --json
 check         "mcp restart filesystem"             "${Q[@]}" mcp restart filesystem
 check         "mcp remove notes --confirm"         "${Q[@]}" mcp remove notes --confirm
 check_exit    "mcp show removed server → 1"  1     "${Q[@]}" mcp show notes
@@ -68,6 +84,9 @@ check_exit    "mcp show removed server → 1"  1     "${Q[@]}" mcp show notes
 # spawn error (ENOENT), well before the 30s init timeout a bad-but-spawnable
 # command would hit; nothing is persisted on that path.
 check_exit    "mcp add (unspawnable command) → 1"  1 "${Q[@]}" mcp add e2e-ghost --command /nonexistent-mcp-server-binary
+# The seeded apollia.toml leaves `mcp.server_enabled` off, so the daemon
+# refuses the MCP bridge with a reason that names the setting.
+check_exit    "mcp server (bridge off) → 2"  2    bash -c "'${Q[0]}' ${Q[*]:1} mcp server </dev/null"
 skip          "mcp add (live server)" "needs a single-binary MCP server; a bad-but-spawnable command blocks 30s on init timeout (seeded servers cover show/test/restart/update/remove)"
 
 # ── tools / audit ───────────────────────────────────────────────────────────
@@ -79,7 +98,6 @@ check_exit    "tools show inexistant → 1"  1       "${Q[@]}" tools show inexis
 check         "tools config get bash_executor"     "${Q[@]}" tools config get bash_executor
 check_exit    "tools config set (unknown key) → 1" 1 "${Q[@]}" tools config set bash_executor.timeout_secs 30
 check         "tools disable web_read + re-enable"  bash -c "'$BIN' --socket '$SOCK' tools disable web_read && '$BIN' --socket '$SOCK' tools enable web_read"
-check         "tools approvals resolved"           "${Q[@]}" tools approvals resolved
 # The seed ships a deliberately-fake (non-decryptable) tool credential blob to
 # exercise the desktop "test" button; it makes `tools reload` fail to decrypt.
 # Drop it from THIS run's throwaway seed HOME (never the shared fixture) so the
@@ -88,11 +106,18 @@ e2e_sqlite "$HOME/.apollia/governance.db" "DELETE FROM tool_credentials;" >/dev/
 check         "tools reload"                        "${Q[@]}" tools reload
 check         "tools enable bash_executor"          "${Q[@]}" tools enable bash_executor
 check         "tools approvals pending"             "${Q[@]}" tools approvals pending
-check         "audit verify (empty journal ok)"    "${Q[@]}" audit verify
-check         "audit journal (empty journal ok)"   "${Q[@]}" audit journal
-check_exit    "audit anchor (empty journal) → 1" 1 "${Q[@]}" audit anchor
+# The journal is the one audit register: the commands above (tools reload,
+# tools enable) are in it by now, so it is verified and anchored as it stands.
+check         "audit verify"                        "${Q[@]}" audit verify
+check         "audit journal"                       "${Q[@]}" audit journal
+check_content "audit anchor names the hash of the journal" 'global_hash=' "${Q[@]}" audit anchor
 check_exit    "audit replay (unknown run) → 1"   1 "${Q[@]}" audit replay ghost-run-id
-check         "audit export"                        "${Q[@]}" audit export --output "$RUN_TMP/audit.json" --limit 100
+check         "audit export --format json"          "${Q[@]}" audit export --format json --output "$RUN_TMP/journal.json"
+check_content "audit export --format json: a summary, the detail left out" '"detail": false' cat "$RUN_TMP/journal.json"
+check         "audit export --format csv --detail"  "${Q[@]}" audit export --format csv --detail --output "$RUN_TMP/journal.csv"
+check_content "audit export --format csv --detail: the summary columns, then the detail" '^ts,agent,nature,family,what,tool,target,outcome,run_id,seq,kind,hash,payload,arguments,output,status' cat "$RUN_TMP/journal.csv"
+check_json_field "audit export is itself journaled, with its format and the detail" "[(e['payload']['format'], e['payload']['detail']) for e in d['entries'] if e['kind'] == 'journal_exported']" "[('csv', True), ('json', False)]" "${Q[@]}" audit journal --limit 50 --json
+check_exit    "audit export (unknown nature) → 1" 1 "${Q[@]}" audit export --format csv --nature everything --output "$RUN_TMP/journal-refused.csv"
 
 # ── triggers CRUD (target: seeded apollia-chat) ─────────────────────────────
 section "triggers CRUD"
@@ -133,7 +158,7 @@ check         "notify test teardown: re-enable seeded desktop channel" "${Q[@]}"
 section "llm backends CRUD"
 check         "llm backends list"                  "${Q[@]}" llm backends list
 check         "llm backends show local-llama-server" "${Q[@]}" llm backends show local-llama-server
-check         "llm backends create e2e2"           "${Q[@]}" llm backends create e2e2 --provider openai --model gpt-4o-mini --timeout-sec 60
+check         "llm backends create e2e2"           "${Q[@]}" llm backends create e2e2 --provider openai --model qwen3-8b --base-url http://127.0.0.1:9/v1 --timeout-sec 60
 check         "llm backends update e2e2"           "${Q[@]}" llm backends update e2e2 --timeout-sec 90
 check         "llm backends set-default e2e2"      "${Q[@]}" llm backends set-default e2e2
 check         "llm backends set-default local-llama-server (restore)" "${Q[@]}" llm backends set-default local-llama-server
@@ -175,6 +200,13 @@ fi
 check         "plan cache stats (daemon on)"       "${Q[@]}" plan cache stats
 check         "plan cache evict --max-age-days 0"  "${Q[@]}" plan cache evict --max-age-days 0 --confirm
 check         "chat --list (daemon on)"            "${Q[@]}" chat --list
+# seed-session-4 opens on "Which MCP tools do I have on this machine?". Listed
+# first, then sent to the trash the way the desktop does (`deleted_at` set):
+# `chat --list` no longer names it.
+check_content "chat --list names seed-session-4"   "Which MCP tools" "${Q[@]}" chat --list
+e2e_sqlite "$HOME/.apollia/chat.db" "UPDATE chat_sessions SET deleted_at = '2026-07-02T00:00:00Z' WHERE id = 'seed-session-4';"
+check         "chat --list leaves out a trashed session" bash -c "out=\$(\"\$@\" 2>&1) || { echo \"\$out\"; exit 1; }; [[ \$out != *'Which MCP tools'* ]] || { echo \"\$out\"; exit 1; }" _ "${Q[@]}" chat --list
+e2e_sqlite "$HOME/.apollia/chat.db" "UPDATE chat_sessions SET deleted_at = NULL WHERE id = 'seed-session-4';"
 
 # ── task lifecycle (submit to a seeded auto-started agent, no model) ─────────
 # apollia-chat auto-starts; a submitted task exercises the read commands even
@@ -196,56 +228,131 @@ if [[ -n "$TID" ]]; then
 else
     skip    "task lifecycle" "run --detach did not return a task_id (out: ${TRUN:0:120})"
 fi
+# ── an agent without code (no model wired) ──────────────────────────────────
+# The seed carries no agent without code, and its row counts are asserted
+# elsewhere, so one is written for this section and removed after it. With no
+# model wired the run cannot answer; what is asserted is the path: the task is
+# accepted by `run`, followed by the router, and recorded under that agent.
+section "agent without code"
+LEDGER_DEF='{"id":"seed-ledger","name":"Ledger clerk","mission":"Reconcile the ledger."}'
+if e2e_sqlite "$HOME/.apollia/agents.db" "INSERT INTO agents (name, origin, version, definition_json, enabled, installed_at, updated_at) VALUES ('seed-ledger', 'interface', '1.0.0', '$LEDGER_DEF', 1, '2026-07-16T09:00:00Z', '2026-07-16T09:00:00Z');" >/dev/null 2>&1; then
+    DRUN=$("${Q[@]}" run seed-ledger "Reconcile March." --detach --json 2>/dev/null)
+    DTID=$(printf '%s' "$DRUN" | "${E2E_PYTHON:-python3}" -c "import sys,json;d=json.load(sys.stdin);print(d.get('task_id') or d.get('id',''))" 2>/dev/null)
+    if [[ -n "$DTID" ]]; then
+        _pass "run agent without code --detach" "$DTID"
+        check         "task status <id> (agent without code)" "${Q[@]}" task status "$DTID"
+        check_content "task list --json names the agent without code" "seed-ledger" "${Q[@]}" task list --json
+        DROW=$(e2e_sqlite "$HOME/.apollia/hitl.db" "SELECT agent_name || '|' || (input_json IS NOT NULL) FROM tasks WHERE task_id = '$DTID';" 2>/dev/null)
+        [[ "$DROW" == "seed-ledger|1" ]] \
+            && _pass "hitl.db records the agent and the whole input" "$DROW" \
+            || _fail "hitl.db records the agent and the whole input" "row: ${DROW:-none}"
+    else
+        _fail "run agent without code --detach" "no task_id (out: ${DRUN:0:200})"
+    fi
+    e2e_sqlite "$HOME/.apollia/agents.db" "DELETE FROM agents WHERE name = 'seed-ledger';" >/dev/null 2>&1 || true
+else
+    skip "agent without code" "agents.db has no agents table to write the agent into"
+fi
+
+# ── decisions waiting for the user ──────────────────────────────────────────
+# Nothing in the seed waits for a decision: no paused task, no batch, no
+# conversation running. The list is empty and the command succeeds.
+section "approvals"
+check_json_field "approvals pending --json holds no item" "len(d['items'])" 0 "${Q[@]}" approvals pending --json
+check         "approvals pending (empty)"                    "${Q[@]}" approvals pending
+# No workflow of the seed waits on a question: answering one that does not
+# wait is refused by the runtime, in human and in JSON form.
+check_exit    "approvals decide unknown question → 1"        1 "${Q[@]}" approvals decide workflow-question:00000000-0000-0000-0000-000000000000 answer --value 12
+check_exit    "approvals decide unknown question --json → 1" 1 "${Q[@]}" approvals decide workflow-question:00000000-0000-0000-0000-000000000000 refuse --reason later --json
+
+# ── batches ─────────────────────────────────────────────────────────────────
+# The batch engine runs in the daemon. The seed holds no batch. It reads
+# workbooks (`spreadsheet`) and CSV files (`csv`): a launch on another source
+# type, or on a file that is not there, is refused with 1 before anything is
+# recorded, and the list stays empty.
+section "batches"
+check_json_field "batch list --json holds no batch" "len(d['batches'])" 0 "${Q[@]}" batch list --json
+check_exit    "batch run unknown source type → 1" 1  "${Q[@]}" batch run apollia-chat --source-type mailbox --source /data/inbox
+check_exit    "batch run missing workbook → 1"    1  "${Q[@]}" batch run apollia-chat --source-type spreadsheet --source /data/requests.xlsx
+check_exit    "batch status unknown → 1"          1  "${Q[@]}" batch status 00000000-0000-0000-0000-000000000000
+check_exit    "batch stop unknown → 1"            1  "${Q[@]}" batch stop 00000000-0000-0000-0000-000000000000
+check_exit    "batch retry unknown → 1"           1  "${Q[@]}" batch retry 00000000-0000-0000-0000-000000000000
+check_exit    "batch export unknown → 1"          1  "${Q[@]}" batch export 00000000-0000-0000-0000-000000000000 --format json -o -
+
+# ── workflows ───────────────────────────────────────────────────────────────
+# The workflow engine runs in the daemon. The seed installs no package with a
+# workflow: a launch is refused with 1 before anything is recorded, and the
+# history of any workflow is empty.
+section "workflows"
+check_json_field "workflow logs --json holds no run" "len(d['runs'])" 0 "${Q[@]}" workflow logs invoices/close-month --json
+check_exit    "workflow show unknown → 1"         1  "${Q[@]}" workflow show invoices/close-month
+check_exit    "workflow run unknown → 1"          1  "${Q[@]}" workflow run invoices/close-month --input folder=/data/march
+check_exit    "workflow status unknown → 1"       1  "${Q[@]}" workflow status 00000000-0000-0000-0000-000000000000
+check_exit    "workflow cancel unknown → 1"       1  "${Q[@]}" workflow cancel 00000000-0000-0000-0000-000000000000 --confirm
+
 # `task resume` resolves the task id before touching its state, so an unknown
 # id is a deterministic refusal; the approve path on a real suspension stays a
 # variant below.
 check_exit    "task resume (unknown task) → 1"  1  "${Q[@]}" task resume ghost-task-id --approve
 skip          "task resume (suspended task)" "needs a task suspended in input_required; the model-free stub never suspends"
 
-# ── agent lifecycle (stub agent; degrades to skip if runner unavailable) ─────
-section "agent lifecycle (stub)"
-HELLO_PY="$RUN_TMP/hello.py"
-/bin/cat >"$HELLO_PY" <<'PYEOF'
-"""E2E stub agent for cli-e2e.sh."""
-from apollia import agent, on_message
-from apollia.types import Ctx, Message
-
-@agent(name="e2e-hello", version="0.0.1", description="E2E stub")
-class E2EHello:
-    @on_message
-    async def chat(self, message: str, history: list[Message], ctx: Ctx) -> str:
-        return f"echo:{message}"
-
-agent_instance = E2EHello()
-PYEOF
-check         "agent validate <stub>"              "$BIN" agent validate "$HELLO_PY"
-check         "agent install <stub> --skip-tests"  "${Q[@]}" agent install "$HELLO_PY" --skip-tests
-check_content "agent list shows e2e-hello" "e2e-hello" "${Q[@]}" agent list
-if "${Q[@]}" agent start e2e-hello >/dev/null 2>&1; then
-    _pass "agent start (post-install)"
-    check    "agent status e2e-hello"              "${Q[@]}" agent status e2e-hello
-    check    "agent messages --limit 5"            "${Q[@]}" agent messages e2e-hello --limit 5
-    check    "agent logs --last 5"                 "${Q[@]}" agent logs e2e-hello --last 5
-    check    "trigger fire (started stub)"         bash -c "'$BIN' --socket '$SOCK' trigger create t-fire --agent e2e-hello --kind cron --detail '@daily' && '$BIN' --socket '$SOCK' trigger fire t-fire; rc=\$?; '$BIN' --socket '$SOCK' trigger delete t-fire --confirm >/dev/null 2>&1; exit \$rc"
-    AGENT_RUNNING=1
-else
-    skip     "agent status/messages/logs/fire" "Python runner could not spawn the SDK loader in the tmp \$HOME"
-    AGENT_RUNNING=0
-fi
-check         "agent update e2e-hello <path>"      "${Q[@]}" agent update e2e-hello "$HELLO_PY"
-check         "agent stop e2e-hello"               "${Q[@]}" agent stop e2e-hello
-check         "agent disable e2e-hello"            "${Q[@]}" agent disable e2e-hello
-check         "agent enable e2e-hello"             "${Q[@]}" agent enable e2e-hello
+# ── agent lifecycle (a seeded agent: data, no Python behind it) ──────────────
+section "agent lifecycle (seeded agent)"
+# The seeded agents are available as soon as the daemon is up: nobody starts
+# them. The lifecycle verbs are played on onboarding-agent and leave it as
+# they found it, enabled and available.
+check_content "agent list shows onboarding-agent"  "onboarding-agent" "${Q[@]}" agent list
+check         "agent status onboarding-agent"      "${Q[@]}" agent status onboarding-agent
+check         "agent messages --limit 5"           "${Q[@]}" agent messages onboarding-agent --limit 5
+check         "agent logs --last 5"                "${Q[@]}" agent logs onboarding-agent --last 5
+check         "trigger fire (seeded agent)"        bash -c "'$BIN' --socket '$SOCK' trigger create t-fire --agent onboarding-agent --kind cron --detail '@daily' && '$BIN' --socket '$SOCK' trigger fire t-fire; rc=\$?; '$BIN' --socket '$SOCK' trigger delete t-fire --confirm >/dev/null 2>&1; exit \$rc"
+check_exit    "agent start (already available) → 1" 1 "${Q[@]}" agent start onboarding-agent
+check_exit    "agent start (unknown agent) → 1"    1 "${Q[@]}" agent start e2e-ghost-agent
+check_exit    "agent start apollia:chat (built in) → 1" 1 "${Q[@]}" agent start apollia:chat
+check         "agent stop onboarding-agent"        "${Q[@]}" agent stop onboarding-agent
+check         "agent start onboarding-agent (after a stop)" "${Q[@]}" agent start onboarding-agent
+check         "agent stop onboarding-agent (again)" "${Q[@]}" agent stop onboarding-agent
+check         "agent disable onboarding-agent"     "${Q[@]}" agent disable onboarding-agent
+check_exit    "agent start (disabled agent) → 1"   1 "${Q[@]}" agent start onboarding-agent
+check_json_field "agent enable makes it available again" "d['runtime_load']" "loaded" "${Q[@]}" agent enable onboarding-agent --json
+# Overrides of a seeded agent: set, read back resolved, then back to defaults.
+# Placed after the empty-journal audit checks: every write is journaled.
+check_content "agent list --definitions has apollia-chat" "apollia-chat" "${Q[@]}" agent list --definitions
+check_content "agent set mission"                  "Answer in one line." "${Q[@]}" agent set apollia-chat mission "Answer in one line."
+check_content "agent show carries the override"    "Answer in one line." "${Q[@]}" agent show apollia-chat
+check_exit    "agent reset without --confirm → 1"  1 "${Q[@]}" agent reset apollia-chat
+check         "agent reset --field mission"        "${Q[@]}" agent reset apollia-chat --field mission --confirm
+check_content "agent set sources profile"          "profile" "${Q[@]}" agent set apollia-chat sources profile
+check_content "agent show lists the profile source" "profile" "${Q[@]}" agent show apollia-chat
+check         "agent reset --field sources"        "${Q[@]}" agent reset apollia-chat --field sources --confirm
+check         "agent reset --confirm"              "${Q[@]}" agent reset apollia-chat --confirm
+check_exit    "agent set unknown agent → 1"        1 "${Q[@]}" agent set e2e-ghost-agent mission "x"
+# The settings of the chat are the overrides and the model of the Apollia
+# agent, written through the same routes and journaled the same way.
+check         "chat config set system-prompt"      "${Q[@]}" chat config set system-prompt "Answer in one line."
+check         "chat config set allowed-tools"      "${Q[@]}" chat config set allowed-tools "web_search,file_read"
+check         "chat config set llm-backend"        "${Q[@]}" chat config set llm-backend local-llama-server
+check_content "chat config get carries the prompt" "Answer in one line." "${Q[@]}" chat config get
+check_content "chat config get --json carries the model" "local-llama-server" "${Q[@]}" chat config get --json
+check_content "agent list --definitions has apollia:chat" "apollia:chat" "${Q[@]}" agent list --definitions
+check_exit    "chat config reset without --confirm → 1" 1 "${Q[@]}" chat config reset
+check         "chat config reset --confirm"        "${Q[@]}" chat config reset --confirm
+check_content "chat config get after reset"        "(runtime default)" "${Q[@]}" chat config get
+check_exit    "agent uninstall apollia:chat (built in) → 1" 1 "${Q[@]}" agent uninstall apollia:chat --confirm
+check         "audit verify (overrides journaled)"  "${Q[@]}" audit verify
+# The overrides above are access changes: each entry of the page carries its
+# summary, and the filters keep that nature and nothing else.
+check_json_field "audit journal --nature access_change --json: summarised, that nature only" "d['count'] > 0 and all(e['summary']['nature'] == 'access_change' for e in d['entries'])" "True" "${Q[@]}" audit journal --nature access_change --limit 50 --json
+check_json_field "audit journal --nature policy --result refused --json: nothing matches" "d['count']" "0" "${Q[@]}" audit journal --nature policy --result refused --json
+check_content "audit journal --nature access_change: a line per entry, in words" "Agent setting (changed|reset)" "${Q[@]}" audit journal --nature access_change --limit 50
+check_exit    "audit journal (unknown nature) → 1" 1 "${Q[@]}" audit journal --nature everything
+check_exit    "audit journal (unreadable date) → 1" 1 "${Q[@]}" audit journal --since last-week
 check         "agent package list"                 "${Q[@]}" agent package list
 check_content "agent package list has seed-office-pack" "seed-office-pack" "${Q[@]}" agent package show seed-office-pack
-check         "agent create scaffold --type react" "$BIN" agent create e2e-scaffold --type react
-check         "agent uninstall e2e-hello"          "${Q[@]}" agent uninstall e2e-hello --confirm
-# Both leaves resolve their target before acting, so an unknown name is a
-# deterministic refusal; the success paths need an installed bundle and stay
-# variants below.
-check_exit    "agent repair (unknown agent) → 1"           1 "${Q[@]}" agent repair e2e-ghost-agent
+# The leaf resolves its target before acting, so an unknown name is a
+# deterministic refusal; the success path is played further down, on a
+# package this track installs.
 check_exit    "agent package uninstall (unknown pack) → 1" 1 "${Q[@]}" agent package uninstall e2e-ghost-pack --confirm
-skip          "agent repair / agent package uninstall (installed bundle)" "repair re-provisions a packaged agent's venv; uninstall needs the bundle (seed-office-pack is show-only here)"
 
 # ── eval (report offline; run needs a model → Track 3) ──────────────────────
 section "eval"
@@ -254,3 +361,60 @@ check         "eval report (empty jsonl)"          bash -c "printf '' > '$RUN_TM
 # missing suite is a deterministic refusal.
 check_exit    "eval run (missing suite) → 1"  1    "${Q[@]}" eval run "$RUN_TMP/never-written-suite.yaml"
 skip          "eval run <suite> (real model)" "runs the agent against a real model; covered as a capture in Track 3 when a model is wired"
+
+# ── .apo packages (preview, install, update, keyring) ───────────────────────
+# A tool-only package is built here, signed by a key generated for the run, and
+# driven through the runtime. The seed's row counts are asserted above; the
+# package this section installs is removed at its end.
+section "packages"
+RPKG="$RUN_TMP/runtime-pkg"; /bin/mkdir -p "$RPKG/tools"
+write_runtime_pkg() {
+    cat > "$RPKG/apollia.toml" <<TOML
+[package]
+name = "e2e-runtime-pkg"
+version = "$1"
+publisher = "E2E Publisher"
+sdk = ">=0.3"
+
+[[tools]]
+name = "ping"
+module = "tools/ping.py"
+description = "Answer pong."
+action = "read"
+inputs = { type = "object" }
+TOML
+    printf "@tool(name='ping')\nasync def ping(ctx, inputs):\n    return 'pong'\n" > "$RPKG/tools/ping.py"
+}
+write_runtime_pkg "1.1.0"
+"$BIN" package build "$RPKG" --sign --key e2e-runtime -o "$RUN_TMP/rpkg-1.1.0.apo" >/dev/null 2>&1
+write_runtime_pkg "1.0.0"
+"$BIN" package build "$RPKG" -o "$RUN_TMP/rpkg-1.0.0.apo" >/dev/null 2>&1
+check_json_field "package preview: name"            "d['name']"                  "e2e-runtime-pkg" "${Q[@]}" package preview "$RUN_TMP/rpkg-1.1.0.apo" --json
+check_json_field "package preview: signed, untrusted" "d['signature']['status']+'/'+str(d['signature']['trusted'])" "signed/False" "${Q[@]}" package preview "$RUN_TMP/rpkg-1.1.0.apo" --json
+check_json_field "package preview: the tool"        "d['tools'][0]['name']"      "ping"            "${Q[@]}" package preview "$RUN_TMP/rpkg-1.1.0.apo" --json
+check_content    "package preview (human) names the publisher" "E2E Publisher" "${Q[@]}" package preview "$RUN_TMP/rpkg-1.1.0.apo"
+check_json_field "package install: version"         "d['version']"               "1.1.0"           "${Q[@]}" package install "$RUN_TMP/rpkg-1.1.0.apo" --json
+check_json_field "package preview: installed version" "d['installedVersion']"    "1.1.0"           "${Q[@]}" package preview "$RUN_TMP/rpkg-1.0.0.apo" --json
+check_exit       "package install (older version) → 1" 1 "${Q[@]}" package install "$RUN_TMP/rpkg-1.0.0.apo"
+check_json_field "package install --allow-downgrade" "d['previousVersion']"      "1.1.0"           "${Q[@]}" package install "$RUN_TMP/rpkg-1.0.0.apo" --allow-downgrade --json
+# The author key generated by the signed build above is the one trusted here.
+RFP=$("${Q[@]}" package inspect "$RUN_TMP/rpkg-1.1.0.apo" --json 2>/dev/null | "${E2E_PYTHON:-python3}" -c "import sys,json;print(json.load(sys.stdin)['signature']['key_fingerprint'])" 2>/dev/null)
+RPUB=$("${E2E_PYTHON:-python3}" - "$RUN_TMP/rpkg-1.1.0.apo" <<'PY' 2>/dev/null
+import sys, zipfile
+print(zipfile.ZipFile(sys.argv[1]).read("SIGNATURE.key").decode().strip())
+PY
+)
+check_json_field "package trust import"             "d['fingerprint']"           "$RFP"            "${Q[@]}" package trust import "$RPUB" --label "E2E Corp" --json
+check_content    "package trust list names the label" "E2E Corp"                 "${Q[@]}" package trust list
+check_json_field "package preview: trusted publisher" "d['signature']['publisher']" "E2E Corp"      "${Q[@]}" package preview "$RUN_TMP/rpkg-1.1.0.apo" --json
+check            "package trust remove --confirm"   "${Q[@]}" package trust remove "$RFP" --confirm
+check_exit       "package trust remove (unknown) → 1" 1 "${Q[@]}" package trust remove "$RFP" --confirm
+check_exit       "package trust import (not a key) → 1" 1 "${Q[@]}" package trust import "not-a-key" --label "X"
+check            "audit verify (installation journaled)" "${Q[@]}" audit verify
+# The uninstall goes through the runtime too: the package and its history go,
+# the journal records it, and a second uninstall finds nothing.
+check_json_field "agent package uninstall: history erased" "d['name']+'/'+str(d['historyCleared'])" "e2e-runtime-pkg/True" "${Q[@]}" agent package uninstall e2e-runtime-pkg --clear-history --confirm --json
+check_exit       "agent package uninstall (already gone) → 1" 1 "${Q[@]}" agent package uninstall e2e-runtime-pkg --confirm
+check            "audit verify (uninstallation journaled)" "${Q[@]}" audit verify
+e2e_sqlite "$HOME/.apollia/agents.db" "DELETE FROM package_items WHERE package_name = 'e2e-runtime-pkg'; DELETE FROM installed_packages WHERE name = 'e2e-runtime-pkg';" >/dev/null 2>&1 || true
+/bin/rm -rf "$HOME/.apollia/agents/packages/e2e-runtime-pkg"

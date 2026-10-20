@@ -33,21 +33,11 @@ fn test_all_variants_exist_and_clone() {
         },
         RuntimeEvent::AllReady,
         RuntimeEvent::ShutdownRequested,
-        RuntimeEvent::AgentLoadFailed {
-            name: "broken-agent".into(),
-            error: "module not found".into(),
-        },
         RuntimeEvent::AgentInstalled {
             name: "mon-agent".into(),
             version: "0.1.0".into(),
         },
         RuntimeEvent::AgentUninstalled {
-            name: "mon-agent".into(),
-        },
-        RuntimeEvent::AgentEnabled {
-            name: "mon-agent".into(),
-        },
-        RuntimeEvent::AgentDisabled {
             name: "mon-agent".into(),
         },
         RuntimeEvent::LlmModelLoading {
@@ -72,6 +62,11 @@ fn test_all_variants_exist_and_clone() {
             latency_ms: 250,
             cost_usd: Some(0.001),
             run_id: None,
+            session_id: None,
+            turn_id: None,
+            ttft_ms: None,
+            finish_reason: None,
+            generation_ms: None,
         },
         RuntimeEvent::LlmCallFailed {
             backend: "anthropic".into(),
@@ -169,6 +164,23 @@ fn test_all_variants_exist_and_clone() {
             task_id: "task-1".into(),
             approved: true,
         },
+        // ── Batches ─────────────────────────────────────
+        RuntimeEvent::BatchItemAwaitingApproval {
+            batch_id: "batch-1".into(),
+            rank: 3,
+            agent_id: "clerk".into(),
+            access: "send_email".into(),
+        },
+        RuntimeEvent::BatchEnded {
+            batch_id: "batch-1".into(),
+            agent_id: "clerk".into(),
+            state: "completed".into(),
+            total: 10,
+            completed: 8,
+            failed: 1,
+            canceled: 0,
+            awaiting: 1,
+        },
         // ── Chat ────────────────────────────────
         RuntimeEvent::ChatSessionCreated {
             session_id: "sess-001".into(),
@@ -224,6 +236,10 @@ fn test_all_variants_exist_and_clone() {
             tool_call_id: "call-005".into(),
             tool_name: "bash_executor".into(),
             prompt: "Allow bash execution?".into(),
+            answers: Vec::new(),
+            detail: String::new(),
+            code: None,
+            working_dir: None,
         },
         RuntimeEvent::ChatApprovalResolved {
             session_id: "sess-001".into(),
@@ -283,7 +299,6 @@ fn test_all_variants_exist_and_clone() {
             topic: None,
         },
         RuntimeEvent::OnboardingCompleted {
-            profile: "operator".into(),
             duration_sec: 1200,
             actions_count: 18,
         },
@@ -352,19 +367,6 @@ fn test_all_variants_exist_and_clone() {
             old_mtime_ms: 1_700_000_000_000,
             new_mtime_ms: 1_700_000_060_000,
         },
-        // ── HITL filesystem ───────────────────────────────
-        RuntimeEvent::HitlFilesystemRequired {
-            request_id: "req-001".into(),
-            session_id: "sess-001".into(),
-            level: "medium".into(),
-            op: "write".into(),
-            path: "/home/alice/notes.md".into(),
-            preview: FilesystemPreview::Diff {
-                before: "old content".into(),
-                after: "new content".into(),
-                truncated: false,
-            },
-        },
         RuntimeEvent::AgentLog {
             task_id: "task-1".into(),
             agent_id: "agent-1".into(),
@@ -396,6 +398,9 @@ fn test_all_variants_exist_and_clone() {
             tool_name: "web_search".into(),
             args_json: Some("{\"query\":\"hello\"}".into()),
             run_id: None,
+            tool_call_id: None,
+            family: None,
+            target: None,
         },
         RuntimeEvent::ToolCallCompleted {
             parent_event_id: "01900000-0000-7000-8000-000000000001".into(),
@@ -407,6 +412,9 @@ fn test_all_variants_exist_and_clone() {
             duration_ms: 412,
             success: true,
             run_id: None,
+            tool_call_id: None,
+            family: None,
+            target: None,
         },
         RuntimeEvent::ToolCallDenied {
             parent_event_id: "01900000-0000-7000-8000-000000000002".into(),

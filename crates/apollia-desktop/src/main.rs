@@ -1,8 +1,11 @@
-//! Apollia OS desktop application (Tauri v2).
+//! Apollia Desktop application (Tauri v2).
 //!
-//! Single-process architecture: the Apollia runtime runs embedded inside the
-//! Tauri process via [`apollia_runtime::init_embedded()`]. The Unix socket
-//! remains active so the CLI can be used alongside the desktop app.
+//! The Apollia runtime runs embedded inside the Tauri process via
+//! [`apollia_runtime::init_embedded()`], on the TCP port this process claims
+//! at startup (see [`startup`]); when a compatible runtime already serves that
+//! port, the application attaches to it instead (see [`attached`]), and any
+//! other holder is named in a refusal window. The Unix socket remains active
+//! so the CLI can be used alongside the desktop app.
 //!
 //! `unsafe_code` is allowed by this crate's manifest for one production site,
 //! the window-handle cast to `isize` in `commands/automation.rs`, and for
@@ -11,55 +14,134 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-mod backend;
+mod attached;
 mod bootstrap;
-mod bundled_agents;
+mod bundled_packages;
 mod commands;
+mod embedded_docs;
 mod events;
+mod file_log;
+mod handlers;
 pub mod i18n;
 pub mod mcp;
+mod package_open;
 mod process_job;
-mod project_context;
+mod startup;
 pub mod stt;
 mod token_coalescer;
 pub mod tray;
 
 use std::sync::Arc;
 
-use apollia_core::{PendingApprovals, ToolsConfig};
 use apollia_llm::LlmRouter;
-use apollia_memory::user_memory::UserMemoryRepository;
-use apollia_runtime::api::routes_agents::{AgentBackendFactory, AgentLoader};
-use apollia_runtime::coordinator::DynBackend;
 use apollia_runtime::embedded::{EmbeddedConfig, RuntimeHandle};
-use apollia_runtime::eventbus::EventBusSender;
-use apollia_runtime::mailbox::AgentMailboxHandle;
-use apollia_runtime::registry::AgentRegistryHandle;
-use apollia_runtime::router::TaskRouterHandle;
-use apollia_tools::tools::ask_user::PendingUserInputs;
-use apollia_tools::{AgentRepository, AuditTrailHandle, TaskRepository, ToolRegistryHandle};
-use mcp::McpRegistryClient;
-use mcp::SecretStore;
+use apollia_tools::AgentRepository;
 use tauri::Manager;
 
 use bootstrap::{
-    auto_load_installed_agents, load_stt_config, load_toml_config, or_exit, populate_runtime_locks,
-    setup_bundled_python, setup_stt_hotkey, RuntimeLocks,
+    backfill_mcp_origins, load_stt_config, load_toml_config, or_exit, setup_bundled_python,
+    setup_stt_hotkey,
 };
 
-/// Shared mutable LLM router: updated by `reload_llm`, read by
-/// `ProductionChatAgentRunner` and `ProductionBackendFactory`.
+/// Shared mutable LLM router: updated by `reload_llm`, read by the commands
+/// that list and probe the models.
 pub type SharedLlmRouter = Arc<std::sync::RwLock<Option<Arc<LlmRouter>>>>;
 
 fn main() {
-    // Initialize tracing so Rust logs appear in the terminal during development.
+    // Initialize tracing so Rust logs appear in the terminal during development
+    // and in the log file the settings open.
     // RUST_LOG controls verbosity (e.g. RUST_LOG=apollia=debug); defaults to info.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("apollia=info,warn")),
-        )
-        .init();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("apollia=info,warn"));
+    // The IMAP library traces the commands it sends, a login's password
+    // included; its target stays off whatever `RUST_LOG` asks.
+    let env_filter = match apollia_runtime::connectors_bridge::IMAP_LOG_DIRECTIVE
+        .parse::<tracing_subscriber::filter::Directive>()
+    {
+        Ok(directive) => env_filter.add_directive(directive),
+        Err(_) => env_filter,
+    };
+    let apollia_data_dir = {
+        let home = apollia_core::paths::home_dir_or_temp()
+            .display()
+            .to_string();
+        apollia_core::paths::data_dir_under(home)
+    };
+    // The same traces go to the terminal and to `~/.apollia/logs/desktop.log`,
+    // rotated by size; a folder that cannot be opened leaves the terminal
+    // alone, and says so once the subscriber is up.
+    let logs_dir = file_log::logs_dir_under(&apollia_data_dir);
+    let (file_layer, file_error) = match file_log::RotatingFile::open(&logs_dir) {
+        Ok(file) => (
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(std::sync::Mutex::new(file)),
+            ),
+            None,
+        ),
+        Err(error) => (None, Some(error)),
+    };
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(file_layer)
+            .init();
+    }
+    if let Some(error) = file_error {
+        tracing::event!(
+            tracing::Level::WARN,
+            path = %logs_dir.display(),
+            error = %error,
+            detail = "the traces go to the terminal only",
+            "desktop.log_file.unavailable"
+        );
+    }
+
+    // The port of the native API: the one a serving daemon recorded, else
+    // `[api].port`, else the default.
+    let config_text = apollia_core::paths::config_file()
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok());
+    let runtime_port = startup::resolve_port(&apollia_data_dir, config_text.as_deref());
+
+    // Start, attach or refuse, before PyO3, any database or any listener of
+    // the runtime. The claimed port is handed to the runtime below as is.
+    // When the runtime is installed as a service of the session, it is
+    // brought up first, so the decision finds it serving and attaches.
+    let runtime_addr = std::net::SocketAddr::from(([127, 0, 0, 1], runtime_port));
+    startup::service::bring_up(runtime_addr, &apollia_data_dir);
+    let claimed_port = match startup::decide(
+        runtime_addr,
+        startup::read_token(&apollia_data_dir).as_deref(),
+    ) {
+        startup::StartupDecision::Launch(listener) => listener,
+        // A compatible runtime already serves: attach to it over its API,
+        // with the token of this installation, and build nothing of our own.
+        startup::StartupDecision::Attach { version } => {
+            match startup::read_token(&apollia_data_dir) {
+                Some(token) => {
+                    tracing::event!(
+                        tracing::Level::INFO,
+                        version = %version,
+                        "desktop.startup.attach"
+                    );
+                    attached::run(runtime_port, token, tauri_context())
+                }
+                None => startup::refuse(
+                    &startup::RefusalReason::TokenRefused { port: runtime_port },
+                    &apollia_data_dir,
+                    tauri_context(),
+                ),
+            }
+        }
+        startup::StartupDecision::Refuse(reason) => {
+            startup::refuse(&reason, &apollia_data_dir, tauri_context())
+        }
+    };
 
     // Before the first child is spawned: membership in the job is inherited
     // at process creation, never applied afterwards. On Windows this is what
@@ -77,74 +159,10 @@ fn main() {
     // Point PyO3 at the bundled Python BEFORE any Python runtime code runs.
     setup_bundled_python();
 
-    // OnceLocks shared between ProductionBackendFactory and main().
-    // Populated after init_embedded() returns, before any HTTP request arrives.
-    let event_bus_lock: Arc<std::sync::OnceLock<EventBusSender>> =
-        Arc::new(std::sync::OnceLock::new());
+    // The LLM router the commands read, set once the runtime is up and
+    // replaced by `reload_llm`.
     let llm_router_lock: Arc<std::sync::RwLock<Option<Arc<LlmRouter>>>> =
         Arc::new(std::sync::RwLock::new(None));
-    let tool_registry_lock: Arc<std::sync::OnceLock<ToolRegistryHandle>> =
-        Arc::new(std::sync::OnceLock::new());
-    let audit_trail_lock: Arc<std::sync::OnceLock<AuditTrailHandle>> =
-        Arc::new(std::sync::OnceLock::new());
-    let pending_approvals_lock: Arc<std::sync::OnceLock<Arc<PendingApprovals>>> =
-        Arc::new(std::sync::OnceLock::new());
-    let task_repository_lock: Arc<std::sync::OnceLock<Arc<TaskRepository>>> =
-        Arc::new(std::sync::OnceLock::new());
-    let pending_user_inputs_lock: Arc<std::sync::OnceLock<PendingUserInputs>> =
-        Arc::new(std::sync::OnceLock::new());
-    // Populated post-init_embedded() so the BridgeRunner can inject one
-    // McpToolExecutor per registered MCP tool into the agent's dispatcher.
-    let mcp_handle_lock: Arc<std::sync::OnceLock<apollia_mcp::manager::McpClientManagerHandle>> =
-        Arc::new(std::sync::OnceLock::new());
-    // Agent registry + task router, required to build A2A delegate/invoker so
-    // task-mode (triggers) and chat-agent flows can call `ctx.a2a_invoke(...)`
-    // and discover virtual `a2a:*` tools, on parity with Chat Libre.
-    let agent_registry_lock: Arc<std::sync::OnceLock<AgentRegistryHandle>> =
-        Arc::new(std::sync::OnceLock::new());
-    let task_router_lock: Arc<std::sync::OnceLock<TaskRouterHandle<DynBackend>>> =
-        Arc::new(std::sync::OnceLock::new());
-    // Inter-agent mailbox, exposed as `ctx.mailbox` in Python agents.
-    let mailbox_handle_lock: Arc<std::sync::OnceLock<AgentMailboxHandle>> =
-        Arc::new(std::sync::OnceLock::new());
-    // Global user memory, used by Chat Agent runner to build `ctx.user_context`.
-    let user_memory_lock: Arc<std::sync::OnceLock<Arc<std::sync::Mutex<UserMemoryRepository>>>> =
-        Arc::new(std::sync::OnceLock::new());
-    // Tools config (`[tools]` from apollia.toml) drives web_search/web_read
-    // params and statically-disabled tools. Populated from RuntimeHandle.
-    let trusted_paths_lock: Arc<std::sync::OnceLock<Vec<std::path::PathBuf>>> =
-        Arc::new(std::sync::OnceLock::new());
-    let tools_config_lock: Arc<std::sync::OnceLock<ToolsConfig>> =
-        Arc::new(std::sync::OnceLock::new());
-    // Plan-gate registry, forwarded to per-agent engines so the desktop UI can
-    // resolve a pending plan gate via submit_plan_decision.
-    let plan_gates_lock: Arc<std::sync::OnceLock<Arc<apollia_oria::PendingPlanGates>>> =
-        Arc::new(std::sync::OnceLock::new());
-    // Plan cache, forwarded to per-agent engines so an orchestrated run can
-    // reuse a plan instead of re-planning. The supervisor owns the repository;
-    // this shares it rather than opening a second database.
-    #[allow(clippy::type_complexity)]
-    let plan_cache_lock: Arc<
-        std::sync::OnceLock<Arc<std::sync::Mutex<apollia_oria::plan_cache::PlanCacheRepository>>>,
-    > = Arc::new(std::sync::OnceLock::new());
-
-    let factory: Arc<dyn AgentBackendFactory> =
-        Arc::new(backend::factory::ProductionBackendFactory {
-            event_bus: event_bus_lock.clone(),
-            llm_router: llm_router_lock.clone(),
-            tool_registry: tool_registry_lock.clone(),
-            audit_trail: audit_trail_lock.clone(),
-            pending_approvals: pending_approvals_lock.clone(),
-            task_repository: task_repository_lock.clone(),
-            mcp_handle: mcp_handle_lock.clone(),
-            agent_registry: agent_registry_lock.clone(),
-            task_router: task_router_lock.clone(),
-            mailbox_handle: mailbox_handle_lock.clone(),
-            tools_config: tools_config_lock.clone(),
-            trusted_paths: trusted_paths_lock.clone(),
-            plan_gates: plan_gates_lock.clone(),
-            plan_cache: plan_cache_lock.clone(),
-        });
 
     // Shared SttFlow state for push-to-talk IPC commands (`start_tour_recording`,
     // `stop_tour_recording`). Populated inside the Tauri setup closure once the
@@ -153,12 +171,6 @@ fn main() {
 
     // Open AgentRepository for auto-load at boot (passed to Supervisor).
     // A separate instance is created later for Tauri IPC commands.
-    let apollia_data_dir = {
-        let home = apollia_core::paths::home_dir_or_temp()
-            .display()
-            .to_string();
-        apollia_core::paths::data_dir_under(home)
-    };
     let _ = std::fs::create_dir_all(&apollia_data_dir);
     let boot_agent_repo = {
         let db_path = apollia_data_dir.join(apollia_core::paths::DataFile::Agents.file_name());
@@ -178,44 +190,12 @@ fn main() {
         }
     };
 
-    // Extract bundled system agents (e.g. onboarding-agent) to disk and register
-    // them in the repository so the auto-load loop picks them up.
+    // The guide and the onboarding an earlier version installed as code are
+    // retired before the runtime registers the stored agents; both are
+    // installed as packages once the runtime, and its audit journal, are up.
     if let Some(ref repo) = boot_agent_repo {
-        bundled_agents::ensure_bundled_agents(repo, &apollia_data_dir);
+        bundled_packages::retire_code_agents(repo);
     }
-
-    // Build the ChatAgentRunner so Chat Agent mode works in the ChatSessionManager.
-    // Uses its own AgentRepository instance (SQLite WAL supports concurrent readers).
-    let chat_agent_runner: Option<Arc<dyn apollia_runtime::chat::ChatAgentRunner>> = {
-        let db_path = apollia_data_dir.join(apollia_core::paths::DataFile::Agents.file_name());
-        match apollia_tools::AgentRepository::open(&db_path) {
-            Ok(repo) => Some(Arc::new(backend::chat_runner::ProductionChatAgentRunner {
-                agent_repo: Arc::new(std::sync::Mutex::new(repo)),
-                event_bus: event_bus_lock.clone(),
-                llm_router: llm_router_lock.clone(),
-                tool_registry: tool_registry_lock.clone(),
-                audit_trail: audit_trail_lock.clone(),
-                pending_approvals: pending_approvals_lock.clone(),
-                task_repository: task_repository_lock.clone(),
-                pending_user_inputs: pending_user_inputs_lock.clone(),
-                mcp_handle: mcp_handle_lock.clone(),
-                agent_registry: agent_registry_lock.clone(),
-                task_router: task_router_lock.clone(),
-                mailbox_handle: mailbox_handle_lock.clone(),
-                user_memory: user_memory_lock.clone(),
-                tools_config: tools_config_lock.clone(),
-                trusted_paths: trusted_paths_lock.clone(),
-            })),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    detail = "the chat-agent mode is disabled",
-                    "chat.agent_store.open.failed"
-                );
-                None
-            }
-        }
-    };
 
     // Load (or generate) the API bearer token so the embedded runtime binds an
     // authenticated TCP listener for the desktop REST bridge. The Unix socket
@@ -226,19 +206,18 @@ fn main() {
     );
     commands::set_api_token(api_token.clone());
 
-    // Do NOT pass agent_repository here: auto-load inside the Supervisor
-    // happens before OnceLocks are populated, causing "event bus not initialized"
-    // errors. Instead, we auto-load manually after OnceLocks are set below.
+    // The supervisor registers the stored agents at boot: an agent is a
+    // definition, nothing is imported to make it available.
     let config = load_toml_config(EmbeddedConfig {
-        agent_loader: Arc::new(backend::AIPAgentLoader),
-        backend_factory: Some(factory.clone()),
-        agent_repository: None,
-        chat_agent_runner,
-        tcp_port: Some(7771),
+        agent_repository: boot_agent_repo,
+        tcp_port: Some(runtime_port),
+        tcp_listener: Some(claimed_port),
         api_token: Some(api_token),
         ..EmbeddedConfig::default()
     });
 
+    let agent_idle_unload =
+        std::time::Duration::from_secs(config.runtime_config.agent_idle_unload_secs);
     let runtime_handle: RuntimeHandle = or_exit(
         apollia_runtime::init_embedded(config),
         "start the embedded runtime",
@@ -251,43 +230,65 @@ fn main() {
     // Load the STT config from SQLite for the desktop hotkey listener.
     let stt_config_for_hotkey = load_stt_config(&apollia_data_dir);
 
-    // Populate OnceLocks now that the supervisor is fully running.
-    populate_runtime_locks(
-        &runtime_handle,
-        RuntimeLocks {
-            event_bus: &event_bus_lock,
-            llm_router: &llm_router_lock,
-            tool_registry: &tool_registry_lock,
-            audit_trail: &audit_trail_lock,
-            pending_approvals: &pending_approvals_lock,
-            task_repository: &task_repository_lock,
-            pending_user_inputs: &pending_user_inputs_lock,
-            mcp_handle: &mcp_handle_lock,
-            agent_registry: &agent_registry_lock,
-            task_router: &task_router_lock,
-            mailbox_handle: &mailbox_handle_lock,
-            user_memory: &user_memory_lock,
-            tools_config: &tools_config_lock,
-        },
-    );
-    // The agent-mode file tools read these roots. They come from the same
-    // `[filesystem] trusted_paths` the chat classifies against, so one setting
-    // governs both surfaces instead of the hardcoded home directory this used
-    // to be.
-    let _ = trusted_paths_lock.set(runtime_handle.filesystem_trusted_paths.clone());
-    if let Some(gates) = runtime_handle.plan_gates.clone() {
-        let _ = plan_gates_lock.set(gates);
-    }
-    if let Some(cache) = runtime_handle.plan_cache.clone() {
-        let _ = plan_cache_lock.set(cache);
-    }
+    // Servers stored before their origin was recorded get one now, while the
+    // desktop is the caller that knows the curated selection.
+    backfill_mcp_origins(&apollia_data_dir);
 
-    // Auto-load installed agents now that the OnceLocks are populated so the
-    // ProductionBackendFactory can create real backends.
-    if let Some(repo) = boot_agent_repo {
-        auto_load_installed_agents(repo, &factory, &runtime_handle);
+    // The commands read the router of the runtime now that it is up.
+    *llm_router_lock
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime_handle.llm_router.clone();
+    // The packages the binary ships are installed, recorded in the audit
+    // journal, and their agents made available; then the Python tools of the
+    // installed packages join the registry, read from their manifests, each
+    // module imported on its first call only.
+    if let Some(worker) = apollia_runtime::worker_runtime() {
+        let data_dir = apollia_data_dir.clone();
+        let registry = runtime_handle.tool_registry_handle.clone();
+        let chat = runtime_handle.chat_manager.clone();
+        let workflows = runtime_handle.workflows.clone();
+        let governance = runtime_handle.governance.clone();
+        let runtime = runtime_handle.clone();
+        worker.spawn(async move {
+            bundled_packages::install_bundled_packages(&data_dir, governance).await;
+            runtime.register_stored_agents(&data_dir).await;
+            apollia_aip::package_tools::attach(
+                &data_dir,
+                &registry,
+                chat.as_ref(),
+                agent_idle_unload,
+                &[apollia_aip::package_tools::ProfileGrant::onboarding()],
+            )
+            .await;
+            // The steps of a workflow call the models through the router of
+            // the runtime, each run bounded by the step limit of `[workflows]`.
+            let models = runtime.llm_router.clone().map(|router| {
+                apollia_aip::package_tools::workflows::WorkflowModels::new(
+                    router,
+                    Some(runtime.event_sender.clone()),
+                    apollia_core::WorkflowsConfig::default().max_steps,
+                )
+            });
+            apollia_aip::package_tools::workflows::attach(
+                &data_dir,
+                workflows.as_ref(),
+                models.clone(),
+            )
+            .await;
+            // A package installed from now on brings its tools and its
+            // workflows at once.
+            apollia_runtime::packages::install_package_reload(
+                apollia_aip::package_tools::reload_hook(apollia_aip::package_tools::PackageCode {
+                    data_dir: data_dir.clone(),
+                    registry: registry.clone(),
+                    chat: chat.clone(),
+                    grants: vec![apollia_aip::package_tools::ProfileGrant::onboarding()],
+                    engine: workflows.clone(),
+                    models,
+                }),
+            );
+        });
     }
-
     // Open a second AgentRepository instance for Tauri IPC commands.
     // SQLite WAL mode supports concurrent readers.
     let agent_repo: Arc<std::sync::Mutex<AgentRepository>> = {
@@ -298,33 +299,7 @@ fn main() {
         )))
     };
 
-    // Open PackageRepository for Tauri IPC commands (same agents.db, WAL allows concurrent readers).
-    let pkg_repo: Arc<std::sync::Mutex<apollia_tools::PackageRepository>> = {
-        let db_path = apollia_data_dir.join(apollia_core::paths::DataFile::Agents.file_name());
-        Arc::new(std::sync::Mutex::new(or_exit(
-            apollia_tools::PackageRepository::open(&db_path),
-            "open agents.db for the package repository",
-        )))
-    };
-    let agent_loader: Arc<dyn AgentLoader> = Arc::new(backend::AIPAgentLoader);
-
-    let mcp_registry_client = match McpRegistryClient::new(&apollia_data_dir) {
-        Ok(client) => client,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                detail = "the registry commands are disabled",
-                "mcp.registry.client.init.failed"
-            );
-            // Fall back to a client with a writable temp dir so Tauri state is always populated.
-            or_exit(
-                McpRegistryClient::new(std::path::Path::new("/tmp")),
-                "open the fallback MCP registry client",
-            )
-        }
-    };
-
-    let app = tauri::Builder::default()
+    let app = package_open::attach(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -336,19 +311,16 @@ fn main() {
         // is the canonical replacement.
         .plugin(tauri_plugin_opener::init())
         .manage(runtime_handle.clone())
+        .manage(startup::ApiPort(runtime_handle.api_port))
+        .manage(attached::RuntimeLink::Embedded(Box::new(runtime_handle.clone())))
         .manage(agent_repo)
-        .manage(pkg_repo)
-        .manage(agent_loader)
         .manage(runtime_handle.event_sender.clone())
         .manage(llm_router_lock.clone())
-        .manage(mcp_registry_client)
-        .manage(SecretStore::new())
         .manage(stt_flow_state.clone())
         .manage(std::sync::Arc::new(
             tokio::sync::Mutex::new(apollia_llm::DownloadManager::new()),
         ) as commands::model_hub::SharedDownloadManager)
         .manage(std::sync::Arc::new(apollia_llm::HfModelTypeCache::new()))
-        .manage(commands::llm::LlmPingCache::default())
         // Route the macOS app-menu / Cmd+Q "Quit" (id `MENU_QUIT_APP`) to the
         // shared graceful quit. Without this, the default native quit is
         // swallowed by the window `CloseRequested` handler below.
@@ -366,6 +338,9 @@ fn main() {
 
             tray::setup_tray(app)?;
 
+            // A package file that started the application opens its preview.
+            package_open::launch(app.handle());
+
             // Replace the default macOS menu so Cmd+Q / the app-menu "Quit"
             // route through `initiate_quit` instead of the native `terminate:`
             // that `prevent_close` cancels.
@@ -378,6 +353,10 @@ fn main() {
             // Periodic heartbeat so the frontend `runtimeHealth` watchdog
             // never trips during idle chat sessions.
             events::spawn_heartbeat(app.handle().clone());
+
+            // Reconcile the installed-model index with the disk: a model copied
+            // into a sub-folder, or deleted, while the application was closed.
+            tauri::async_runtime::spawn_blocking(commands::model_hub::reconcile_model_index);
 
             // Session metrics aggregator.
             // .setup() runs outside any Tokio context; enter the Tauri async
@@ -443,268 +422,14 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            commands::agent_packages::preview_agent_package,
-            commands::agent_packages::install::install_agent_package,
-            commands::agent_packages::list_agent_packages,
-            commands::agent_packages::get_agent_package_detail,
-            commands::agent_packages::uninstall::uninstall_agent_package,
-            commands::agents::list_agents,
-            commands::agents::agent_status_snapshot,
-            commands::agents::messages::list_agent_messages,
-            commands::agents::lifecycle::start_agent,
-            commands::agents::lifecycle::stop_agent,
-            commands::agents::lifecycle::install_agent,
-            commands::agents::lifecycle::uninstall_agent,
-            commands::agents::lifecycle::enable_agent,
-            commands::agents::lifecycle::disable_agent,
-            commands::agents::lifecycle::update_agent,
-            commands::tasks::list_tasks,
-            commands::tasks::submit_task,
-            commands::tasks::delete_task,
-            commands::tasks::get_task_timeline,
-            commands::tasks::get_delegation_tree,
-            commands::hitl::list_pending_approvals,
-            commands::hitl::list_resolved_approvals,
-            commands::hitl::resume_task,
-            commands::hitl::add_permission_prefix_rule,
-            commands::hitl::respond_hitl_filesystem,
-            commands::integrations::oauth_start_flow,
-            commands::integrations::oauth_complete_flow,
-            commands::integrations::oauth_disconnect,
-            commands::integrations::oauth_get_status,
-            commands::integrations::credentials::oauth_list_client_ids,
-            commands::integrations::credentials::oauth_set_client_id,
-            commands::integrations::credentials::oauth_set_client_secret,
-            commands::integrations::credentials::oauth_import_client_json,
-            commands::integrations::credentials::oauth_list_drive_folders,
-            commands::integrations::credentials::oauth_set_drive_folder,
-            commands::integrations::credentials::oauth_reset_drive_folder,
-            commands::integrations::credentials::oauth_set_api_key,
-            commands::integrations::credentials::oauth_test_client,
-            commands::llm::list_llm_backends,
-            commands::llm::create_llm_backend,
-            commands::llm::update_llm_backend,
-            commands::llm::delete_llm_backend,
-            commands::llm::set_default_llm_backend,
-            commands::llm::ping_llm_backend,
-            commands::llm::get_llm_cost_stats,
-            commands::llm::get_cost_alert_threshold,
-            commands::llm::reload_llm,
-            commands::llm::reload_llm_from_db,
-            commands::model_hub::get_hardware_profile,
-            commands::recommend::recommend_models,
-            commands::model_hub::search_hf_models,
-            commands::model_hub::get_hf_model,
-            commands::model_hub::start_model_download,
-            commands::model_hub::cancel_model_download,
-            commands::model_hub::list_installed_models,
-            commands::model_hub::delete_installed_model,
-            commands::model_hub::import_model_file,
-            commands::meta_automation::meta_parse_automation,
-            commands::meta_next_steps::meta_generate_next_steps,
-            commands::meta_rewrite::meta_rewrite_input,
-            commands::mcp_coaching::meta_generate_capabilities_coaching,
-            commands::triggers::list_triggers,
-            commands::triggers::set_trigger_enabled,
-            commands::triggers::fire_trigger,
-            commands::triggers::get_trigger_logs,
-            commands::triggers::create_trigger,
-            commands::triggers::update_trigger,
-            commands::triggers::delete_trigger,
-            commands::triggers::get_trigger_definition,
-            commands::memory::list_memory_namespaces,
-            commands::memory::list_memory_entries,
-            commands::memory::search_memory,
-            commands::memory::delete_memory_entry,
-            commands::memory::get_injected_memory_entries,
-            commands::notifications::list_notification_channels,
-            commands::notifications::test_notification_channel,
-            commands::notifications::get_notification_logs,
-            commands::notifications::list_runtime_activity,
-            commands::notifications::create_notification_channel,
-            commands::notifications::update_notification_channel,
-            commands::notifications::delete_notification_channel,
-            commands::notifications::get_notification_events,
-            commands::notifications::set_notification_events,
-            commands::observability::plan_cache::clear_plan_cache,
-            commands::observability::get_global_timeline,
-            commands::observability::audit::get_llm_daily_costs,
-            commands::observability::mailbox::list_mailbox_messages,
-            commands::observability::plan_cache::get_plan_cache_stats,
-            commands::observability::audit::get_tool_audit_trail,
-            commands::observability::audit::verify_audit_run,
-            commands::observability::audit::get_active_hooks,
-            commands::trace::get_task_trace,
-            commands::config::get_config,
-            commands::updates::check_for_update,
-            commands::updates::install_update,
-            commands::config::get_observability_config,
-            commands::config::set_observability_config,
-            commands::config::open_config_in_editor,
-            commands::config::lifecycle::reset_onboarding,
-            commands::config::lifecycle::clear_all_memories,
-            commands::config::lifecycle::clear_logs,
-            commands::config::lifecycle::factory_reset,
-            commands::config::lifecycle::app_restart,
-            commands::config::lifecycle::quit_app,
-            commands::config::lifecycle::mark_onboarded,
-            commands::config::system::get_system_info,
-            commands::config::system::get_security_posture,
-            commands::config::system::get_python_interpreter,
-            commands::config::system::set_python_interpreter,
-            commands::config::system::setup_local_llm,
-            commands::tools::list_tools,
-            commands::tools::describe_tool,
-            commands::tool_governance::governance_list_tools,
-            commands::tool_governance::governance_set_tool_enabled,
-            commands::tool_governance::governance_get_tool_config,
-            commands::tool_governance::governance_set_tool_config,
-            commands::tool_governance::governance_list_credentials,
-            commands::tool_governance::governance_set_credential,
-            commands::tool_governance::governance_delete_credential,
-            commands::tool_governance::governance_test_credential,
-            commands::tool_governance::governance_list_permission_rules,
-            commands::tool_governance::governance_revoke_permission_rule,
-            commands::tool_governance::governance_revoke_all_rules,
-            commands::tool_governance::governance_list_audit,
-            commands::chat::create_chat_session,
-            commands::chat::list_chat_sessions,
-            commands::chat::get_chat_session,
-            commands::chat::chat_session_metrics,
-            commands::chat::delete_chat_session,
-            commands::chat::rename_chat_session,
-            commands::chat::title::generate_chat_session_name,
-            commands::chat::update_chat_session,
-            commands::chat::send_chat_message,
-            commands::chat::regenerate_chat_response,
-            commands::chat::edit_and_resend_chat_message,
-            commands::chat::pause_chat_session,
-            commands::chat::authorize_chat_tool,
-            commands::chat_libre::get_chat_libre_config,
-            commands::chat_libre::update_chat_libre_config,
-            commands::chat_libre::list_chat_permission_rules,
-            commands::chat_libre::delete_chat_permission_rule,
-            commands::chat_libre::list_active_chat_session_authorizations,
-            commands::chat_libre::revoke_chat_session_authorization,
-            commands::chat::respond_user_input,
-            commands::chat::respond_user_input_rejected,
-            commands::chat::list_pending_user_inputs,
-            commands::chat::list_chat_approval_history,
-            commands::chat::link_chat_to_project,
-            commands::chat::list_chats_by_project,
-            commands::chat::list_a2a_skills,
-            commands::chat::export::export_conversation,
-            commands::chat::export::reveal_session_path,
-            commands::artifacts::save_artifact,
-            commands::artifacts::list_artifacts,
-            commands::artifacts::update_artifact,
-            commands::artifacts::delete_artifact,
-            commands::onboarding::get_onboarding_state,
-            commands::onboarding::check_onboarding_finalized,
-            commands::onboarding::finalize_onboarding_chat,
-            commands::onboarding::advance_onboarding_phase,
-            commands::onboarding::set_onboarding_profile,
-            commands::onboarding::trigger_onboarding,
-            commands::onboarding::resume_onboarding,
-            commands::onboarding::dismiss_onboarding,
-            commands::permissions_proposals::list_proposed_permission_rules,
-            commands::permissions_proposals::apply_proposed_permission_rule,
-            commands::permissions_proposals::dismiss_proposed_permission_rule,
-            commands::onboarding::ai_setup::get_ai_setup_info,
-            commands::onboarding::ai_setup::scan_for_gguf_models,
-            commands::onboarding::ai_setup::scan_for_whisper_models,
-            commands::onboarding::ai_setup::setup_whisper_model,
-            commands::onboarding::companion::get_companion_context,
-            commands::onboarding::companion::create_companion_session,
-            commands::onboarding::companion::set_companion_enabled,
-            commands::onboarding::companion::get_companion_enabled,
-            commands::user_memory::get_profile,
-            commands::user_memory::set_profile_entry,
-            commands::user_memory::delete_profile_entry,
-            commands::user_memory::reset_user_profile,
-            commands::user_memory::get_conversation_stats,
-            commands::stt::get_stt_config,
-            commands::stt::update_stt_config,
-            commands::stt::list_audio_input_devices,
-            commands::stt::reload_stt,
-            commands::stt::get_stt_status,
-            commands::stt::list_transcriptions,
-            commands::stt::delete_transcription,
-            commands::stt::transcribe_file,
-            commands::stt::list_stt_models,
-            commands::stt::start_tour_recording,
-            commands::stt::stop_tour_recording,
-            commands::mcp::catalog::list_mcp_enrichments,
-            commands::mcp::list_mcp_servers,
-            commands::mcp::list_mcp_resources,
-            commands::mcp::get_mcp_server_detail,
-            commands::mcp::add_mcp_server,
-            commands::mcp::remove_mcp_server,
-            commands::mcp::get_mcp_server_raw_config,
-            commands::mcp::update_mcp_server_config,
-            commands::mcp::test_mcp_connection,
-            commands::mcp::test_mcp_live_server,
-            commands::mcp::oauth::mcp_oauth_discover,
-            commands::mcp::oauth::mcp_oauth_resolve_client_id,
-            commands::mcp::oauth::mcp_oauth_login,
-            commands::mcp::restart_mcp_server,
-            commands::mcp::discovery::fetch_mcp_registry,
-            commands::mcp::discovery::fetch_mcp_curated,
-            commands::mcp::store_mcp_secret,
-            commands::mcp::delete_mcp_secret,
-            commands::mcp::set_mcp_server_approval,
-            commands::plan_mode::submit_plan_decision,
-            commands::plan_mode::get_plan_mode_default,
-            commands::plan_mode::set_plan_mode,
-            commands::plan_mode::approve_plan,
-            commands::plan_mode::reject_plan,
-            commands::plan_mode::list_plan_mutations,
-            commands::plan_mode::get_chat_plan,
-            // Tasks
-            commands::tasks::cancel_task,
-            // Memory
-            commands::memory::clear_memory,
-            commands::memory::purge_memory,
-            commands::memory::memory_export_namespace,
-            commands::memory::memory_import_namespace,
-            // Observability
-            commands::observability::audit::get_audit_stats,
-            // Updates
-            // Projects
-            commands::projects::suggest_workspace_path,
-            commands::projects::list_projects,
-            commands::projects::get_project,
-            commands::projects::create_project,
-            commands::projects::update_project,
-            commands::projects::delete_project,
-            commands::projects::upload_project_document,
-            commands::projects::delete_project_document,
-            commands::projects::get_project_snapshot,
-            commands::projects::add_project_agent,
-            commands::projects::remove_project_agent,
-            commands::projects::list_project_agents,
-            commands::projects::set_project_provider,
-            commands::projects::remove_project_provider,
-            commands::projects::toggle_project_provider,
-            commands::link_preview::link_preview,
-            // CLI install
-            commands::cli::get_cli_status,
-            commands::cli::install_cli,
-            commands::cli::uninstall_cli,
-            // Automation harness (dev-only, absent from release builds)
-            #[cfg(debug_assertions)]
-            commands::automation::automation_script,
-            #[cfg(debug_assertions)]
-            commands::automation::automation_capture,
-            #[cfg(debug_assertions)]
-            commands::automation::automation_resize,
-            #[cfg(debug_assertions)]
-            commands::automation::automation_finish,
-        ])
-        .build(tauri::generate_context!());
+        .invoke_handler(attached::gated(
+            attached::LinkMode::Embedded,
+            handlers::commands(),
+        ))
+        .build(tauri_context());
 
     or_exit(app, "build the Tauri application").run(|app, event| {
+        package_open::on_run_event(app, &event);
         // Kill every child process before the process exits. Otherwise they
         // are orphaned: `kill_on_drop` never runs because `app.exit`
         // terminates the process before the managed `RuntimeHandle` (and
@@ -722,4 +447,10 @@ fn main() {
             }
         }
     });
+}
+
+/// The Tauri context, generated once for the application and for the refusal
+/// window alike.
+fn tauri_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }

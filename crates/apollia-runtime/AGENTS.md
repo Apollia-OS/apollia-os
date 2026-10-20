@@ -26,6 +26,13 @@ endpoints. Most of the project's day-to-day Rust changes land here.
 | `AgentMailboxHandle` | durable inter-agent inbox | mpsc | 256 | `src/mailbox.rs` |
 | `SttEngine` | whisper audio pipeline | mpsc | 32 | `src/stt/engine.rs` |
 | `TimeoutWatcher` | expiry of `input_required` tasks | no channel; a `tokio::time::interval` scan loop | n/a | `src/timeout_watcher.rs` |
+| `BatchActor` | progress of every running batch: starts items up to their concurrency, counts their ends, interrupts past the failure threshold, pauses, resumes, stops and retries a batch, records and withdraws its grants, publishes waiting items and the end of a batch, resumes running batches at start | two mpsc | 64 commands, 256 item ends | `src/batch/actor.rs` |
+| `CompatServerHandle` | the compatible server's listener: opens it at start when `[server] enabled` says so, starts, stops and restarts it on request (binding the loopback interface, or every interface when `[server] serve_on_lan` says so) and writes the switch, keeps the last start error, closes it on `ShutdownRequested` without touching the switch; its routes run an exposed agent as a batch of one item through `BatchActor`, and an exposed workflow through `WorkflowActor`, and stop the run when the client goes away; each request it receives leaves a `ServerCall` entry in the audit journal, through the journal's own handle (`src/compat_server/journal.rs`) | mpsc | 64 | `src/compat_server/actor.rs` |
+| `GovernanceActor` | what every tool call is decided from: the organisation policy read at boot, the fine rules and standing consents of `governance.db`, the developer mode; publishes it as one state on a `watch` channel that a decision reads without waiting, writes an "always" answered at a prompt as a standing consent, rereads the files when another process changed them | mpsc | 64 | `src/governance/actor.rs` |
+| `ServerTokensHandle` | the tokens of the compatible server in `system.db`: creates one (`apo_` value answered once, only its SHA-256 kept), lists and revokes them, counts those in use, checks a presented token in constant time and stamps its last use, names the token a request presented for the journal; spawned by `CompatServerHandle`, stops when its handles drop | mpsc | 256 | `src/compat_server/tokens.rs` |
+| `ServerLogsHandle` | the logs of the compatible server: a ring of the last 2000 lines (one per request it answered, one per line a local `llama-server` printed), oldest out first; streams them to each subscriber at its level, then the new ones, through a bounded channel of 256 that drops what a slow reader cannot hold; clears the ring and nothing else; writers never wait (`try_send`); spawned by `CompatServerHandle`, stops on `ShutdownRequested` | mpsc | 1024 | `src/compat_server/logs.rs` |
+| `ConfigReloadHandle` | the configuration in force: applies a saved or changed `apollia.toml`, sends its live sections on one `watch` channel each, lists the keys waiting for a restart, publishes `ConfigReloaded` and `ConfigInvalid`, journals each change with its origin; stops on `ShutdownRequested` | mpsc | 16 | `src/config_reload/actor.rs` |
+| `WorkflowActor` | the workflow runs in progress and their cancellation tokens: launches a run after checking its inputs, stops one and answers once it ended, fails at start the runs a stopped process left running, takes the workflows of an uninstalled package out of its catalogue; keeps the questions runs asked the user (`ctx.user.ask`) with the channel of each answer, lists them, hands an answer or a refusal to the run that waits and forgets the questions of a run that ended or stopped; each run reports its steps itself, to `hitl.db` and the bus | mpsc | 64 | `src/workflows/actor.rs` |
 
 Hosted from other crates, started by this one :
 
@@ -33,7 +40,6 @@ Hosted from other crates, started by this one :
 |---|---|---|---|---|
 | `TriggerEngine` | cron + filewatch + webhook -> task spawn | two mpsc | 256 events, 64 commands | `crates/apollia-triggers/src/engine.rs` |
 | `NotificationEngine` | desktop notify + webhook | mpsc | 8 | `crates/apollia-notifications/src/engine.rs` |
-| `AuditTrailHandle` | append-only tool-invocation ledger | mpsc | 1024 | `crates/apollia-tools/src/audit.rs` |
 | `LlmRouter` | backend selection per agent | none; a plain struct, called synchronously | n/a | `crates/apollia-llm/src/router.rs` |
 
 Capacities are sized for the steady state. Burst absorption relies on
@@ -81,6 +87,8 @@ src/api/
 ├── mod.rs                    # router assembly
 ├── routes_agents.rs          # /api/v1/agents/*
 ├── routes_tasks.rs           # /api/v1/tasks/*
+├── routes_batches.rs         # /api/v1/batches/*
+├── routes_workflows.rs       # /api/v1/workflows/*, /api/v1/workflow-runs/*
 ├── routes_tools.rs           # /api/v1/tools/*
 ├── routes_triggers.rs        # /api/v1/triggers/*
 ├── routes_notifications.rs   # /api/v1/notifications/*
@@ -109,6 +117,44 @@ Rules :
   There is no `auth.toml`.
 - Error responses : `{"error": {"code": "...", "message": "...", "details": ...}}`,
   HTTP status reflecting the error class.
+
+Exemption, the compatible endpoints. The compatible server is a second
+listener on its own port (`[server] port`, 7772 by default), separate from the
+native API above, and the paths it serves are not Apollia's: they follow the
+OpenAI and Anthropic formats, so they live under `/v1/...`, use those APIs'
+`snake_case` field names, and answer errors in the envelope of their family:
+OpenAI's `{"error": {"message", "type", "code"}}`, or Anthropic's
+`{"type": "error", "error": {"type", "message"}}` on `/v1/messages` and
+`/v1/messages/count_tokens` (`src/compat_server/errors.rs`). They serve the
+local models only, relayed to the engine that runs them; a remote backend is
+never relayed. A response or a message that brings an MCP server of its own
+(`[server] allow_request_mcp`, off by default) is not relayed either: the
+runtime connects to the server over HTTP for the length of the call, through
+`McpClientManagerHandle::add_request_server`, and runs the tool loop through
+the agent executor under the agent `request-mcp`, which is stored nowhere
+(`src/compat_server/request_mcp_run.rs`). Its tools are unclassified, the run
+is unattended, and the connection is removed when the call ends or its caller
+goes away. Their authentication is
+not the native API's: with `[server] require_auth`, a request presents a token
+of the server (`apo_...`, `Authorization: Bearer` or `x-api-key`), and the
+internal token never opens them. Each request carries its `CallOrigin`
+(loopback or local network, read from the peer address at accept), and a call
+to an agent or a workflow from the local network goes through
+`admit_agent_call`, which wants a token in use whatever `require_auth` says.
+The organisation policy closes three of their settings and only closes
+(`serve_on_lan`, `require_auth`, `allow_request_mcp`): the actor and
+`LocalModels` resolve them under the `PolicySettings` read at boot, never under
+`PolicySettings::none()`, and a server the file had left open against the policy
+leaves one `PolicySettingEnforced` entry per key (`src/compat_server/policy.rs`).
+None of the rules of this section
+applies to them. They live in `src/compat_server/`, never in `src/api/` and
+never under `/api/v1/`, so `scripts/check_openapi_routes.py` does not read them
+and `clients/openapi.json` does not declare them. Their contract is the public
+page `docs/site/docs/reference/compatible-endpoints.md`, and
+`scripts/check_compat_routes.py` holds every path the module's router serves
+against that page's table, in both languages. Only the routes that start, stop, restart and
+read the server, and those that create, list and revoke its tokens, live in the
+native API (`src/api/routes_server.rs`, `/api/v1/server`), under its rules.
 
 Adding a route :
 1. Define the request/response types in the same `routes_*.rs` file.
@@ -168,8 +214,8 @@ SQLite + `rusqlite` + FTS5. WAL journal mode.
 Databases : one file per subsystem under `~/.apollia/`, catalogued by
 `apollia_core::paths::DataFile`, whose `file_name()` is the single source for
 the names. There is no `runtime.db`. The catalogue holds `agents.db`,
-`artifacts.db`, `audit.db`, `audit_journal.db`, `chat.db`, `governance.db`,
-`hitl.db`, `llm_calls.db`, `mailbox.db`, `mcp.db`, `mcp_approvals.db`,
+`artifacts.db`, `audit_journal.db`, `chat.db`, `governance.db`,
+`hitl.db`, `llm_calls.db`, `mailbox.db`, `mcp.db`,
 `notifications.db`, `plan_cache.db`, `plans.db`, `projects.db`,
 `runtime_events.db`, `sidechains.db`, `stt_transcriptions.db`, `system.db`,
 `triggers.db`, `triggers_def.db` and `user_memory.db`. Per-agent memory lives
@@ -215,18 +261,29 @@ syntax follows SQLite's FTS5 (`tag:value`, `+required`, `-excluded`).
 ## 6. Configuration
 
 Runtime config : `apollia.toml`, resolved as an explicit `--config` override,
-then an `apollia.toml` in the working directory, then
-`$XDG_CONFIG_HOME/apollia/apollia.toml` (or
-`~/.config/apollia/apollia.toml`). It is not under `~/.apollia/`, which holds
-the data files. Parsed via `serde` into the
+otherwise `apollia_core::paths::config_file()`, that is
+`~/.apollia/apollia.toml`, the one file every surface reads. The working
+directory and `~/.config/apollia/` are never read. Parsed via `serde` into the
 `RuntimeConfig` struct (`crates/apollia-core/src/config/runtime.rs`).
 
-There is no `SIGHUP` handler. What reloads does so through an explicit
-route or command, each on its own subsystem: `POST /api/v1/triggers/reload`
-(503 when the runtime was started without a config file), the STT reload
-route and the desktop reload command, both swapping a shared cell rather
-than restarting the actor. A change to any other key takes effect at the
-next start.
+There is no `SIGHUP` handler. The runtime follows `apollia.toml` itself:
+`ConfigReloadHandle` (`src/config_reload/`) holds the last valid
+configuration, reads a text the save route wrote or the file changed on disk
+(`ApolliaConfigWatcher`, `apollia-triggers`), and sends each changed section
+whose keys are `Reloadable` in the key registry on a `tokio::sync::watch`
+channel of its own. A consumer holds that section as a `Live<T>`: it reads
+`get()` at each use, or applies `changed()` between two messages. The keys of
+class `Restart` wait for the next start and are listed by `GET /api/v1/config`.
+Each text applied is written to the signed journal as `ConfigurationChanged`
+(keys, origin, fingerprints, never a value), once the supervisor has handed
+the journal to the reloader with `attach_journal`; a code path that writes the
+file itself shows the written text to `ConfigReloadHandle::saved` with its
+origin, otherwise the watcher finds it and the journal says `external_file`.
+A new consumer of a live section takes a `Live<T>` (a plain value converts,
+for the tests), never a copy made at boot. The subsystems with a reload of
+their own keep it: `POST /api/v1/triggers/reload` (503 when the runtime was
+started without a config file), the STT reload route and the desktop reload
+command, both swapping a shared cell rather than restarting the actor.
 
 Inter-agent mailbox caps live on `RuntimeConfig` as `mailbox_*` fields,
 mapped to `MailboxConfig` at boot :

@@ -4,11 +4,9 @@
 //! `GET /api/v1/tools/:name`) to fetch the tool list and the full descriptor of
 //! a tool registered in the ToolRegistry.
 
-use apollia_runtime::embedded::RuntimeHandle;
+use crate::attached::RuntimeLink;
 use serde::{Deserialize, Serialize};
 use tauri::State;
-
-use super::http_get_json;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -44,6 +42,10 @@ pub struct ToolDescriptorView {
     pub output_schema: Option<serde_json::Value>,
     /// Permissions required by the tool.
     pub permissions: Vec<String>,
+    /// Action family of the tool. `unclassified` when the payload carries none.
+    pub family: apollia_tools::ActionFamily,
+    /// Origin of [`Self::family`].
+    pub family_source: apollia_tools::FamilySource,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,8 +53,8 @@ pub struct ToolDescriptorView {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Fetches the list of registered tools via the internal REST API.
-async fn list_tools_inner(port: u16) -> Result<Vec<ToolSummary>, String> {
-    let json = http_get_json(port, "/api/v1/tools").await?;
+async fn list_tools_inner(link: &RuntimeLink) -> Result<Vec<ToolSummary>, String> {
+    let json = link.get_json("/api/v1/tools").await?;
 
     let tools_array = json
         .get("tools")
@@ -104,17 +106,39 @@ fn read_kind(value: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// Read a descriptor's action family and its source.
+///
+/// A payload without them, or with a value this build does not know, reads as
+/// unclassified with no source: the state every reader treats as sensitive.
+fn read_family(
+    json: &serde_json::Value,
+) -> (apollia_tools::ActionFamily, apollia_tools::FamilySource) {
+    let family = json
+        .get("family")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let source = json
+        .get("family_source")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    (family, source)
+}
+
 /// Fetches a tool's descriptor via the internal REST API.
 ///
 /// Returns `Ok(None)` if the name is empty or the tool does not exist (404).
-async fn describe_tool_inner(port: u16, name: &str) -> Result<Option<ToolDescriptorView>, String> {
+async fn describe_tool_inner(
+    link: &RuntimeLink,
+    name: &str,
+) -> Result<Option<ToolDescriptorView>, String> {
     if name.is_empty() {
         return Ok(None);
     }
 
     let path = format!("/api/v1/tools/{name}");
-    match http_get_json(port, &path).await {
+    match link.get_json(&path).await {
         Ok(json) => {
+            let (family, family_source) = read_family(&json);
             let view = ToolDescriptorView {
                 name: json
                     .get("name")
@@ -143,6 +167,8 @@ async fn describe_tool_inner(port: u16, name: &str) -> Result<Option<ToolDescrip
                             .collect()
                     })
                     .unwrap_or_default(),
+                family,
+                family_source,
             };
             Ok(Some(view))
         }
@@ -157,8 +183,8 @@ async fn describe_tool_inner(port: u16, name: &str) -> Result<Option<ToolDescrip
 
 /// Returns the list of tools registered in the runtime.
 #[tauri::command]
-pub async fn list_tools(state: State<'_, RuntimeHandle>) -> Result<Vec<ToolSummary>, String> {
-    list_tools_inner(state.api_port).await
+pub async fn list_tools(state: State<'_, RuntimeLink>) -> Result<Vec<ToolSummary>, String> {
+    list_tools_inner(&state).await
 }
 
 /// Returns the full descriptor of a tool by its name.
@@ -166,10 +192,10 @@ pub async fn list_tools(state: State<'_, RuntimeHandle>) -> Result<Vec<ToolSumma
 /// Returns `null` if the tool does not exist or the name is empty.
 #[tauri::command]
 pub async fn describe_tool(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     name: String,
 ) -> Result<Option<ToolDescriptorView>, String> {
-    describe_tool_inner(state.api_port, &name).await
+    describe_tool_inner(&state, &name).await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -223,6 +249,8 @@ mod tests {
             input_schema: Some(serde_json::json!({"type": "object"})),
             output_schema: None,
             permissions: vec!["execute".to_string()],
+            family: apollia_tools::ActionFamily::ExecuteCode,
+            family_source: apollia_tools::FamilySource::Builtin,
         };
 
         // WHEN serialized to JSON
@@ -235,6 +263,33 @@ mod tests {
         assert!(json["input_schema"].is_object());
         assert!(json["output_schema"].is_null());
         assert_eq!(json["permissions"], serde_json::json!(["execute"]));
+        assert_eq!(json["family"], "execute_code");
+        assert_eq!(json["family_source"], "builtin");
+    }
+
+    #[test]
+    fn test_read_family_takes_the_descriptor_fields() {
+        // GIVEN a descriptor payload classified by the curated selection
+        let json = serde_json::json!({ "family": "send_external", "family_source": "selection" });
+        // WHEN its family is read
+        let (family, source) = read_family(&json);
+        // THEN both values are carried over
+        assert_eq!(family, apollia_tools::ActionFamily::SendExternal);
+        assert_eq!(source, apollia_tools::FamilySource::Selection);
+    }
+
+    #[test]
+    fn test_read_family_is_unclassified_when_absent_or_unknown() {
+        // GIVEN a payload without a family, and one with a value no build knows
+        let missing = serde_json::json!({});
+        let unknown = serde_json::json!({ "family": "teleport", "family_source": "oracle" });
+        // WHEN each family is read
+        // THEN both read as unclassified with no source, the sensitive state
+        for json in [missing, unknown] {
+            let (family, source) = read_family(&json);
+            assert_eq!(family, apollia_tools::ActionFamily::Unclassified);
+            assert_eq!(source, apollia_tools::FamilySource::Unsourced);
+        }
     }
 
     #[test]
@@ -248,6 +303,8 @@ mod tests {
             input_schema: None,
             output_schema: None,
             permissions: vec![],
+            family: apollia_tools::ActionFamily::Unclassified,
+            family_source: apollia_tools::FamilySource::Unsourced,
         };
 
         // WHEN serialized

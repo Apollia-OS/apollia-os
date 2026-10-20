@@ -7,7 +7,9 @@
 //! - [`HfRegistryClient`]: main HTTP client
 //! - [`HfModelCard`]: metadata for an HF model
 //! - [`HfFile`]: a file in an HF repo (with size for the compatibility badges)
-//! - [`HfSearchFilter`]: search filters (format, sort, etc.)
+//! - [`BoundedSearch`]: a search bounded to the official publishers and the
+//!   recognised converters, one request per organisation
+//! - [`GeneratedCard`]: the card Apollia builds for each search result
 
 #![cfg(feature = "cloud")]
 
@@ -16,15 +18,27 @@ use thiserror::Error;
 
 use crate::hardware::{CompatibilityBadge, HardwareProfile};
 
+mod bounded;
+mod card;
 mod compat;
+mod generated;
 mod parse;
+mod variant;
+
+pub use bounded::{
+    search_authors, selection_repos, BoundedPage, BoundedSearch, BoundedSearchError, FoundModel,
+    SearchAuthor, SearchContext, SearchFormat, SearchInputs, SearchSort,
+};
+pub use generated::GeneratedCard;
 
 use compat::compat_from_model_type;
 pub use compat::HfModelTypeCache;
 use parse::{
-    build_gguf_files, build_search_url, extract_base_model_from_json, parse_model_list_item,
-    parse_next_link, reevaluate_gguf_compat, resolve_model_type,
+    build_gguf_files, extract_base_model_from_json, lfs_sha256_by_path, parse_model_list_item,
+    reevaluate_gguf_compat, resolve_config_facts,
 };
+use variant::plan_variant;
+pub use variant::{VariantError, VariantFile, VariantPlan, VariantSelector};
 
 /// Errors of the HuggingFace client.
 #[derive(Debug, Error)]
@@ -49,6 +63,20 @@ pub enum HfError {
     /// The model is gated and requires an HF token.
     #[error("model '{0}' is gated - a HuggingFace token is required")]
     Gated(String),
+
+    /// The repository tree publishes no SHA-256 for this file, so its
+    /// download cannot be verified.
+    #[error("no published sha256 for '{path}' in repository '{repo_id}'")]
+    NoPublishedSha256 {
+        /// Repository (`org/name`).
+        repo_id: String,
+        /// Path of the file inside the repository.
+        path: String,
+    },
+
+    /// The repository tree holds no complete variant for the request.
+    #[error(transparent)]
+    Variant(#[from] VariantError),
 }
 
 /// Metadata card for a HuggingFace model.
@@ -58,10 +86,17 @@ pub struct HfModelCard {
     pub repo_id: String,
     /// Author / organization.
     pub author: Option<String>,
+    /// Whether the owner is an official publisher, a recognised converter, or
+    /// neither (`None`), read from the embedded publisher lists.
+    #[serde(default)]
+    pub publisher_kind: Option<crate::recommend::PublisherKind>,
     /// Download count (rolling 30 days).
     pub downloads: u64,
     /// Number of likes.
     pub likes: u64,
+    /// When the repository last changed, as the Hub reports it (RFC 3339).
+    #[serde(default)]
+    pub last_modified: Option<String>,
     /// SPDX license (e.g. `"apache-2.0"`, `"mit"`).
     pub license: Option<String>,
     /// HF tags (e.g. `["gguf", "qwen3", "text-generation"]`).
@@ -78,6 +113,15 @@ pub struct HfModelCard {
     pub compatibility_issue: Option<CompatIssue>,
     /// HF model type from `config.json` (e.g. `"LlamaForCausalLM"`).
     pub model_type: Option<String>,
+    /// What the model can do: tools and reasoning from its chat template,
+    /// vision when the repository publishes a projector (GGUF) or declares a
+    /// `vision_config` (MLX). A search result carries vision alone.
+    #[serde(default)]
+    pub capabilities: crate::capabilities::Capabilities,
+    /// The short list of variants, at most one per level, each sized and
+    /// graded for this machine. Empty on a search result, which has no sizes.
+    #[serde(default)]
+    pub variants: Vec<crate::recommend::ModelVariant>,
 }
 
 /// Reasons a model is incompatible with llama.cpp.
@@ -105,6 +149,17 @@ pub struct HfFile {
     pub compatibility: Option<CompatibilityBadge>,
     /// Direct download URL.
     pub download_url: String,
+    /// SHA-256 of the file content, lowercase hex, as HuggingFace publishes it
+    /// for every LFS file (`lfs.oid` in the repository tree). `None` for a
+    /// file that is not stored through LFS, or when the tree was not read (a
+    /// search result only lists names).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Quantisation the file name declares (`Q4_K_M`, `BF16`), read here so
+    /// no surface has to parse a file name. `None` for a projector and a name
+    /// that declares none.
+    #[serde(default)]
+    pub quantization: Option<String>,
 }
 
 /// Recommended generation parameters from `generation_config.json`.
@@ -115,34 +170,6 @@ pub struct GenerationConfig {
     pub top_k: Option<u32>,
     pub repetition_penalty: Option<f64>,
     pub max_new_tokens: Option<u32>,
-}
-
-/// Filters for HF model search.
-#[derive(Debug, Clone, Default)]
-pub struct HfSearchFilter {
-    /// Filter by tag (e.g. `"gguf"`).
-    pub filter: Option<String>,
-    /// Sort: `"downloads"` (default), `"likes"`, `"trending"`, `"createdAt"`.
-    pub sort: Option<String>,
-    /// Maximum number of results.
-    pub limit: Option<u32>,
-    /// Filter by HF task (e.g. `"text-generation"`).
-    pub pipeline_tag: Option<String>,
-    /// Filter by language (e.g. `"fr"`, `"en"`, `"zh"`).
-    pub language: Option<String>,
-    /// "Load more" cursor: the full URL returned by the HF API in the
-    /// `Link: rel="next"` header. When set, it replaces all other parameters
-    /// (the request is already encoded in the URL).
-    pub next_cursor: Option<String>,
-}
-
-/// Result of one HF search page.
-#[derive(Debug, Clone, Serialize)]
-pub struct SearchPage {
-    /// Models in this page.
-    pub models: Vec<HfModelCard>,
-    /// URL of the next page (`Link: rel="next"` header); `None` on the last page.
-    pub next_cursor: Option<String>,
 }
 
 // ── Compatibility detection ───────────────────────────────────────────────
@@ -158,11 +185,24 @@ pub(crate) struct TreeEntry {
     size: u64,
     #[serde(rename = "type")]
     entry_type: String,
+    /// Git object identifier: for a file committed outside LFS, the SHA-1 of
+    /// the blob (`blob <size>\0` then the content); for an LFS file, the
+    /// identifier of its pointer, never of its content.
+    #[serde(default)]
+    oid: Option<String>,
+    /// Present only for a file stored through LFS.
+    #[serde(default)]
+    lfs: Option<TreeLfs>,
+}
+
+/// The `lfs` object of a tree entry: `oid` is the SHA-256 of the content.
+#[derive(Debug, Deserialize)]
+pub(crate) struct TreeLfs {
+    oid: String,
 }
 
 // ── Client ────────────────────────────────────────────────────────────────
 
-pub(crate) const HF_API_BASE: &str = "https://huggingface.co/api";
 pub(crate) const HF_CDN_BASE: &str = "https://huggingface.co";
 
 /// Cap for every HuggingFace JSON answer. A model listing page is a few tens of
@@ -174,11 +214,22 @@ const HF_MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
 pub struct HfRegistryClient {
     client: reqwest::Client,
     token: Option<String>,
+    /// Root of the JSON API, `https://huggingface.co/api` unless overridden.
+    api_base: String,
+    /// Root of the file host, `https://huggingface.co` unless overridden.
+    cdn_base: String,
 }
 
 impl HfRegistryClient {
     /// Create a new client. `token` is optional (only for gated models).
     pub fn new(token: Option<String>) -> Self {
+        Self::with_hub_base(token, HF_CDN_BASE)
+    }
+
+    /// Create a client addressing a Hub at `base` rather than HuggingFace, for
+    /// a mirror or a test server. `base` is the host root, without `/api`.
+    pub fn with_hub_base(token: Option<String>, base: &str) -> Self {
+        let base = base.trim_end_matches('/');
         let client = apollia_core::net::safe_client_builder()
             .user_agent("Apollia-OS/1.0")
             .timeout(std::time::Duration::from_secs(30))
@@ -187,7 +238,12 @@ impl HfRegistryClient {
             // backend that will not initialise; every setting above it is a
             // literal fixed in this file.
             .expect("the TLS backend failed to initialise");
-        Self { client, token }
+        Self {
+            client,
+            token,
+            api_base: format!("{base}/api"),
+            cdn_base: base.to_owned(),
+        }
     }
 
     fn auth_headers(&self) -> reqwest::header::HeaderMap {
@@ -198,55 +254,6 @@ impl HfRegistryClient {
             }
         }
         headers
-    }
-
-    /// Search GGUF models on HuggingFace.
-    ///
-    /// Returns a [`SearchPage`] with the models and a `next_cursor` for
-    /// pagination. The cursor is extracted from the HTTP `Link: rel="next"`
-    /// header and holds the full URL of the next page. Pass this cursor in
-    /// `filter.next_cursor` to load the next page.
-    ///
-    /// # Errors
-    /// [`HfError::Http`] if the request fails.
-    pub async fn search(
-        &self,
-        query: &str,
-        filter: HfSearchFilter,
-        hardware: Option<&HardwareProfile>,
-    ) -> Result<SearchPage, HfError> {
-        // If a cursor is provided, use it directly (the URL already encodes all filters).
-        let url = match filter.next_cursor.as_ref() {
-            Some(cursor) => cursor.clone(),
-            None => build_search_url(query, &filter),
-        };
-
-        let resp = self
-            .client
-            .get(&url)
-            .headers(self.auth_headers())
-            .send()
-            .await?;
-
-        // Extract the pagination cursor from the `Link: <url>; rel="next"` header.
-        let next_cursor = parse_next_link(resp.headers());
-
-        let json: serde_json::Value = apollia_core::net::read_capped_json(resp, HF_MAX_JSON_BYTES)
-            .await
-            .map_err(|e| HfError::Body(e.to_string()))?;
-        let raw_models = json.as_array().cloned().unwrap_or_default();
-
-        let mut cards = Vec::new();
-        for m in raw_models {
-            if let Some(card) = parse_model_list_item(&m, hardware) {
-                cards.push(card);
-            }
-        }
-
-        Ok(SearchPage {
-            models: cards,
-            next_cursor,
-        })
     }
 
     /// Fetch the full metadata of a model (including the list of GGUF files).
@@ -264,9 +271,10 @@ impl HfRegistryClient {
         hardware: Option<&HardwareProfile>,
         type_cache: Option<&HfModelTypeCache>,
     ) -> Result<HfModelCard, HfError> {
-        let meta_url = format!("{HF_API_BASE}/models/{repo_id}");
-        let tree_url = format!("{HF_API_BASE}/models/{repo_id}/tree/main?recursive=true");
-        let config_url = format!("{HF_CDN_BASE}/{repo_id}/resolve/main/config.json");
+        let api = &self.api_base;
+        let meta_url = format!("{api}/models/{repo_id}");
+        let tree_url = format!("{api}/models/{repo_id}/tree/main?recursive=true");
+        let config_url = format!("{}/{repo_id}/resolve/main/config.json", self.cdn_base);
 
         // Check cache before firing the config.json request.
         let cached_model_type = if let Some(cache) = type_cache {
@@ -329,18 +337,21 @@ impl HfRegistryClient {
         // Re-evaluate NoGgufFiles based on authoritative tree data.
         reevaluate_gguf_compat(&mut card);
 
-        // Determine model_type: prefer cache, then config_resp.
-        let model_type =
-            resolve_model_type(cached_model_type, config_resp, type_cache, repo_id).await;
+        // What config.json says: prefer cache, then config_resp.
+        let config = resolve_config_facts(cached_model_type, config_resp, type_cache, repo_id)
+            .await
+            .unwrap_or_default();
 
-        card.model_type = model_type.clone();
+        card.model_type = config.model_type.clone();
 
         // Refine compat with model_type only if pipeline_tag didn't already flag an issue.
         if card.compatibility_issue.is_none() {
-            if let Some(ref mt) = model_type {
+            if let Some(ref mt) = config.model_type {
                 card.compatibility_issue = compat_from_model_type(mt);
             }
         }
+
+        card::fill(&mut card, &meta_json, &tree_entries, &config, hardware);
 
         Ok(card)
     }
@@ -356,7 +367,7 @@ impl HfRegistryClient {
     /// GGUF derivation: quantizers do not republish the config file (it comes
     /// from the upstream repo).
     pub async fn resolve_base_model(&self, repo_id: &str) -> Option<String> {
-        let url = format!("{HF_API_BASE}/models/{repo_id}");
+        let url = format!("{}/models/{repo_id}", self.api_base);
         let resp = self
             .client
             .get(&url)
@@ -373,11 +384,76 @@ impl HfRegistryClient {
         extract_base_model_from_json(&json)
     }
 
+    /// The SHA-256 HuggingFace publishes for one file of a repository.
+    ///
+    /// Reads the recursive tree of `main` and returns the `lfs.oid` of the
+    /// entry whose path is `path`. This is the reference a downloaded file is
+    /// checked against.
+    ///
+    /// # Errors
+    /// - [`HfError::NotFound`] / [`HfError::Gated`] on a 404 / 403.
+    /// - [`HfError::NoPublishedSha256`] when the file is absent from the tree
+    ///   or not stored through LFS.
+    pub async fn lfs_sha256(&self, repo_id: &str, path: &str) -> Result<String, HfError> {
+        let entries = self.tree(repo_id).await?;
+        lfs_sha256_by_path(&entries)
+            .remove(path)
+            .ok_or_else(|| HfError::NoPublishedSha256 {
+                repo_id: repo_id.to_string(),
+                path: path.to_string(),
+            })
+    }
+
+    /// Every file of one variant of `repo_id`, with where each lands and the
+    /// reference its download is checked against.
+    ///
+    /// # Errors
+    /// The errors of reading the tree (as [`Self::lfs_sha256`]), and
+    /// [`HfError::Variant`] when the tree holds no complete variant.
+    pub async fn variant_plan(
+        &self,
+        repo_id: &str,
+        selector: &VariantSelector,
+    ) -> Result<VariantPlan, HfError> {
+        let entries = self.tree(repo_id).await?;
+        Ok(plan_variant(&self.cdn_base, repo_id, &entries, selector)?)
+    }
+
+    /// The recursive tree of `main`.
+    async fn tree(&self, repo_id: &str) -> Result<Vec<TreeEntry>, HfError> {
+        let url = format!(
+            "{}/models/{repo_id}/tree/main?recursive=true",
+            self.api_base
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await?;
+        match resp.status() {
+            reqwest::StatusCode::NOT_FOUND => return Err(HfError::NotFound(repo_id.to_string())),
+            reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::UNAUTHORIZED => {
+                return Err(HfError::Gated(repo_id.to_string()))
+            }
+            s if !s.is_success() => {
+                return Err(HfError::Body(format!("tree of {repo_id} answered {s}")))
+            }
+            _ => {}
+        }
+        apollia_core::net::read_capped_json(resp, HF_MAX_JSON_BYTES)
+            .await
+            .map_err(|e| HfError::Body(e.to_string()))
+    }
+
     /// Fetch the recommended generation parameters from `generation_config.json`.
     ///
     /// Returns `None` if the file is absent (model with no explicit generation config).
     pub async fn get_generation_config(&self, repo_id: &str) -> Option<GenerationConfig> {
-        let url = format!("{HF_CDN_BASE}/{repo_id}/resolve/main/generation_config.json");
+        let url = format!(
+            "{}/{repo_id}/resolve/main/generation_config.json",
+            self.cdn_base
+        );
         let resp = self
             .client
             .get(&url)
@@ -502,11 +578,151 @@ mod tests {
     }
 
     #[test]
+    fn a_file_the_old_badge_called_tight_gets_the_estimator_verdict_in_the_hub() {
+        // GIVEN a 16 GiB file on a 32 GB Apple Silicon machine (24 GB budget):
+        // the old badge, 16 x 1.1 = 17.6 over 70 % of 24 = 16.8, said
+        // "might fit"; the estimator, weights plus cache plus overhead, says
+        // it fits
+        let profile = HardwareProfile {
+            total_ram_gb: 32.0,
+            available_ram_gb: 20.0,
+            cpu_model: "test".to_owned(),
+            cpu_cores: 8,
+            accelerator: crate::hardware::AcceleratorProfile::AppleSilicon {
+                chip: "M3 Max".to_owned(),
+                generation: 3,
+                vram_gb: 32.0,
+            },
+            memory_budget_gb: 24.0,
+            devices: Vec::new(),
+        };
+        let size: u64 = 16 * 1024 * 1024 * 1024;
+        let entries: Vec<TreeEntry> = serde_json::from_value(json!([
+            { "type": "file", "path": "model-Q4_K_M.gguf", "size": size }
+        ]))
+        .expect("tree parses");
+
+        // WHEN the Hub lists the file
+        let files = build_gguf_files(&entries, "org/model-GGUF", Some(&profile));
+
+        // THEN its badge is the estimator's, the same one the ranking and the
+        // offload plan read for the same inputs
+        let fit = crate::recommend::assess_fit(
+            size,
+            &crate::gguf_probe::GgufHeaderFacts::default(),
+            &profile,
+            &crate::recommend::RuntimeShape::default(),
+        );
+        assert_eq!(fit.badge, CompatibilityBadge::Fits);
+        assert!(fit.plan.fully_offloaded);
+        assert_eq!(files[0].compatibility, Some(CompatibilityBadge::Fits));
+    }
+
+    /// A tree recorded from `ggml-org/SmolVLM-256M-Instruct-GGUF`: two plain
+    /// git files and four LFS files.
+    const RECORDED_TREE: &str = include_str!("hf_registry/fixtures/tree_smolvlm_256m.json");
+
+    #[test]
+    fn tree_yields_the_lfs_sha256_of_every_lfs_file() {
+        // GIVEN a repository tree recorded from the HuggingFace API
+        let entries: Vec<TreeEntry> =
+            serde_json::from_str(RECORDED_TREE).expect("recorded tree parses");
+
+        // WHEN the tree is read
+        let by_path = lfs_sha256_by_path(&entries);
+        let files = build_gguf_files(&entries, "ggml-org/SmolVLM-256M-Instruct-GGUF", None);
+
+        // THEN every LFS file carries its lfs.oid, and the plain git files none
+        assert_eq!(by_path.len(), 4);
+        assert_eq!(
+            by_path
+                .get("SmolVLM-256M-Instruct-Q8_0.gguf")
+                .map(String::as_str),
+            Some("2a31195d3769c0b0fd0a4906201666108834848db768af11de1d2cef7cd35e65")
+        );
+        assert_eq!(
+            by_path
+                .get("mmproj-SmolVLM-256M-Instruct-f16.gguf")
+                .map(String::as_str),
+            Some("0802360aca1748f112ea510b8ff277c65b1361c8ef30ed89b83c9c7a60d08e96")
+        );
+        assert!(!by_path.contains_key("README.md"));
+        assert!(!by_path.contains_key(".gitattributes"));
+        assert_eq!(files.len(), 4);
+        for file in &files {
+            assert_eq!(file.sha256.as_ref(), by_path.get(&file.filename));
+        }
+    }
+
+    #[test]
+    fn tree_entry_with_a_malformed_oid_has_no_sha256() {
+        // GIVEN an LFS entry whose oid is not a SHA-256
+        let entries: Vec<TreeEntry> = serde_json::from_value(json!([
+            { "type": "file", "path": "a.gguf", "size": 3, "lfs": { "oid": "abc", "size": 3 } }
+        ]))
+        .expect("tree parses");
+
+        // WHEN the tree is read
+        let by_path = lfs_sha256_by_path(&entries);
+
+        // THEN no reference is offered for that file
+        assert!(by_path.is_empty());
+    }
+
+    #[test]
     fn base_model_ignores_malformed_tag_without_slash() {
         // GIVEN: a tag that's `base_model:something` but without org/name
         let payload = json!({ "tags": ["base_model:notavalidrepo"] });
         // WHEN the base model is extracted
         // THEN the malformed tag is ignored rather than taken for a repo id
         assert!(extract_base_model_from_json(&payload).is_none());
+    }
+
+    /// A search page recorded from the HuggingFace API on 2026-10-01:
+    /// `models?search=Qwen3-4B&filter=gguf&sort=downloads&limit=20`.
+    const RECORDED_SEARCH: &str = include_str!("hf_registry/fixtures/search_qwen3_4b_gguf.json");
+
+    #[test]
+    fn a_recorded_search_marks_official_and_converter_owners() {
+        // GIVEN a search page recorded from the HuggingFace API, mixing the
+        // publisher's own repository, recognised converters and other owners
+        let page: serde_json::Value =
+            serde_json::from_str(RECORDED_SEARCH).expect("recorded search parses");
+        let items = page.as_array().expect("a search page is an array");
+
+        // WHEN each item is read as a model card
+        let cards: Vec<HfModelCard> = items
+            .iter()
+            .filter_map(|m| parse_model_list_item(m, None))
+            .collect();
+        let kind = |repo: &str| {
+            cards
+                .iter()
+                .find(|c| c.repo_id == repo)
+                .expect("the repository is in the recorded page")
+                .publisher_kind
+        };
+
+        // THEN every item parses, and each carries the kind of its owner
+        assert_eq!(cards.len(), items.len());
+        assert_eq!(
+            kind("Qwen/Qwen3-4B-GGUF"),
+            Some(crate::recommend::PublisherKind::Official)
+        );
+        assert_eq!(
+            kind("unsloth/Qwen3-4B-GGUF"),
+            Some(crate::recommend::PublisherKind::Converter)
+        );
+        assert_eq!(
+            kind("bartowski/Qwen_Qwen3-4B-GGUF"),
+            Some(crate::recommend::PublisherKind::Converter)
+        );
+        assert_eq!(
+            kind("lmstudio-community/Qwen3.5-4B-GGUF"),
+            Some(crate::recommend::PublisherKind::Converter)
+        );
+        assert_eq!(kind("MaziyarPanahi/Qwen3-4B-GGUF"), None);
+        let unmarked = cards.iter().filter(|c| c.publisher_kind.is_none()).count();
+        assert!(unmarked > 0, "the page holds owners on neither list");
     }
 }

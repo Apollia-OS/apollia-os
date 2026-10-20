@@ -9,10 +9,13 @@
  * prompt-injected links, both the action kind AND the payload shape are
  * validated before a button is rendered.
  *
- * The route allowlist is the enforced counterpart of
- * `agent.py::_ALLOWED_ROUTES`: the agent proposes, this file decides. Parsing
- * and execution are now client-side; the agent is the source of the block.
+ * The guide's mission lists the routes it may propose; this file decides.
+ * Parsing and execution are client-side; the agent is the source of the
+ * block.
  */
+import { get } from "svelte/store";
+import { visibleRoutes } from "$lib/apolliaGuide/guideRoutes";
+import { developerMode } from "$lib/stores/developerMode";
 import { navigateTo, type Route } from "$lib/stores/navigation";
 
 /** Kind of UI action the coach may propose. */
@@ -44,7 +47,8 @@ export interface SafeActionButton {
  * ```apollia-actions
  * [{"label": "...", "action": "navigate", "payload": {"route": "/agents"}}]
  * ```
- * Mirrors `agent.py::_ACTION_RE`. `[\s\S]` spans newlines (JS has no DOTALL).
+ * The shape the guide's mission asks for. `[\s\S]` spans newlines (JS has no
+ * DOTALL).
  */
 const ACTION_BLOCK_RE = /```apollia-actions\s*(\[[\s\S]*?\])\s*```/;
 
@@ -80,32 +84,26 @@ export function parseApolliaActions(content: string): {
 }
 
 /**
- * Allowlist of routes the coach is allowed to deep-link to. `agent.py` keeps
- * its own `_ALLOWED_ROUTES` list, but this map is the one enforced: routes
- * absent from it are dropped silently. `/onboarding` is deliberately absent,
- * onboarding is a modal, not a route.
+ * The route a path of the guide opens, or `null` when no visible screen
+ * answers to it. This is the one allowlist of the application: the paths are
+ * the visible routes (`visibleRoutes`), each written `/<route>`, and nothing
+ * else. The guide is a declarative agent and filters nothing itself, so a
+ * path absent from the list (a removed screen, a name the model invented) is
+ * dropped here. With the developer mode off, the developer screens are
+ * dropped too, since the router would not show them.
  */
-const ROUTE_ALLOWLIST: Record<string, Route> = {
-  "/dashboard": "dashboard",
-  "/agents": "agents",
-  "/projects": "projects",
-  "/tasks": "tasks",
-  "/chat": "chat",
-  "/automations": "automations",
-  "/integrations": "integrations",
-  "/inbox": "inbox",
-  "/llm": "llm",
-  "/triggers": "automations",
-  "/memory": "memory",
-  "/observability": "observability",
-  "/notifications": "notifications",
-  "/settings": "settings",
-};
+export function allowedGuideRoute(
+  path: string,
+  developer: boolean = get(developerMode),
+): Route | null {
+  const [base] = path.split("?", 1);
+  return visibleRoutes(developer).find((route) => `/${route}` === base) ?? null;
+}
 
 /**
  * Allowlist of Tauri commands the coach may invoke. Currently empty - the
- * `invoke` action kind is reserved for future capabilities (e.g. "Run the
- * onboarding tour from here"). Commands must be explicitly added here AND
+ * `invoke` action kind is reserved for future capabilities. Commands must be
+ * explicitly added here AND
  * must be read-only / idempotent.
  */
 const INVOKE_ALLOWLIST = new Set<string>([]);
@@ -119,8 +117,8 @@ export function validateActionButton(raw: RawActionButton): SafeActionButton | n
 
   if (raw.action === "navigate") {
     const route = typeof raw.payload?.route === "string" ? raw.payload.route : "";
-    const [basePath, query = ""] = route.split("?", 2);
-    const resolved = ROUTE_ALLOWLIST[basePath];
+    const [, query = ""] = route.split("?", 2);
+    const resolved = allowedGuideRoute(route);
     if (!resolved) return null;
     return {
       label: raw.label,

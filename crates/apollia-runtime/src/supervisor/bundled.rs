@@ -1,111 +1,27 @@
 use super::*;
 
-/// Install the bundled agents on first boot.
-///
-/// Reads `<bundled_agents_path>/manifest.json` and, for each entry marked
-/// `auto_install: true` that is absent from the database, loads the manifest
-/// via `loader` and persists an [`apollia_tools::InstalledAgent`] in `repo`.
-///
-/// The later auto-load step (`list_enabled`) then loads and registers them in
-/// `AgentRegistry`. Errors are always logged but never block the boot.
-pub(in crate::supervisor) fn auto_load_bundled_agents(
-    bundled_agents_path: Option<&std::path::Path>,
-    repo: &AgentRepository,
-    loader: &Arc<dyn AgentLoader>,
-) {
-    let bundled_dir = match bundled_agents_path {
-        Some(d) => d,
-        None => {
-            tracing::debug!("bundled.path.missing");
-            return;
-        }
-    };
-
-    let manifest_path = bundled_dir.join("manifest.json");
-    if !manifest_path.exists() {
-        tracing::debug!("bundled.manifest.missing");
-        return;
-    }
-
-    let manifest_content = match std::fs::read_to_string(&manifest_path) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "bundled.manifest.read.failed");
-            return;
-        }
-    };
-
-    let manifest: BundledManifest = match serde_json::from_str(&manifest_content) {
-        Ok(m) => m,
-        Err(e) => {
-            warn!(error = %e, "bundled.manifest.parse.failed");
-            return;
-        }
-    };
-
-    for entry in &manifest.bundled_agents {
-        if !entry.auto_install {
-            continue;
-        }
-
-        match repo.get(&entry.name) {
-            Ok(Some(_)) => {
-                tracing::debug!(agent = %entry.name, "bundled.agent.already_installed");
-                continue;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                warn!(agent = %entry.name, error = %e, "bundled.agent.check.failed");
-                continue;
-            }
-        }
-
-        let source_path = bundled_dir.join(&entry.file);
-        info!(agent = %entry.name, "bundled.agent.installing");
-
-        let agent_manifest = match loader.load_and_validate(&source_path) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(agent = %entry.name, error = %e, "bundled.agent.manifest.load.failed");
-                continue;
-            }
-        };
-
-        let now = chrono::Utc::now().to_rfc3339();
-        let installed = apollia_tools::InstalledAgent {
-            name: agent_manifest.name.clone(),
-            version: agent_manifest.version.clone(),
-            install_path: source_path.clone(),
-            source_path,
-            manifest: agent_manifest,
-            enabled: true,
-            installed_at: now.clone(),
-            updated_at: now,
-        };
-
-        if let Err(e) = repo.save(&installed) {
-            warn!(agent = %entry.name, error = %e, "bundled.agent.persist.failed");
-            continue;
-        }
-
-        info!(agent = %entry.name, "bundled.agent.registered");
-    }
-}
-
-/// Phase 3: register the native tool descriptors and the static connector
-/// descriptors (Google Workspace, future Microsoft 365). Connector descriptors
-/// make the LLM aware of the tools regardless of whether an account is
-/// connected; the matching executors are wired in by the desktop dispatcher.
-pub(in crate::supervisor) async fn register_builtin_tools(
+/// Phase 3: register the native tool descriptors, the tools of every native
+/// connector account in `accounts` (one set per account, see
+/// [`crate::connectors_bridge::connection_tools`]) and, when `mailbox_tools`
+/// says so, the mailbox tools over IMAP. A provider with no connected account
+/// publishes no tool; an account connected later registers its own when it
+/// connects.
+pub(crate) async fn register_builtin_tools(
     tool_registry_handle: &ToolRegistryHandle,
+    accounts: &[crate::connections::NativeAccounts],
+    mailbox_tools: bool,
 ) {
     for descriptor in native_tool_descriptors() {
         if let Err(e) = tool_registry_handle.register(descriptor).await {
             warn!(error = %e, "tool.native.register.failed");
         }
     }
-    let connector_descriptor_count = crate::connectors_bridge::all_connector_descriptors().len();
-    for descriptor in crate::connectors_bridge::all_connector_descriptors() {
+    let mut connector_descriptors = crate::connectors_bridge::connector_descriptors_for(accounts);
+    if mailbox_tools {
+        connector_descriptors.extend(crate::connectors_bridge::imap_tool_descriptors());
+    }
+    let connector_descriptor_count = connector_descriptors.len();
+    for descriptor in connector_descriptors {
         let tool_name = descriptor.name.clone();
         if let Err(e) = tool_registry_handle.register(descriptor).await {
             warn!(
@@ -171,7 +87,7 @@ pub(in crate::supervisor) fn validate_installed_packages(
 
 /// Returns descriptors for native tools bundled with `apollia-tools`.
 ///
-/// Registers all 12 active native tools in the order: existing tools first,
+/// Registers all 14 active native tools in the order: existing tools first,
 /// then new atomic tools grouped by category.
 pub(in crate::supervisor) fn native_tool_descriptors() -> Vec<apollia_tools::ToolDescriptor> {
     // `mut` is used only when at least one web-* feature is active; allow the
@@ -188,13 +104,13 @@ pub(in crate::supervisor) fn native_tool_descriptors() -> Vec<apollia_tools::Too
         apollia_tools::tools::file_grep::FileGrep::descriptor(),
         apollia_tools::tools::http_fetch::HttpFetch::descriptor(),
         apollia_tools::tools::memory_search::MemorySearchTool::descriptor(),
+        apollia_tools::tools::memory_write::MemoryWriteTool::descriptor(),
+        apollia_tools::tools::profile_propose::ProfileProposeTool::descriptor(),
+        apollia_tools::tools::source_search::SourceSearchTool::descriptor(),
         apollia_tools::tools::notebook_read::NotebookRead::descriptor(),
         apollia_tools::tools::notebook_edit::NotebookEdit::descriptor(),
         apollia_tools::tools::ask_user::AskUser::descriptor(),
-        // Agent-driven permission governance.
-        apollia_tools::tools::permission_rules::PermissionRuleAdd::descriptor(),
-        apollia_tools::tools::permission_rules::PermissionRuleRemove::descriptor(),
-        apollia_tools::tools::permission_rules::PermissionRuleList::descriptor(),
+        apollia_tools::CodeContext::descriptor(),
     ];
 
     // Web tools are always advertised in the catalogue (so the UI and agent
@@ -207,4 +123,105 @@ pub(in crate::supervisor) fn native_tool_descriptors() -> Vec<apollia_tools::Too
     descriptors.push(apollia_tools::tools::web_read::WebRead::descriptor());
 
     descriptors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apollia_tools::{AgentAccess, AgentRepository, APOLLIA_AGENT_ID};
+
+    // GIVEN a fresh install: the built-in tools registered, no MCP server
+    //   connected, Apollia stored without any override
+    // WHEN the access of Apollia is read, then turned into tools
+    // THEN Apollia is offered exactly the reading family: reading the files
+    //   and notebooks granted, the MCP resources, the web search and the page
+    //   reading; nothing that writes, sends, runs code or reads an account
+    #[tokio::test]
+    async fn a_fresh_install_gives_apollia_the_reading_family_only() {
+        let registry = ToolRegistryHandle::start();
+        register_builtin_tools(&registry, &[], true).await;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = AgentRepository::open(&dir.path().join("agents.db")).unwrap();
+        let apollia = repo
+            .resolved(
+                APOLLIA_AGENT_ID,
+                None,
+                apollia_core::AutonomyLevel::Assisted,
+            )
+            .unwrap()
+            .unwrap();
+
+        #[allow(unused_mut)]
+        let mut expected = vec![
+            "file_glob",
+            "file_grep",
+            "file_list",
+            "file_read",
+            "mcp_resources_list",
+            "mcp_resources_read",
+            "notebook_read",
+            "source_search",
+        ];
+        #[cfg(feature = "web-read")]
+        expected.push("web_read");
+        #[cfg(feature = "web-search")]
+        expected.push("web_search");
+
+        let tools = AgentAccess::of(&apollia)
+            .tools(&registry, &apollia_tools::DefaultAccess::default())
+            .await;
+
+        assert_eq!(tools, expected);
+        registry.shutdown().await;
+    }
+
+    #[test]
+    fn every_native_tool_designates_its_target_argument_or_none() {
+        // GIVEN the native tools, and the argument each one acts on, copied here
+        // by hand: a path, a folder or an address, never a content
+        #[allow(unused_mut)]
+        let mut expected: Vec<(&str, Option<&str>)> = vec![
+            ("bash_executor", None),
+            ("python_executor", None),
+            ("file_read", Some("path")),
+            ("file_write", Some("path")),
+            ("file_edit", Some("path")),
+            ("file_list", Some("dir")),
+            ("file_glob", Some("path")),
+            ("file_grep", Some("path")),
+            ("http_fetch", Some("url")),
+            ("memory_search", None),
+            ("memory_write", None),
+            ("profile_propose", Some("fact")),
+            ("source_search", None),
+            ("notebook_read", Some("path")),
+            ("notebook_edit", Some("path")),
+            ("ask_user", None),
+            ("code_context", Some("folder")),
+        ];
+        #[cfg(feature = "web-search")]
+        expected.push(("web_search", None));
+        #[cfg(feature = "web-read")]
+        expected.push(("web_read", Some("url")));
+
+        // WHEN the descriptors registered at boot are read
+        let descriptors = native_tool_descriptors();
+        let actual: Vec<(&str, Option<&str>)> = descriptors
+            .iter()
+            .map(|d| (d.name.as_str(), d.target_arg.as_deref()))
+            .collect();
+
+        // THEN each designates exactly the argument of the table, and that
+        // argument is one its input schema declares
+        assert_eq!(actual, expected);
+        for d in &descriptors {
+            if let Some(arg) = d.target_arg.as_deref() {
+                assert!(
+                    d.input_schema["properties"].get(arg).is_some(),
+                    "{} designates `{arg}`, which its schema does not declare",
+                    d.name
+                );
+            }
+        }
+    }
 }

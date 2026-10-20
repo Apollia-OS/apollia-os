@@ -4,27 +4,27 @@
    *
    * Self-contained: on open it starts the loopback flow, listens for the
    * `oauth://code-ready` / `oauth://error` events, and on success (Google)
-   * advances to the Drive-folder step. Uses the canonical `Dialog` (bits-ui
+   * advances to the Drive-folder step; then, when the parent can try it, to
+   * the account added and its "Try". Uses the canonical `Dialog` (bits-ui
    * focus trap + portal), not a hand-rolled overlay.
    */
   import { t } from "svelte-i18n";
+  import { CircleCheck, Play } from "lucide-svelte";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { Dialog } from "$lib/components/ui/dialog";
   import { Banner } from "$lib/components/ui/banner";
   import { Button } from "$lib/components/ui/button";
   import OauthAuthStep from "./OauthAuthStep.svelte";
   import OauthDriveFolderStep from "./OauthDriveFolderStep.svelte";
-  import { navigateToSettings } from "$lib/router";
-  import { setProfileEntry } from "$lib/ipc/profile";
+  import OauthPolicyRefusal from "./OauthPolicyRefusal.svelte";
   import {
     formatTauriError,
     isMissingClientError,
     isMissingSecretError,
-    isSovereigntyBlocked,
+    isRefusedByPolicy,
   } from "$lib/connections/errors";
   import {
     oauthStartFlow,
-    resolveSovereignty,
     oauthCompleteFlow,
     oauthSetDriveFolder,
     type ProviderId,
@@ -36,24 +36,26 @@
     onclose: () => void;
     /** Refresh the native account list once a connection completes. */
     oncompleted: () => void;
+    /** Bring the connection's OAuth client into view, on its page. */
+    onopenclient: (provider: ProviderId) => void;
+    /** "Try" the account just connected. */
+    ontry?: (provider: ProviderId, accountId: string) => void;
   }
 
-  let { open, provider, onclose, oncompleted }: Props = $props();
+  let { open, provider, onclose, oncompleted, onopenclient, ontry }: Props = $props();
 
   let authUrl = $state<string | null>(null);
   let flowState = $state<string | null>(null);
   let pastedCode = $state("");
   let error = $state<string | null>(null);
   let errorIsMissingClient = $state(false);
-  // The profile refused cloud connectors. Offered as a choice, not an error:
-  // an onboarding left early never wrote `constraints.sovereignty`, and the
-  // absent value reads as local-only on purpose.
-  let errorIsSovereignty = $state(false);
-  let switchingProfile = $state(false);
+  // The organisation policy refused the connection. Said in its own box, not
+  // as an error: retrying cannot change it, only the policy can.
+  let errorIsPolicyRefusal = $state(false);
   let errorIsMissingSecret = $state(false);
   let busy = $state(false);
   let awaitingCallback = $state(false);
-  let step = $state<"auth" | "drive_folder">("auth");
+  let step = $state<"auth" | "drive_folder" | "done">("auth");
   let connectedAccountId = $state<string | null>(null);
   let driveFolderDraft = $state("");
   let driveFolderSaving = $state(false);
@@ -68,8 +70,23 @@
   const dialogTitle = $derived(
     step === "drive_folder"
       ? $t("connections.oauth_drive_folder_title")
-      : $t("connections.oauth_connect_title", { values: { provider: providerName } }),
+      : step === "done"
+        ? $t("connections.try.native_added_title", { values: { provider: providerShort } })
+        : $t("connections.oauth_connect_title", { values: { provider: providerName } }),
   );
+
+  /** The flow is over: the account added and its "Try" when offered, else closed. */
+  function finish(): void {
+    if (ontry && connectedAccountId) step = "done";
+    else close();
+  }
+
+  function tryAccount(): void {
+    const target = provider;
+    const account = connectedAccountId;
+    close();
+    if (target && account) ontry?.(target, account);
+  }
 
   async function clearListeners(): Promise<void> {
     const fns = unlistenFns;
@@ -91,7 +108,7 @@
     pastedCode = "";
     error = null;
     errorIsMissingClient = false;
-    errorIsSovereignty = false;
+    errorIsPolicyRefusal = false;
     errorIsMissingSecret = false;
     busy = true;
     awaitingCallback = false;
@@ -125,7 +142,7 @@
             // action on Mail.Read alone, so a consent without it left that
             // operation advertised and unusable.
             ["mail.read", "mail.readwrite", "mail.send", "calendar.read", "calendar.write", "files.read"];
-      const startResult = await oauthStartFlow(provider, scopes, await resolveSovereignty());
+      const startResult = await oauthStartFlow(provider, scopes);
       authUrl = startResult.auth_url;
       flowState = startResult.state;
       awaitingCallback = true;
@@ -153,7 +170,7 @@
       error = formatTauriError(e, $t);
       errorIsMissingClient = isMissingClientError(e);
       errorIsMissingSecret = isMissingSecretError(e);
-      errorIsSovereignty = isSovereigntyBlocked(e);
+      errorIsPolicyRefusal = isRefusedByPolicy(e);
     } finally {
       busy = false;
     }
@@ -166,12 +183,12 @@
     try {
       const result = await oauthCompleteFlow(flowState, pastedCode.trim());
       oncompleted();
+      connectedAccountId = result.account_id;
       if (result.provider === "google") {
-        connectedAccountId = result.account_id;
         driveFolderDraft = "Apollia";
         step = "drive_folder";
       } else {
-        close();
+        finish();
       }
     } catch (e) {
       error = formatTauriError(e, $t);
@@ -189,7 +206,7 @@
     driveFolderError = null;
     try {
       await oauthSetDriveFolder(connectedAccountId, driveFolderDraft.trim());
-      close();
+      finish();
     } catch (e) {
       driveFolderError = formatTauriError(e, $t);
     } finally {
@@ -197,28 +214,10 @@
     }
   }
 
-  /**
-   * Allow cloud connectors and start the flow again. Writes the profile the
-   * settings page would write, `cloud-ok`, so the choice is the same one and
-   * lands in the same place.
-   */
-  async function allowCloudAndRetry(): Promise<void> {
-    switchingProfile = true;
-    try {
-      await setProfileEntry("constraints.sovereignty", "cloud-ok");
-      errorIsSovereignty = false;
-      error = null;
-      await startFlow();
-    } catch (e) {
-      error = formatTauriError(e, $t);
-    } finally {
-      switchingProfile = false;
-    }
-  }
-
-  function openSettingsIntegrations(): void {
+  function openClientSection(): void {
+    const target = provider;
     close();
-    navigateToSettings("integrations");
+    if (target) onopenclient(target);
   }
 
   function close(): void {
@@ -239,10 +238,24 @@
 </script>
 
 <Dialog {open} onclose={close} size="sm" title={dialogTitle} data-testid="oauth-dialog">
-  {#if step === "drive_folder"}
+  {#if step === "done"}
+    <p class="flex items-center gap-2 text-body-sm text-foreground" data-testid="oauth-done">
+      <CircleCheck size={14} class="shrink-0 text-success" aria-hidden="true" />
+      {$t("connections.try.native_added_body", { values: { account: connectedAccountId ?? "" } })}
+    </p>
+    <div class="mt-4 flex justify-end gap-2">
+      <Button variant="outline" size="sm" onclick={tryAccount} data-testid="oauth-done-try">
+        {#snippet icon()}<Play size={12} />{/snippet}
+        {$t("connections.try.action")}
+      </Button>
+      <Button variant="primary-solid" size="sm" onclick={close} data-testid="oauth-done-close">
+        {$t("connections.try.done")}
+      </Button>
+    </div>
+  {:else if step === "drive_folder"}
     <OauthDriveFolderStep bind:draft={driveFolderDraft} saving={driveFolderSaving} error={driveFolderError} />
     <div class="mt-4 flex justify-end gap-2">
-      <Button variant="ghost" size="sm" onclick={close} disabled={driveFolderSaving}>
+      <Button variant="ghost" size="sm" onclick={finish} disabled={driveFolderSaving}>
         {$t("connections.keep_default")}
       </Button>
       <Button
@@ -270,22 +283,17 @@
       <Button
         variant="primary-solid"
         size="sm"
-        onclick={openSettingsIntegrations}
+        onclick={openClientSection}
         data-testid="oauth-open-settings-btn"
       >
-        {$t("connections.open_settings_integrations")}
+        {$t("connections.open_connection_client")}
       </Button>
     </div>
-  {:else if errorIsSovereignty}
-    <Banner variant="warning" title={$t("connections.oauth_sovereignty_title")} data-testid="oauth-sovereignty-banner">
-      {$t("connections.oauth_sovereignty_body")}
-    </Banner>
+  {:else if errorIsPolicyRefusal}
+    <OauthPolicyRefusal {providerShort} />
     <div class="mt-4 flex justify-end gap-2">
-      <Button variant="outline" size="sm" onclick={close} data-testid="oauth-cancel-btn">
-        {$t("connections.oauth_sovereignty_keep_local")}
-      </Button>
-      <Button variant="primary-solid" size="sm" onclick={allowCloudAndRetry} disabled={switchingProfile} data-testid="oauth-allow-cloud-btn">
-        {$t("connections.oauth_sovereignty_allow_cloud")}
+      <Button variant="primary-solid" size="sm" onclick={close} data-testid="oauth-policy-refused-close-btn">
+        {$t("common.close")}
       </Button>
     </div>
   {:else if errorIsMissingClient}
@@ -301,8 +309,8 @@
       <Button variant="outline" size="sm" onclick={close} data-testid="oauth-cancel-btn">
         {$t("common.cancel")}
       </Button>
-      <Button variant="primary-solid" size="sm" onclick={openSettingsIntegrations} data-testid="oauth-open-settings-btn">
-        {$t("connections.open_settings_integrations")}
+      <Button variant="primary-solid" size="sm" onclick={openClientSection} data-testid="oauth-open-settings-btn">
+        {$t("connections.open_connection_client")}
       </Button>
     </div>
   {:else if busy && !authUrl}

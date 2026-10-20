@@ -142,7 +142,7 @@ happened.
 ```rust
 enum RuntimeEvent {
     AgentRegistered { id: AgentId, at: SystemTime },
-    AgentLoadFailed { id: AgentId, error: String },
+    AgentDegraded { id: AgentId, reason: String },
     TaskCompleted { id: TaskId, duration_ms: u64 },
     ContextCompacted { agent: AgentId, dropped: usize },
 }
@@ -225,7 +225,15 @@ Never accents, spaces, or non-ASCII in filenames.
 Branch body : kebab-case description (`feat/agents-md-spec`,
 `fix/oauth-refresh-leak`).
 
-Tags : `vMAJOR.MINOR.PATCH`, strict SemVer (`v0.1.0`, `v0.1.0-preview`).
+Tags : `vMAJOR.MINOR.PATCH`, strict SemVer (`v0.3.0`). A release carries no
+suffix. The one suffix in use is the trial version, `vMAJOR.MINOR.PATCH-rc.N`
+(`v0.3.1-rc.1`), which the release workflow publishes on the preview update
+channel only.
+
+"Preview" names that update channel (`[desktop] update_channel = "preview"`,
+`.github/workflows/preview-channel.yml`, the manifests that
+`packaging/artifacts.json` lists under `preview`), never a version. The two releases before v0.3.0 were tagged with a `-preview` suffix;
+no version carries it any more, and nothing in the tree may reintroduce it.
 
 ### One version for the whole tree
 
@@ -238,21 +246,21 @@ Two deliberate exceptions:
 
 | Where | Value | Why |
 |---|---|---|
-| `crates/apollia-desktop/tauri.conf.json` | `0.1.0-1` | WiX rejects a non-numeric pre-release identifier, and `msi` is a shipped bundle target. `tauri-bundler` maps `0.1.0-1` to the MSI product version `0.1.0.1`; the About screen still reads the pre-release suffix and shows the Preview channel. |
-| `sdk/apollia/cli/scaffold.py`, README examples | `0.1.0` | Templates for agents the user writes. A freshly scaffolded agent starts its own life at `0.1.0`; it is not an Apollia component. |
+| `crates/apollia-desktop/tauri.conf.json` | `X.Y.Z-N` on a trial version `vX.Y.Z-rc.N`, `X.Y.Z` on a release | WiX rejects a non-numeric pre-release identifier, and `msi` is a shipped bundle target. `tauri-bundler` maps `X.Y.Z-N` to the MSI product version `X.Y.Z.N`. On a release the value equals the crate version, which `test_the_bundle_and_the_crate_carry_the_same_version` in `crates/apollia-desktop/src/commands/updates.rs` holds. |
+| `crates/apollia-cli/src/commands/package/new.rs`, README examples | `0.1.0` | Templates for packages the user writes. A freshly written package starts its own life at `0.1.0`; it is not an Apollia component. |
 
 The rule covers what ships in this tree. An agent that is not an Apollia
 component carries its own version, and nothing here governs it.
 
-The Python SDK is a third, softer case: PEP 440 normalises `0.1.0-preview` to
-`0.1.0rc0` in the built distribution metadata, so `pip show apollia-sdk` reports
-`0.1.0rc0`. The source string stays `0.1.0-preview`, which is what the tag, the
-changelog and `apollia.__version__` all use.
+The Python SDK carries the same string, in `sdk/pyproject.toml` and in
+`apollia.__version__`. A release string `X.Y.Z` is valid PEP 440 as written, so
+`pip show apollia-sdk` reports it unchanged.
 
-Guards: `bundled_versions_track_the_product_version` and
-`embedded_python_decorators_declare_the_bundled_version` in
-`crates/apollia-desktop/src/bundled_agents.rs` fail the build when a built-in
-agent drifts from the crate version.
+Guards: `the_guide_is_a_declarative_agent_with_its_knowledge_in_the_mission`
+and `the_onboarding_is_a_declarative_agent_granted_its_one_tool` in
+`crates/apollia-desktop/src/bundled_packages/tests.rs` fail the build when the
+embedded manifest of a built-in agent (`agents/system/*/apollia.toml`) drifts
+from the crate version.
 
 ---
 

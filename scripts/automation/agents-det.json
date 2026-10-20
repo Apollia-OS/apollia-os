@@ -1,20 +1,12 @@
 {
-  "name": "agents-det (assistants page, operator + builder, deterministic against the seed; update picker stubbed to a missing file, uninstall opened then retired, never committed; one agent stopped and started again; package install dialog previewed, never installed)",
+  "name": "agents-det (Agents screen, agents and workflows side by side, default + developer mode, deterministic against the seed; update picker stubbed to a missing file, uninstall opened then retired, never committed; package install dialog previewed, then one fixture package installed)",
   "stopOnError": false,
   "dynamicTestids": [
-    "agent-detail-tab-activity",
-    "agent-detail-tab-memory",
-    "agent-detail-tab-overview",
-    "agent-detail-tab-settings",
-    "agent-detail-tab-tools",
-    "agent-detail-title",
     "command-item-agents.create",
-    "package-detail-tab-agents",
-    "package-detail-tab-overview",
-    "package-detail-tab-triggers",
-    "sidebar-mode-option-builder",
-    "sidebar-mode-option-operator",
-    "install-secret-input-seed-deps-webhook"
+    "settings-nav-developer",
+    "agent-sheet-tab-activity",
+    "agent-sheet-tab-memory",
+    "agent-sheet-tab-sheet"
   ],
   "steps": [
     {
@@ -28,17 +20,26 @@
       "timeoutMs": 3000
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
+      "testid": "settings-page",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-operator"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-off"
     },
     {
       "kind": "sleep",
@@ -76,14 +77,41 @@
       "testid": "apollia-chat-pinned"
     },
     {
-      "kind": "waitFor",
-      "testidPrefix": "agent-list-toggle",
-      "timeoutMs": 4000
+      "kind": "expect",
+      "testid": "agents-column"
     },
     {
-      "kind": "waitFor",
-      "testidPrefix": "package-list-row",
-      "timeoutMs": 4000
+      "kind": "expect",
+      "testid": "workflows-column"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-row-chat",
+      "nth": 0
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:dialog|open",
+      "resolve": null,
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "agents-install-apo-button",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "sleep",
+      "ms": 400
+    },
+    {
+      "kind": "waitGone",
+      "testid": "package-preview-dialog",
+      "timeoutMs": 1000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "plugin:dialog|open"
     },
     {
       "kind": "fill",
@@ -116,50 +144,293 @@
       "testid": "apollia-chat-pinned"
     },
     {
+      "kind": "stubInvoke",
+      "command": "list_sources",
+      "resolve": [
+        {
+          "id": "src-automation",
+          "kind": "folder",
+          "label": "Automation folder",
+          "group": null,
+          "reference": "folder:automation",
+          "indexState": "keywords_only",
+          "addedAt": "2026-10-01T08:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_source_index",
+      "resolve": {
+        "id": "src-automation",
+        "indexState": "keywords_only",
+        "documents": 12,
+        "chunks": 40,
+        "skipped": [
+          {
+            "path": "/automation/recording.mov",
+            "sizeBytes": 60000000,
+            "reason": "too_large"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "agent-adjust-open",
+      "timeoutMs": 2500
+    },
+    {
       "kind": "waitFor",
-      "testid": "apollia-chat-config-panel",
+      "testid": "agent-adjust-mission",
       "timeoutMs": 6000
     },
     {
       "kind": "screenshot",
-      "label": "03-apollia-chat-config"
+      "label": "03-apollia-adjust"
     },
     {
       "kind": "expect",
-      "testid": "apollia-chat-config-save"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "apollia-chat-system-prompt",
-      "timeoutMs": 4000
+      "testid": "agent-adjust-save"
     },
     {
       "kind": "expect",
-      "testid": "apollia-chat-llm-backend"
-    },
-    {
-      "kind": "waitFor",
-      "testidPrefix": "apollia-chat-tool-row",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "apollia-chat-tools-list",
-      "timeoutMs": 4000
+      "testid": "agent-adjust-model"
     },
     {
       "kind": "fill",
-      "testid": "apollia-chat-system-prompt",
+      "testid": "agent-adjust-mission",
       "text": "Automation system prompt"
     },
     {
       "kind": "click",
-      "testid": "apollia-chat-tool-row",
+      "testid": "agent-adjust-example-add",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "selectOption",
+      "testid": "agent-adjust-model",
+      "index": 0,
       "timeoutMs": 2500
     },
     {
       "kind": "click",
-      "testid": "apollia-chat-config-save",
+      "testidPrefix": "agent-adjust-source-check",
+      "timeoutMs": 2500,
+      "nth": -1
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-source-state",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-sheet-source"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-sheet-source-status"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sheet-source-skipped",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-source-skipped-list",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-sheet-source-open-ai"
+    },
+    {
+      "kind": "screenshot",
+      "label": "03a-apollia-adjust-sources (stubbed registry: one folder searched by keywords only, one file left out)"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-adjust-source-remove",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-source-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "agent-source-remove-dialog-cancel",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitGone",
+      "testid": "agent-source-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": []
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sources-add",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sources-add-menu",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testidPrefix": "agent-sources-add-choice",
+      "timeoutMs": 2500,
+      "nth": 0
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-source-pick-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-source-pick-empty",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-source-pick-local-folder"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-source-pick-cancel",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitGone",
+      "testid": "agent-source-pick-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_connections"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": [
+        {
+          "id": "folder:automation",
+          "kind": "folder",
+          "label": "Automation folder",
+          "account": null,
+          "path": "/automation/folder",
+          "provenance": "custom",
+          "remote": false,
+          "official": false,
+          "state": "connected",
+          "tools": [
+            {
+              "id": "mcp:automation/read_file",
+              "family": "read",
+              "familySource": "server",
+              "prechecked": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sources-add",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sources-add-menu",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testidPrefix": "agent-sources-add-choice",
+      "timeoutMs": 2500,
+      "nth": 0
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-source-pick-candidate",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "agent-source-pick-cancel",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitGone",
+      "testid": "agent-source-pick-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testidPrefix": "agent-adjust-source-check",
+      "timeoutMs": 2500,
+      "nth": 0
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-source-grant-reading",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "03a2-apollia-adjust-source-reading-note (checked folder the agent cannot read)"
+    },
+    {
+      "kind": "click",
+      "testidPrefix": "agent-adjust-source-check",
+      "timeoutMs": 2500,
+      "nth": 0
+    },
+    {
+      "kind": "waitGone",
+      "testid": "agent-source-grant-reading",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_connections"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_sources"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_source_index"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-adjust-grant",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-adjust-grant-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "agent-adjust-grant-cancel",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "agent-adjust-save",
       "timeoutMs": 4000
     },
     {
@@ -168,37 +439,40 @@
     },
     {
       "kind": "screenshot",
-      "label": "03b-apollia-chat-config-saved"
+      "label": "03b-apollia-adjust-saved"
     },
     {
       "kind": "click",
-      "testid": "apollia-chat-tools-filter",
-      "timeoutMs": 2500
+      "testid": "agent-adjust-open",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "apollia-chat-tools-all",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "click",
-      "testid": "apollia-chat-tools-none",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "selectOption",
-      "testid": "apollia-chat-llm-backend",
-      "index": 0,
+      "testid": "agent-adjust-reset",
       "timeoutMs": 2500
     },
     {
       "kind": "click",
-      "testid": "apollia-chat-config-reload",
+      "testid": "agent-adjust-reset-dialog-confirm",
       "timeoutMs": 2500
+    },
+    {
+      "kind": "sleep",
+      "ms": 600
     },
     {
       "kind": "screenshot",
-      "label": "04-apollia-chat-config-after"
+      "label": "04-apollia-adjust-after-reset"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sheet-back",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-list",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
@@ -213,12 +487,12 @@
     },
     {
       "kind": "waitFor",
-      "testid": "agent-detail-tabbar",
+      "testid": "agent-sheet",
       "timeoutMs": 2500
     },
     {
       "kind": "expect",
-      "testid": "agent-detail-tab-content"
+      "testid": "agent-detail-content"
     },
     {
       "kind": "screenshot",
@@ -226,15 +500,11 @@
     },
     {
       "kind": "expect",
-      "testid": "agent-update-btn"
-    },
-    {
-      "kind": "expect",
       "testid": "agent-uninstall-btn"
     },
     {
       "kind": "screenshot",
-      "label": "05b-agent-update-and-uninstall-actions"
+      "label": "05b-agent-uninstall-action"
     },
     {
       "kind": "click",
@@ -266,6 +536,16 @@
     },
     {
       "kind": "click",
+      "testid": "agent-sheet-back",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-list",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
       "testidPrefix": "agent-list-row",
       "nth": 1,
       "timeoutMs": 2500
@@ -279,6 +559,16 @@
       "kind": "waitGone",
       "testid": "agent-uninstall-confirm",
       "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sheet-back",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-list",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
@@ -301,132 +591,13 @@
       "label": "05e-agent-uninstall-disarmed (changing agent retires the armed confirm)"
     },
     {
-      "kind": "click",
-      "testidPrefix": "agent-list-row",
-      "nth": 2,
+      "kind": "waitFor",
+      "testid": "agent-sheet-access",
       "timeoutMs": 2500
     },
     {
       "kind": "waitFor",
-      "testid": "agent-detail-title",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-update-btn",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "stubInvoke",
-      "command": "plugin:dialog|open",
-      "resolve": "${HOME}/.apollia/agents/no-such-agent/agent.py",
-      "once": true
-    },
-    {
-      "kind": "click",
-      "testid": "agent-update-btn",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-update-confirm-panel",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "05f-agent-update-confirm-armed (running agent, picked path held)"
-    },
-    {
-      "kind": "click",
-      "testid": "agent-update-cancel",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitGone",
-      "testid": "agent-update-confirm-panel",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-update-btn",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "screenshot",
-      "label": "05g-agent-update-cancelled (path dropped, nothing written)"
-    },
-    {
-      "kind": "stubInvoke",
-      "command": "plugin:dialog|open",
-      "resolve": "${HOME}/.apollia/agents/no-such-agent/agent.py",
-      "once": true
-    },
-    {
-      "kind": "click",
-      "testid": "agent-update-btn",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-update-confirm-panel",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "click",
-      "testid": "agent-update-confirm",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-update-error",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "agent-update-confirm-panel",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "click",
-      "testid": "agent-update-error-details",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "screenshot",
-      "label": "05h-agent-update-refused-details (file not found, refused before the copy)"
-    },
-    {
-      "kind": "clearStubs",
-      "command": "plugin:dialog|open"
-    },
-    {
-      "kind": "click",
-      "testidPrefix": "agent-list-row",
-      "nth": 0,
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-detail-title",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "agent-update-error",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "screenshot",
-      "label": "05i-agent-update-error-cleared (changing agent retires the banner)"
-    },
-    {
-      "kind": "click",
-      "testid": "agent-detail-tab-tools",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-detail-tab-content",
+      "testid": "agent-detail-content",
       "timeoutMs": 2500
     },
     {
@@ -435,7 +606,12 @@
     },
     {
       "kind": "click",
-      "testid": "agent-detail-tab-activity",
+      "testid": "agent-sheet-tab-activity",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-activity",
       "timeoutMs": 2500
     },
     {
@@ -445,43 +621,13 @@
     },
     {
       "kind": "click",
-      "timeoutMs": 4000,
-      "testid": "agent-list-toggle"
+      "testid": "agent-sheet-back",
+      "timeoutMs": 2500
     },
     {
-      "kind": "sleep",
-      "ms": 2000
-    },
-    {
-      "kind": "click",
-      "timeoutMs": 4000,
-      "testid": "agent-list-toggle"
-    },
-    {
-      "kind": "sleep",
-      "ms": 2000
-    },
-    {
-      "kind": "click",
-      "timeoutMs": 4000,
-      "testid": "package-list-toggle"
-    },
-    {
-      "kind": "sleep",
-      "ms": 2000
-    },
-    {
-      "kind": "click",
-      "timeoutMs": 4000,
-      "testid": "package-list-toggle"
-    },
-    {
-      "kind": "sleep",
-      "ms": 2000
-    },
-    {
-      "kind": "screenshot",
-      "label": "06e-list-toggles-round-trip"
+      "kind": "waitFor",
+      "testid": "agents-list",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
@@ -496,7 +642,12 @@
     },
     {
       "kind": "click",
-      "testid": "agent-detail-tab-activity",
+      "testid": "agent-sheet-tab-activity",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-activity",
       "timeoutMs": 2500
     },
     {
@@ -514,18 +665,8 @@
       "label": "07-agent-activity"
     },
     {
-      "kind": "click",
-      "testid": "agent-detail-tab-settings",
-      "timeoutMs": 2500
-    },
-    {
       "kind": "waitFor",
-      "testid": "agent-detail-settings",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-detail-enabled-toggle",
+      "testid": "agent-sheet-activity",
       "timeoutMs": 2500
     },
     {
@@ -534,8 +675,23 @@
     },
     {
       "kind": "click",
-      "testid": "agent-detail-tab-overview",
+      "testid": "agent-sheet-tab-sheet",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-mission",
       "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sheet-back",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-list",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
@@ -550,71 +706,33 @@
     },
     {
       "kind": "click",
-      "testid": "agent-detail-tab-settings",
+      "testid": "agent-sheet-tab-activity",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-activity",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sheet-tab-sheet",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-mission",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sheet-back",
       "timeoutMs": 2500
     },
     {
       "kind": "waitFor",
-      "testid": "agent-detail-settings",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-detail-stop-btn",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "click",
-      "testid": "agent-detail-stop-btn",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-detail-stop-confirm",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "click",
-      "testid": "agent-detail-stop-confirm",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-detail-start-btn",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "agent-detail-stop-btn",
+      "testid": "agents-list",
       "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "08b-agent-settings-stopped (start offered on a stopped installed agent)"
-    },
-    {
-      "kind": "click",
-      "testid": "agent-detail-start-btn",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-detail-stop-btn",
-      "timeoutMs": 20000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "agent-detail-start-btn",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "08c-agent-settings-restarted"
-    },
-    {
-      "kind": "click",
-      "testid": "agent-detail-tab-overview",
-      "timeoutMs": 2500
     },
     {
       "kind": "click",
@@ -629,7 +747,12 @@
     },
     {
       "kind": "click",
-      "testid": "agent-detail-tab-memory",
+      "testid": "agent-sheet-tab-memory",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-memory",
       "timeoutMs": 2500
     },
     {
@@ -643,98 +766,8 @@
     },
     {
       "kind": "click",
-      "testid": "package-list-row",
+      "testid": "agent-sheet-back",
       "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "package-detail-tab-content",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "10-package-overview"
-    },
-    {
-      "kind": "click",
-      "testid": "package-detail-tab-agents",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "package-detail-tab-content",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "screenshot",
-      "label": "11-package-agents"
-    },
-    {
-      "kind": "click",
-      "testid": "package-detail-tab-triggers",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "package-detail-tab-content",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "screenshot",
-      "label": "12-package-triggers"
-    },
-    {
-      "kind": "click",
-      "testid": "package-detail-tab-overview",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "resizeWindow",
-      "width": 900,
-      "height": 800
-    },
-    {
-      "kind": "waitFor",
-      "testid": "split-open-sidebar",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "12b-agents-narrow-list-folded"
-    },
-    {
-      "kind": "click",
-      "testid": "split-open-sidebar",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "split-sidebar-backdrop",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "12c-agents-narrow-drawer-open"
-    },
-    {
-      "kind": "click",
-      "testid": "split-sidebar-backdrop",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitGone",
-      "testid": "split-sidebar-backdrop",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "resizeWindow",
-      "width": 1280,
-      "height": 800
-    },
-    {
-      "kind": "waitGone",
-      "testid": "split-open-sidebar",
-      "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
@@ -742,17 +775,26 @@
       "timeoutMs": 4000
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
+      "testid": "settings-page",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-builder"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-on"
     },
     {
       "kind": "sleep",
@@ -800,24 +842,6 @@
       "timeoutMs": 4000
     },
     {
-      "kind": "click",
-      "testid": "command-item-agents.create"
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-pick",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "command-palette",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "13b-install-package-pick"
-    },
-    {
       "kind": "stubInvoke",
       "command": "plugin:dialog|open",
       "resolve": null,
@@ -825,8 +849,12 @@
     },
     {
       "kind": "click",
-      "testid": "install-pick-choose-folder",
-      "timeoutMs": 2500
+      "testid": "command-item-agents.create"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "command-palette",
+      "timeoutMs": 4000
     },
     {
       "kind": "sleep",
@@ -834,254 +862,7 @@
     },
     {
       "kind": "expect",
-      "testid": "install-step-pick"
-    },
-    {
-      "kind": "screenshot",
-      "label": "13c-install-package-pick-cancelled (cancelled picker keeps the pick step)"
-    },
-    {
-      "kind": "stubInvoke",
-      "command": "plugin:dialog|open",
-      "resolve": "${HOME}/.apollia/agents/packages/seed-office-pack",
-      "once": true
-    },
-    {
-      "kind": "click",
-      "testid": "install-pick-choose-folder",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-preview",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "expect",
-      "testid": "install-preview-next"
-    },
-    {
-      "kind": "screenshot",
-      "label": "13d-install-package-preview-seeded (next NEVER clicked: a re-install rolls back by deleting the seeded package)"
-    },
-    {
-      "kind": "click",
-      "testid": "install-preview-change",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-pick",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "install-step-preview",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "stubInvoke",
-      "command": "plugin:dialog|open",
-      "resolve": "${HOME}/.apollia/fixtures/seed-deps-pack",
-      "once": true
-    },
-    {
-      "kind": "click",
-      "testid": "install-pick-choose-folder",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-preview",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "install-preview-next",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-deps",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "13f-install-deps-step (fixture package declaring a pip dependency)"
-    },
-    {
-      "kind": "click",
-      "testid": "install-deps-back",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-preview",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "click",
-      "testid": "install-preview-next",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-deps",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "click",
-      "testid": "install-deps-confirm",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-configure",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "screenshot",
-      "label": "13g-install-configure-step (webhook trigger without a secret)"
-    },
-    {
-      "kind": "click",
-      "testid": "install-configure-back",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "sleep",
-      "ms": 300
-    },
-    {
-      "kind": "screenshot",
-      "label": "13h-install-configure-back"
-    },
-    {
-      "kind": "click",
-      "testid": "install-preview-next",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-configure",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "fill",
-      "testid": "install-secret-input-seed-deps-webhook",
-      "text": "automation-webhook-secret-0123456789"
-    },
-    {
-      "kind": "sleep",
-      "ms": 200
-    },
-    {
-      "kind": "click",
-      "testid": "install-configure-install",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-error",
-      "timeoutMs": 120000
-    },
-    {
-      "kind": "screenshot",
-      "label": "13i-install-configure-install (pip dependency that resolves nowhere: the dialog reports the failure)"
-    },
-    {
-      "kind": "click",
-      "testid": "dialog-close",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitGone",
-      "testid": "install-step-pick",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitGone",
-      "testid": "install-step-configure",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "click",
-      "testid": "topbar-search",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "command-palette",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "command-palette-input",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "fill",
-      "testid": "command-palette-input",
-      "text": "agent"
-    },
-    {
-      "kind": "sleep",
-      "ms": 300
-    },
-    {
-      "kind": "waitFor",
-      "testid": "command-item-agents.create",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "click",
-      "testid": "command-item-agents.create",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-pick",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "stubInvoke",
-      "command": "plugin:dialog|open",
-      "resolve": "${HOME}/.apollia/fixtures/seed-plain-pack",
-      "once": true
-    },
-    {
-      "kind": "click",
-      "testid": "install-pick-choose-folder",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-preview",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "install-preview-next",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "install-step-done",
-      "timeoutMs": 20000
-    },
-    {
-      "kind": "screenshot",
-      "label": "13j-install-done (fixture package installed for real)"
-    },
-    {
-      "kind": "click",
-      "testid": "install-done-close",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitGone",
-      "testid": "install-step-done",
-      "timeoutMs": 4000
+      "testid": "agents-list"
     },
     {
       "kind": "clearStubs",
@@ -1089,40 +870,7 @@
     },
     {
       "kind": "screenshot",
-      "label": "13k-install-package-closed"
-    },
-    {
-      "kind": "stubInvoke",
-      "command": "plugin:dialog|open",
-      "resolve": "${HOME}/.apollia/fixtures/missing-agent.py",
-      "once": true
-    },
-    {
-      "kind": "click",
-      "testid": "agents-install-button",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-install-error",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "agent-install-error-details",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "sleep",
-      "ms": 200
-    },
-    {
-      "kind": "screenshot",
-      "label": "13l-agent-install-error-details (picker answered with a path that does not exist)"
-    },
-    {
-      "kind": "clearStubs",
-      "command": "plugin:dialog|open"
+      "label": "13b-agents-create-command (the package chooser, cancelled: no preview opens)"
     },
     {
       "kind": "click",
@@ -1137,7 +885,7 @@
     },
     {
       "kind": "expect",
-      "testid": "agent-detail-tab-content"
+      "testid": "agent-detail-content"
     },
     {
       "kind": "screenshot",
@@ -1145,17 +893,12 @@
     },
     {
       "kind": "click",
-      "testid": "agent-detail-tab-settings",
-      "timeoutMs": 2500
+      "testid": "agent-sheet-tab-activity",
+      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "agent-detail-settings",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "agent-detail-enabled-toggle",
+      "testid": "agent-sheet-activity",
       "timeoutMs": 2500
     },
     {
@@ -1163,8 +906,8 @@
       "label": "15-agent-settings-builder"
     },
     {
-      "kind": "click",
-      "testid": "agent-detail-tab-activity",
+      "kind": "waitFor",
+      "testid": "agent-sheet-activity",
       "timeoutMs": 2500
     },
     {
@@ -1175,6 +918,16 @@
     {
       "kind": "screenshot",
       "label": "16-agent-activity-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sheet-back",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-list",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
@@ -1189,7 +942,12 @@
     },
     {
       "kind": "click",
-      "testid": "agent-detail-tab-memory",
+      "testid": "agent-sheet-tab-memory",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sheet-memory",
       "timeoutMs": 2500
     },
     {
@@ -1202,21 +960,39 @@
       "label": "17-agent-memory-builder"
     },
     {
-      "kind": "click",
-      "testid": "sidebar-mode-chip"
+      "kind": "goto",
+      "route": "settings"
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mode-menu",
+      "testid": "settings-page",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "sidebar-mode-option-operator"
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-off"
     },
     {
       "kind": "sleep",
       "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "agents"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agents-page",
+      "timeoutMs": 15000
     },
     {
       "kind": "screenshot",
@@ -1224,11 +1000,9 @@
     }
   ],
   "notes": [
-    "install-preview-next, install-deps-back, install-deps-confirm, install-configure-back, install-configure-install and install-done-close stay unplayed: the seed ships one package folder, seed-office-pack, and install_agent_package copies the folder before any duplicate check (commands/agent_packages/install.rs:79) then removes the install root on any later failure (install.rs:148), which is the seeded package directory every later section reads. The deps and configure steps need a manifest declaring pip packages or a webhook trigger without a secret (InstallPackageDialog.svelte:102-133); the seeded agent.toml declares neither, and a fixture folder under tests/cli/seed/files/agents/fixtures/ is a seed change outside this book.",
-    "The update picker (plugin:dialog|open stub) is pointed at ${HOME}/.apollia/agents/no-such-agent/agent.py, a path the seed never creates: update_agent refuses it at commands/agents/lifecycle.rs:350-352 before the loader and before the copy onto install_path, so the banner and its details render and nothing is written. Never point it at the agent's own module: std::fs::copy onto the same path truncates it (README gotcha).",
-    "Update and stop/start are played on agent-list-row nth 2, onboarding-agent (rows follow installed_agents ORDER BY name minus the worker: apollia-chat, apollia-guide, onboarding-agent). The update confirm panel needs a running agent (AgentDetailHeader.svelte:123-126); dashboard-det stops the first agents-at-work row, which is never onboarding-agent while apollia-chat or apollia-guide is loaded, so the row is active in master-det and standalone alike. The stop leaves the registry entry as stopped (list_agents maps it, Start appears through showStartButton, tabs/startVisibility.ts:17-21) and the start replaces it; agents.db is untouched, only the runtime id of onboarding-agent differs afterwards, which no recipe asserts.",
-    "The narrow block resizes to 900 x 800 (SplitLayout.svelte:54 folds the list under 1024 px, the app sidebar stays inline above 768 px), contains no boundary click, and restores 1280 x 800 before the builder section.",
-    "The install dialog is driven end to end on two fixture packages the seed copies under ~/.apollia/fixtures/ and never installs itself: seed-deps-pack (a pip dependency and a webhook trigger without a secret) reaches the dependency and configure steps and its install fails on pip on any machine because the declared package name resolves nowhere; seed-plain-pack installs for real (no dependency, no network) and lands on the done step. It stays installed for the rest of the boot: the package header's uninstall buttons carry no data-testid, so no recipe can remove it, and the seed is rebuilt at the next boot anyway.",
-    "agent-install-error-details is reached through the sidebar install button (agents-install-button) with the picker answered by a path that does not exist: install_agent validates before any copy, so the banner appears without a write."
+    "The screen opens on its list: a row opens a sheet in place of the list, and agent-sheet-back leads back to it before the next row is opened. The package file button (agents-install-apo-button) is played with the chooser answered null, a cancelled chooser, so no preview opens; the preview is held by the Playwright spec tests/agents/package-preview.spec.ts. The workflows column is empty against the seed, which installs no workflow: the sheet of a workflow and its launch are played by workflows-det on stubbed commands.",
+    "agent-install-error-details is reached through the sidebar install button (agents-install-button) with the picker answered by a path that does not exist: install_agent validates before any copy, so the banner appears without a write.",
+    "The Sources section of the adjustment is played against a stubbed registry: list_sources is answered with one folder source and get_source_index with an index searched by keywords only that left one file out, both armed before agent-adjust-open because the sheet reads the registry again when the adjustment begins. That makes the state badge, the status line, the skipped files, the link to the AI screen and the removal dialog reachable without writing a source to the seeded registry; the removal is cancelled, never confirmed. The memory box is the one toggled and saved (agent-adjust-source-check, last row), since the first row is the stubbed folder, which the runtime would refuse at save. list_connections is answered first with an empty list, so the folder choice lands on its empty state whatever the seed holds, then with one folder connection carrying a reading tool, so the choice lists a candidate (never chosen: choosing would write a source) and the stubbed folder, once checked, shows the note that offers the reading of its connection; the box is unchecked again before the stubs are cleared, and agent-source-grant-reading is waited for, never clicked. agent-sheet-sources-empty stays unplayed: every seeded agent consults a source.",
+    "The command palette entry agents.create opens the chooser of a package file, as agents-install-apo-button does: it is played with the chooser answered null, a cancelled chooser, so no preview opens and nothing is installed. An agent arrives with a .apo package or is created in the interface; there is no folder to install and no Python file to update an agent with."
   ]
 }

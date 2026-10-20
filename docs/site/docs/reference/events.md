@@ -47,8 +47,7 @@ resubscribe. They keep the half of the rule that is reachable, the `WARN`.
 ## The catalogue
 
 Before the table, one caveat it does not carry. `HookDecisionRecorded` reports
-the decision of a `PreToolUse` hook, and `PreToolUse` is outside the supported
-surface of `v0.1.0-preview`. Its decision is applied best effort: a handler that
+the decision of a `PreToolUse` hook. That decision is applied best effort: a handler that
 times out, fails to deliver, or answers with something unparseable falls back to
 `allow`, and the tool call proceeds.
 
@@ -77,10 +76,7 @@ the event carries announces a request that is already settled.
 | Variant | Payload | What it reports |
 |---|---|---|
 | `AgentDegraded` | named fields | An agent moved to a degraded state. |
-| `AgentDisabled` | named fields | An installed agent was disabled (no longer loaded at boot). |
-| `AgentEnabled` | named fields | An installed agent was enabled for auto-start at boot. |
 | `AgentInstalled` | named fields | An agent was installed permanently. |
-| `AgentLoadFailed` | named fields | Loading an installed agent failed at boot. |
 | `AgentMessageAcked` | named fields | A delivered message was acknowledged and removed from the store. |
 | `AgentMessageDelivered` | named fields | A pending message was leased to its recipient (delivered on receive). |
 | `AgentMessageDropped` | named fields | A message was dropped without being processed. |
@@ -96,7 +92,7 @@ the event carries announces a request that is already settled.
 
 | Variant | Payload | What it reports |
 |---|---|---|
-| `HitlFilesystemRequired` | named fields | A filesystem operation by an agent requires a human approval. |
+| `BatchItemAwaitingApproval` | named fields | An item of a batch waits for a decision on an access nobody granted. |
 | `PermissionRequired` | named fields | A tool invocation requires a human approval. |
 | `TaskApprovalTimeout` | named fields | An `input_required` task expired, canceled automatically by the `TimeoutWatcher`. |
 | `TaskInputRequired` | named fields | A task is suspended awaiting human input. |
@@ -141,12 +137,15 @@ the event carries announces a request that is already settled.
 | Variant | Payload | What it reports |
 |---|---|---|
 | `CostCeilingReached` | named fields | The hybrid routing cost ceiling was reached while `HardStop` is active. |
+| `LlmAgentModelFallback` | named fields | The model assigned to an agent is not available, so the call runs on the default model. |
 | `LlmCallCompleted` | named fields | An LLM call finished, emitted by `complete_with_observability()`. |
 | `LlmCallFailed` | named fields | An LLM call failed, emitted by `complete_with_observability()` when the |
 | `LlmFallbackTriggered` | named fields | The LLM router switched to a secondary backend. |
 | `LlmModelFailed` | named fields | Loading an LLM backend failed: backend skipped, runtime continues. |
 | `LlmModelLoading` | named fields | An LLM backend is loading (before `load()` or HTTP initialization). |
 | `LlmModelReady` | named fields | An LLM backend is ready: model loaded in memory or cloud connection verified. |
+| `LlmModelReloaded` | named fields | A resident local model was relaunched under its preset's new load settings. |
+| `LlmModelUnloaded` | named fields | A resident local model was unloaded and its memory given back. |
 | `LlmResponseCaptured` | named fields | A full LLM response captured for deterministic replay. |
 | `MetaLlmBudgetExceeded` | named fields | Emitted by `MetaLlmOrchestrator` when the tokens/session budget is exceeded. |
 | `TokenBudgetUpdated` | named fields | Session budget update, emitted after each LLM call. |
@@ -205,8 +204,11 @@ the event carries announces a request that is already settled.
 | Variant | Payload | What it reports |
 |---|---|---|
 | `AllReady` | none | All components are ready, runtime operational. |
+| `ConfigInvalid` | named fields | The `apollia.toml` read at startup was refused: the embedded runtime |
+| `ConfigReloaded` | named fields | A new `apollia.toml`, saved through the configuration routes or changed |
 | `ContextCompacted` | named fields | Emitted by `ContextManager` when the conversation history was compacted. |
 | `FileModifiedSinceRead` | named fields | A previously read file was modified between two accesses. |
+| `GovernanceFailClosed` | named fields | Governance started or stopped failing closed. |
 | `McpServerHealthChanged` | named fields | An MCP server's operational health changed. |
 | `McpServerReloaded` | named fields | An MCP server was hot-reloaded successfully. |
 | `ShutdownRequested` | none | Shutdown requested (SIGTERM or CLI command). |
@@ -219,6 +221,7 @@ the event carries announces a request that is already settled.
 | Variant | Payload | What it reports |
 |---|---|---|
 | `BashFilePathsExtracted` | named fields | File paths extracted from a bash command's output. |
+| `BatchEnded` | named fields | A batch ended, with its successes and failures. |
 | `PlanAlternativesGenerated` | named fields | Two alternative plans were generated in parallel by the Reasoner. |
 | `PlanCacheHit` | named fields | A plan was retrieved from the cache instead of being generated by the Reasoner. |
 | `PlanCompleted` | named fields | All steps completed successfully, plan finished. |
@@ -233,6 +236,9 @@ the event carries announces a request that is already settled.
 | `TaskStarted` | named fields | A task started on an agent. |
 | `TodoUpdated` | named fields | The session todo list changed after a successful `todo_write`. |
 | `VerificationCompleted` | named fields | The post-run verification pass produced a verdict on an orchestrated run. |
+| `WorkflowStepCompleted` | named fields | A step of a workflow run ended without error. |
+| `WorkflowStepFailed` | named fields | A step of a workflow run raised, or was stopped with its run. |
+| `WorkflowStepStarted` | named fields | A declared step of a workflow run opened. |
 
 ### `trace-event`
 
@@ -243,6 +249,7 @@ the event carries announces a request that is already settled.
 | `ActionParseError` | named fields | The LLM returned an invalid action JSON that could not be repaired. |
 | `AgentLog` | named fields | An agent emitted a message via `ctx.log(level, msg, **fields)`. |
 | `LlmCallStarted` | named fields | An LLM call is about to be sent (before `LlmProxy::complete`). |
+| `ProfileRead` | named fields | An agent read the user profile through `ctx.profile`. |
 | `Retry` | named fields | The ReAct loop retries a step (parse error, tool failure, etc.). |
 | `Thought` | named fields | The LLM emitted a ReAct `thought` (reasoning chain). |
 | `ToolCallCompleted` | named fields | The tool finished its execution. |

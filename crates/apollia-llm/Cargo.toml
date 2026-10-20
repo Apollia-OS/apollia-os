@@ -1,6 +1,6 @@
 [package]
 name = "apollia-llm"
-version = "0.2.0-preview"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,11 +12,13 @@ default = ["cloud"]
 # (sidecar process). This crate only ships the cloud HTTP clients and the
 # shared types (CompletionModel, LlmRouter, etc.).
 
-# Cloud backends (HTTP API: Anthropic, OpenAI-compatible, Vertex)
-cloud            = ["dep:async-openai", "dep:reqwest"]
+# HTTP backends (OpenAI-compatible, Ollama)
+cloud            = ["dep:async-openai", "dep:backoff", "dep:reqwest", "dep:base64"]
 
 [dependencies]
 apollia-core   = { workspace = true, features = ["net"] }
+# minisign check of the signed index of model cards
+apollia-signing = { workspace = true }
 tokio          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
@@ -28,12 +30,18 @@ rusqlite       = { workspace = true }
 uuid           = { workspace = true }
 # cloud backends [feature = "cloud"]
 async-openai   = { workspace = true, optional = true }
+# The retry policy handed to async-openai [feature = "cloud"]
+backoff        = { workspace = true, optional = true }
 reqwest        = { workspace = true, optional = true }
+# Images of a user message travel as `data:` URLs [feature = "cloud"]
+base64         = { workspace = true, optional = true }
 tokio-util     = { workspace = true }
 chrono         = { workspace = true }
 # MetaLlmOrchestrator
 lru            = { workspace = true }
 sha2           = { workspace = true }
+# Git blob identifier of a downloaded file stored outside LFS
+sha1           = { workspace = true }
 # tool_performance_hints
 toml           = { workspace = true }
 # Hardware detection (RAM, CPU, GPU, always available)

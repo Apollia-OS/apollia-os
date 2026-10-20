@@ -108,7 +108,6 @@ fn test_mcp_config_default_is_deferred_limit_20() {
     // THEN the loading mode is deferred and the search cap is 20
     assert_eq!(cfg.tool_loading, McpToolLoading::Deferred);
     assert_eq!(cfg.tool_search_limit, 20);
-    assert_eq!(cfg.approval_ttl_hours, 24);
 }
 
 #[test]
@@ -778,11 +777,11 @@ fn test_tools_config_below_min_fails() {
     // GIVEN max_output_chars below minimum (min = 10)
     let cfg = ToolsConfig {
         max_output_chars: 5,
-        file_path_extraction_pattern: None,
         disabled: Vec::new(),
         web_search: WebSearchConfig::default(),
         web_read: WebReadConfig::default(),
         python_interpreter: None,
+        new_agent: Default::default(),
     };
     // WHEN
     let result = cfg.validate();
@@ -798,11 +797,11 @@ fn test_tools_config_above_max_fails() {
     // GIVEN max_output_chars above maximum
     let cfg = ToolsConfig {
         max_output_chars: 2_000_000,
-        file_path_extraction_pattern: None,
         disabled: Vec::new(),
         web_search: WebSearchConfig::default(),
         web_read: WebReadConfig::default(),
         python_interpreter: None,
+        new_agent: Default::default(),
     };
     // WHEN
     let result = cfg.validate();
@@ -890,12 +889,12 @@ fn test_brave_max_results_out_of_bounds_fails() {
 // ── The type says what a loader actually consults ──────────────────────
 
 #[test]
-fn test_api_port_doc_states_no_loader_reads_it() {
+fn test_api_port_doc_states_both_loaders_read_it_and_the_order() {
     // GIVEN the `port` field of ApiConfig, whose doc-comment is the only place
-    // a reader of the type learns what decides the TCP port of the daemon
+    // a reader of the type learns what decides the TCP port of the native API
     let source = include_str!("api.rs");
     let start = source
-        .find("/// TCP port of the REST server.")
+        .find("/// TCP port of the native API.")
         .expect("the port doc block is in api.rs");
     let end = start
         + source[start..]
@@ -904,14 +903,15 @@ fn test_api_port_doc_states_no_loader_reads_it() {
     let doc = &source[start..end];
 
     // WHEN that doc block is read
-    // THEN it states that nothing reads the key, and names what does decide
+    // THEN it says both loaders read the key, and in which order the port is
+    // decided
     assert!(
-        doc.contains("Read by neither loader"),
-        "the port doc block does not say the key is unread: {doc}"
+        doc.contains("Read by both loaders"),
+        "the port doc block does not say who reads the key: {doc}"
     );
     assert!(
-        doc.contains("apollia-os start --port"),
-        "the port doc block does not name what decides the port: {doc}"
+        doc.contains("`apollia-os start --port` first, then this key, then the default"),
+        "the port doc block does not give the order: {doc}"
     );
 }
 
@@ -937,21 +937,38 @@ fn test_config_module_doc_lists_only_sections_a_loader_reads() {
         .collect();
     listed.sort_unstable();
 
-    // THEN it is exactly the eight sections this crate defines that a loader
+    // THEN it is exactly the thirteen sections this crate defines that a loader
     // deserializes, and it names neither `[a2a]` nor `[oria]`, which no loader
     // ever reads from a file
     assert_eq!(
         listed,
         vec![
-            "api",
-            "chat",
-            "filesystem",
-            "hitl",
-            "hooks",
-            "mcp",
-            "runtime",
-            "tools",
+            "api", "author", "chat", "desktop", "engines", "hitl", "hooks", "llm", "mcp", "models",
+            "runtime", "server", "tools",
         ],
         "the module doc bullet list does not match the sections a loader reads"
+    );
+}
+
+#[test]
+fn test_agent_idle_unload_defaults_to_ten_minutes_and_is_a_setting() {
+    // GIVEN a `[runtime]` section without the key, and one that sets it
+    let default: RuntimeConfig = toml::from_str("").expect("valid toml");
+    let set: RuntimeConfig = toml::from_str("agent_idle_unload_secs = 1800").expect("valid toml");
+    let too_short = RuntimeConfig {
+        agent_idle_unload_secs: 1,
+        ..Default::default()
+    };
+
+    // WHEN they are read and validated
+    let too_short_result = too_short.validate();
+
+    // THEN the default is ten minutes, the setting is honoured, and a delay
+    // below ten seconds is refused at startup
+    assert_eq!(default.agent_idle_unload_secs, 600);
+    assert_eq!(set.agent_idle_unload_secs, 1800);
+    assert!(
+        matches!(too_short_result, Err(ConfigError::OutOfBounds { ref key, .. }) if key == "runtime.agent_idle_unload_secs"),
+        "expected OutOfBounds, got: {too_short_result:?}"
     );
 }

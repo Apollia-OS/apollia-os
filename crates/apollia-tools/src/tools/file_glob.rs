@@ -33,8 +33,11 @@ pub struct FileGlob {
 pub enum FileGlobError {
     /// Path attempts to escape the sandbox root.
     #[error(
-        "path '{path}' is outside every trusted root; add it to [filesystem] \
-         trusted_paths in apollia.toml to reach it"
+        "path '{path}' is outside every folder granted to this agent. A folder \
+         that is already a connection is not granted until it is granted to \
+         this agent, on its sheet: Adjust, then Accesses, Grant a connection, \
+         then Save. A folder that is not a connection yet is added in \
+         Connections first"
     )]
     SandboxViolation { path: String },
 
@@ -161,7 +164,9 @@ impl FileGlob {
             })),
             sandbox_profile: SandboxProfile::FileSystem,
             tags: vec!["file".to_string(), "glob".to_string(), "search".to_string()],
-            dangerous: false,
+            family: crate::descriptor::ActionFamily::Read,
+            family_source: crate::descriptor::FamilySource::Builtin,
+            target_arg: Some("path".to_string()),
             is_read_only: true,
             risk_score: 0,
             approval_risk_level: None,

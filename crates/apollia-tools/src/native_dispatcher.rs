@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use apollia_core::{WebReadConfig, WebSearchConfig};
 
 use crate::executor::{ToolDispatcher, ToolExecutor};
+use crate::source_access::SourceAccess;
 use crate::tools::ask_user::{AskUserExecutor, PendingUserInputs};
 use crate::tools::bash_executor::BashExecutor;
 use crate::tools::file_edit::FileEdit;
@@ -29,7 +30,6 @@ use crate::tools::file_read::FileRead;
 use crate::tools::file_write::FileWrite;
 use crate::tools::notebook_edit::NotebookEdit;
 use crate::tools::notebook_read::NotebookRead;
-use crate::tools::permission_rules::{PermissionRuleAdd, PermissionRuleList, PermissionRuleRemove};
 use crate::tools::python_executor::PythonExecutor;
 
 #[cfg(feature = "http")]
@@ -50,18 +50,23 @@ use crate::tools::web_read::WebRead;
 /// the dispatcher can be reused across tool calls within a single `run()`.
 #[derive(Clone)]
 pub struct NativeDispatcherConfig {
-    /// Filesystem roots the file and notebook tools may reach, anchor first.
+    /// Folders the reading file and notebook tools may reach, anchor first:
+    /// the folders granted to the agent ([`crate::folder_access`]).
     ///
-    /// The anchor is where a relative path lands and is created if missing. The
-    /// rest come from `[filesystem] trusted_paths` and only widen what an
-    /// absolute path reaches; naming a disk that is not mounted does not create
-    /// it. A single-root caller passes a one-entry vector.
+    /// The anchor is where a relative path lands. The rest only widen what an
+    /// absolute path reaches. Empty, the reading tools refuse every call with
+    /// a message that says how to grant a folder.
     pub sandbox_roots: Vec<PathBuf>,
+    /// Folders the writing file tools (`file_write`, `file_edit`,
+    /// `notebook_edit`) may reach, anchor first: the folders granted to the
+    /// agent for writing. Empty, those tools refuse every call.
+    pub write_roots: Vec<PathBuf>,
     /// Agent identifier, namespaces the per-agent Python venv.
     pub agent_id: String,
     /// Root directory under which per-agent venvs are created for `python_executor`.
     pub venv_base_dir: PathBuf,
-    /// Primary memory namespace (read-write). `None` omits `memory_search`.
+    /// Primary memory namespace (read-write). `None` omits `memory_search`,
+    /// and so does a memory left unchecked in [`Self::sources`].
     pub memory_namespace: Option<String>,
     /// Additional namespaces the agent may read.
     pub memory_shared_namespaces: Vec<String>,
@@ -91,10 +96,6 @@ pub struct NativeDispatcherConfig {
     /// Operator-supplied configuration for the `web_read` tool. Drives the
     /// HTTP timeout, the maximum response size, and the SSRF guard toggle.
     pub web_read_config: WebReadConfig,
-    /// Path to `governance.db` for the `permission_rule_*` tools. When `None`,
-    /// those tools are not registered and the agent receives `UnknownTool` if it
-    /// tries to invoke them.
-    pub governance_db_path: Option<PathBuf>,
     /// `[tools] python_interpreter`: an interpreter the operator chose over the
     /// bundled one, by absolute path.
     ///
@@ -103,6 +104,15 @@ pub struct NativeDispatcherConfig {
     /// A value here is checked before it is used and dropped, with a warning,
     /// if it stops being valid.
     pub python_interpreter: Option<String>,
+    /// `[tools] max_output_chars`: the largest tool output, in UTF-8 bytes,
+    /// passed to the model; a longer one is trimmed in the middle. Use
+    /// [`DEFAULT_MAX_OUTPUT_CHARS`](crate::executor::DEFAULT_MAX_OUTPUT_CHARS)
+    /// when no `apollia.toml` is loaded.
+    pub max_output_chars: usize,
+    /// The sources the resolved agent has checked: `memory_search` is
+    /// registered only when its memory is, `source_search` only when an
+    /// indexable source is, and bounded to those.
+    pub sources: SourceAccess,
 }
 
 /// Build a [`ToolDispatcher`] populated with every native tool available for
@@ -162,6 +172,22 @@ impl ToolExecutor for UnavailableTool {
     }
 }
 
+/// Whether `disabled` disables the tool `name`.
+///
+/// A tool is disabled when `disabled` names it. The tool of a connected account
+/// (`conn:<connection>/<operation>`) is also disabled when `disabled` names its
+/// operation: a bare operation name disables it for every account.
+#[must_use]
+pub fn is_disabled(name: &str, disabled: &[String]) -> bool {
+    let operation = name
+        .strip_prefix("conn:")
+        .and_then(|rest| rest.rsplit_once('/'))
+        .map(|(_, operation)| operation);
+    disabled
+        .iter()
+        .any(|d| d == name || operation.is_some_and(|op| d == op))
+}
+
 /// Build a [`ToolDispatcher`] like [`build_native_dispatcher`] but with extra
 /// executors appended after the native ones, typically MCP tools.
 ///
@@ -170,12 +196,18 @@ impl ToolExecutor for UnavailableTool {
 /// and the active session list. They live outside `NativeDispatcherConfig`
 /// because the `ToolExecutor` trait is not `Clone`, so the config struct must
 /// stay `Clone`-friendly for the rest of the runtime.
+///
+/// `disabled_tools` applies to the extra executors as it does to the natives:
+/// a disabled MCP or connector tool is left out, so a call to it answers
+/// `UnknownTool`. An extra executor named after a native tool is the embedder's
+/// replacement for that native (the chat path wraps `bash_executor` with its
+/// approval guard), whose own disabled list it applies; it is kept here.
 pub fn build_dispatcher_with(
     cfg: &NativeDispatcherConfig,
     extra: Vec<Box<dyn ToolExecutor>>,
 ) -> ToolDispatcher {
     let mut executors: Vec<Box<dyn ToolExecutor>> = Vec::with_capacity(16);
-    let is_active = |name: &str| !cfg.disabled_tools.iter().any(|n| n == name);
+    let is_active = |name: &str| !is_disabled(name, &cfg.disabled_tools);
 
     if is_active("bash_executor") {
         executors.push(Box::new(BashExecutor::new()));
@@ -246,13 +278,41 @@ pub fn build_dispatcher_with(
     }
 
     #[cfg(feature = "memory-search")]
-    if is_active("memory_search") {
+    if is_active("memory_search") && cfg.sources.memory {
         if let Some(ns) = cfg.memory_namespace.as_ref() {
             executors.push(Box::new(MemorySearchTool::new(
                 ns.clone(),
                 cfg.memory_shared_namespaces.clone(),
                 cfg.memory_base_dir.clone(),
             )));
+        }
+    }
+
+    #[cfg(feature = "memory-search")]
+    if is_active(crate::tools::memory_write::MEMORY_WRITE_TOOL) && cfg.sources.memory {
+        if let Some(ns) = cfg.memory_namespace.as_ref() {
+            executors.push(Box::new(crate::tools::memory_write::MemoryWriteTool::new(
+                ns.clone(),
+                cfg.memory_base_dir.clone(),
+            )));
+        }
+    }
+
+    #[cfg(feature = "memory-search")]
+    if is_active(crate::tools::profile_propose::PROFILE_PROPOSE_TOOL) {
+        if let Some(store) = cfg.sources.profile.as_ref() {
+            executors.push(Box::new(
+                crate::tools::profile_propose::ProfileProposeTool::new(
+                    store.database.clone(),
+                    store.author.clone(),
+                ),
+            ));
+        }
+    }
+
+    if is_active(crate::tools::source_search::SOURCE_SEARCH_TOOL) {
+        if let Some(search) = cfg.sources.search.as_ref() {
+            executors.push(Box::new(search.clone()));
         }
     }
 
@@ -265,101 +325,120 @@ pub fn build_dispatcher_with(
         }
     }
 
-    register_governance_tools(&mut executors, cfg, &is_active);
-
-    executors.extend(extra);
-    ToolDispatcher::new(executors)
+    executors.extend(extra.into_iter().filter(|executor| {
+        let name = executor.name();
+        crate::tool_registry::NATIVE_TOOL_NAMES.contains(&name) || is_active(name)
+    }));
+    ToolDispatcher::new(executors).with_max_output_chars(cfg.max_output_chars)
 }
 
 /// Register the sandbox-bound file and notebook tools that are not explicitly
-/// disabled. Each is constructed against `cfg.sandbox_roots`; construction
-/// failures are logged and skipped by [`push_sandbox_tool`].
+/// disabled. The reading ones are constructed against `cfg.sandbox_roots`, the
+/// writing ones against `cfg.write_roots`; construction failures are logged and
+/// skipped by [`push_sandbox_tool`]. A tool with no root answers every call
+/// with [`NoFolderGranted`].
 fn register_sandbox_tools(
     executors: &mut Vec<Box<dyn ToolExecutor>>,
     cfg: &NativeDispatcherConfig,
     is_active: &impl Fn(&str) -> bool,
 ) {
-    if is_active("file_read") {
-        push_sandbox_tool(
-            executors,
-            "file_read",
-            FileRead::new(cfg.sandbox_roots.clone()),
-        );
-    }
-    if is_active("file_write") {
-        push_sandbox_tool(
-            executors,
-            "file_write",
-            FileWrite::new(cfg.sandbox_roots.clone()),
-        );
-    }
-    if is_active("file_list") {
-        push_sandbox_tool(
-            executors,
-            "file_list",
-            FileList::new(cfg.sandbox_roots.clone()),
-        );
-    }
-    if is_active("file_edit") {
-        push_sandbox_tool(
-            executors,
-            "file_edit",
-            FileEdit::new(cfg.sandbox_roots.clone()),
-        );
-    }
-    if is_active("file_glob") {
-        push_sandbox_tool(
-            executors,
-            "file_glob",
-            FileGlob::new(cfg.sandbox_roots.clone()),
-        );
-    }
-    if is_active("file_grep") {
-        push_sandbox_tool(
-            executors,
-            "file_grep",
-            FileGrep::new(cfg.sandbox_roots.clone()),
-        );
-    }
-    if is_active("notebook_read") {
-        push_sandbox_tool(
-            executors,
-            "notebook_read",
-            NotebookRead::new(cfg.sandbox_roots.clone()),
-        );
-    }
-    if is_active("notebook_edit") {
-        push_sandbox_tool(
-            executors,
-            "notebook_edit",
-            NotebookEdit::new(cfg.sandbox_roots.clone()),
-        );
+    let read = &cfg.sandbox_roots;
+    let write = &cfg.write_roots;
+    let mut push =
+        |name: &'static str,
+         roots: &Vec<PathBuf>,
+         build: &dyn Fn(Vec<PathBuf>) -> Option<Box<dyn ToolExecutor>>| {
+            if !is_active(name) {
+                return;
+            }
+            if roots.is_empty() {
+                executors.push(Box::new(NoFolderGranted { name }));
+            } else if let Some(exec) = build(roots.clone()) {
+                executors.push(exec);
+            }
+        };
+    push("file_read", read, &|r| built("file_read", FileRead::new(r)));
+    push("file_write", write, &|r| {
+        built("file_write", FileWrite::new(r))
+    });
+    push("file_list", read, &|r| built("file_list", FileList::new(r)));
+    push("file_edit", write, &|r| {
+        built("file_edit", FileEdit::new(r))
+    });
+    push("file_glob", read, &|r| built("file_glob", FileGlob::new(r)));
+    push("file_grep", read, &|r| built("file_grep", FileGrep::new(r)));
+    push("notebook_read", read, &|r| {
+        built("notebook_read", NotebookRead::new(r))
+    });
+    push("notebook_edit", write, &|r| {
+        built("notebook_edit", NotebookEdit::new(r))
+    });
+}
+
+/// A file tool of an agent granted no folder: every call is refused with a
+/// message that says what to do.
+pub struct NoFolderGranted {
+    name: &'static str,
+}
+
+impl NoFolderGranted {
+    /// The stand-in for the file tool `name`.
+    #[must_use]
+    pub fn new(name: &'static str) -> Self {
+        Self { name }
     }
 }
 
-/// Register the permission-governance tools when a governance database
-/// path is configured and the individual tools are not disabled.
-fn register_governance_tools(
-    executors: &mut Vec<Box<dyn ToolExecutor>>,
-    cfg: &NativeDispatcherConfig,
-    is_active: &impl Fn(&str) -> bool,
-) {
-    // Permission governance: agent-driven tools gated by human-in-the-loop.
-    let Some(db_path) = cfg.governance_db_path.as_ref() else {
-        return;
+impl ToolExecutor for NoFolderGranted {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<serde_json::Value, crate::executor::ToolExecutionError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Err(crate::executor::ToolExecutionError::ExecutionFailed {
+                code: "no_folder_granted".to_string(),
+                message: no_folder_message(self.name),
+            })
+        })
+    }
+}
+
+/// What the agent hears when `tool` has no folder to work in.
+fn no_folder_message(tool: &str) -> String {
+    let what = if crate::folder_access::FOLDER_WRITE_TOOLS.contains(&tool) {
+        "for writing"
+    } else {
+        "to read"
     };
-    if is_active("permission_rule_add") {
-        executors.push(Box::new(PermissionRuleAdd::new(
-            db_path.clone(),
-            cfg.agent_id.clone(),
-        )));
-    }
-    if is_active("permission_rule_remove") {
-        executors.push(Box::new(PermissionRuleRemove::new(db_path.clone())));
-    }
-    if is_active("permission_rule_list") {
-        executors.push(Box::new(PermissionRuleList::new(db_path.clone())));
-    }
+    // The model repeats this to the person: it has to say that a folder
+    // already added is one grant away, or it sends them to add it again.
+    format!(
+        "no folder is granted to this agent {what}: a folder already added in Connections \
+         still has to be granted to this agent, on its sheet under Agents; a folder that \
+         is not a connection yet is added in Connections first"
+    )
+}
+
+/// The executor `result` built, boxed, or `None` after a warning.
+fn built<T, E>(name: &'static str, result: Result<T, E>) -> Option<Box<dyn ToolExecutor>>
+where
+    T: ToolExecutor + 'static,
+    E: std::fmt::Display,
+{
+    let mut out: Vec<Box<dyn ToolExecutor>> = Vec::new();
+    push_sandbox_tool(&mut out, name, result);
+    out.pop()
 }
 
 /// Push a sandbox-bound tool onto *executors*, logging a warning if
@@ -420,6 +499,228 @@ mod tests {
             other => panic!("expected ExecutionFailed with tool_unavailable, got {other:?}"),
         }
     }
+    /// An executor standing for an MCP or connector tool, answering its name.
+    struct NamedTool(&'static str);
+
+    impl ToolExecutor for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<serde_json::Value, crate::executor::ToolExecutionError>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move { Ok(serde_json::json!({ "ran": self.0 })) })
+        }
+    }
+
+    fn config_disabling(disabled: &[&str]) -> NativeDispatcherConfig {
+        let root = std::env::temp_dir().join("apollia-native-dispatcher-disabled-test");
+        NativeDispatcherConfig {
+            sandbox_roots: vec![root.clone()],
+            write_roots: vec![root.clone()],
+            agent_id: "agent".to_string(),
+            venv_base_dir: root.join("venvs"),
+            memory_namespace: None,
+            memory_shared_namespaces: Vec::new(),
+            memory_base_dir: root.join("memory"),
+            http_allowlist: None,
+            pending_user_inputs: None,
+            session_id: None,
+            disabled_tools: disabled.iter().map(|s| (*s).to_string()).collect(),
+            brave_api_key: None,
+            web_search_config: Default::default(),
+            web_read_config: Default::default(),
+            python_interpreter: None,
+            max_output_chars: crate::executor::DEFAULT_MAX_OUTPUT_CHARS,
+            sources: SourceAccess::default(),
+        }
+    }
+
+    // GIVEN a memory namespace, with the memory checked then unchecked
+    // WHEN the dispatcher is built
+    // THEN memory_search is registered in the first case only
+    #[cfg(feature = "memory-search")]
+    #[test]
+    fn memory_search_is_registered_only_when_the_memory_is_checked() {
+        let mut checked = config_disabling(&[]);
+        checked.memory_namespace = Some("apollia".to_string());
+        checked.sources = SourceAccess::memory_only(true);
+        let mut unchecked = checked.clone();
+        unchecked.sources = SourceAccess::memory_only(false);
+
+        let with = build_native_dispatcher(&checked);
+        let without = build_native_dispatcher(&unchecked);
+
+        assert!(with.tool_names().contains(&"memory_search"));
+        assert!(!without.tool_names().contains(&"memory_search"));
+    }
+
+    // GIVEN an agent with a checked folder, then one with none
+    // WHEN the dispatcher is built
+    // THEN source_search is registered in the first case only, and a
+    //      disabled source_search is not registered at all
+    #[tokio::test]
+    async fn source_search_is_registered_only_with_an_indexable_source_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry =
+            apollia_sources::SourceRegistryHandle::open(&dir.path().join("system.db")).unwrap();
+        let folder = apollia_sources::CheckedSource::Registered(apollia_sources::Source {
+            id: "src-folder".to_string(),
+            kind: apollia_sources::SourceKind::Folder,
+            label: "Contracts".to_string(),
+            group: None,
+            reference: Some("folder-contracts".to_string()),
+            index_state: apollia_sources::IndexState::Absent,
+            added_at: "2026-10-04T00:00:00.000Z".to_string(),
+        });
+        let mut checked = config_disabling(&[]);
+        checked.sources = SourceAccess::from_checked(&[folder], Some(&registry));
+        let none = config_disabling(&[]);
+        let mut disabled = config_disabling(&["source_search"]);
+        disabled.sources = checked.sources.clone();
+
+        let with = build_native_dispatcher(&checked);
+        let without = build_native_dispatcher(&none);
+        let off = build_native_dispatcher(&disabled);
+
+        assert!(with.tool_names().contains(&"source_search"));
+        assert!(!without.tool_names().contains(&"source_search"));
+        assert!(!off.tool_names().contains(&"source_search"));
+    }
+
+    // A disabled MCP tool and a disabled connector tool are left out of the
+    // dispatcher like a disabled native, and a call to them does not run.
+    #[tokio::test]
+    async fn a_disabled_mcp_or_connector_tool_is_not_dispatched() {
+        // GIVEN an MCP tool, a connector operation and the tool of one
+        // account disabled, and the tools of two accounts plus one MCP tool
+        let cfg = config_disabling(&[
+            "mcp:notion/create_page",
+            "gmail.send",
+            "conn:google:pro@example.com/gcal.create_event",
+        ]);
+        let extra: Vec<Box<dyn ToolExecutor>> = vec![
+            Box::new(NamedTool("mcp:notion/create_page")),
+            Box::new(NamedTool("conn:google:pro@example.com/gmail.send")),
+            Box::new(NamedTool("conn:google:home@example.com/gmail.send")),
+            Box::new(NamedTool("conn:google:pro@example.com/gcal.create_event")),
+            Box::new(NamedTool("conn:google:home@example.com/gcal.create_event")),
+            Box::new(NamedTool("mcp:notion/search")),
+        ];
+
+        // WHEN the dispatcher is built with them
+        let dispatcher = build_dispatcher_with(&cfg, extra);
+
+        // THEN the disabled ones are absent, the operation disabled for every
+        // account, and the others are registered
+        let names = dispatcher.tool_names();
+        assert!(!names.contains(&"mcp:notion/create_page"), "{names:?}");
+        assert!(
+            !names.contains(&"conn:google:pro@example.com/gmail.send"),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&"conn:google:home@example.com/gmail.send"),
+            "{names:?}"
+        );
+        assert!(
+            !names.contains(&"conn:google:pro@example.com/gcal.create_event"),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"conn:google:home@example.com/gcal.create_event"),
+            "{names:?}"
+        );
+        assert!(names.contains(&"mcp:notion/search"), "{names:?}");
+        // AND a call to a disabled one is refused as unknown, never executed
+        let refused = dispatcher
+            .dispatch("mcp:notion/create_page", serde_json::json!({}))
+            .await;
+        assert!(
+            matches!(refused, Err(ToolExecutionError::UnknownTool { .. })),
+            "{refused:?}"
+        );
+        let ran = dispatcher
+            .dispatch("mcp:notion/search", serde_json::json!({}))
+            .await
+            .expect("enabled tool runs");
+        assert_eq!(ran["ran"], "mcp:notion/search");
+    }
+
+    /// An executor answering a text of a fixed length.
+    struct LongTool(usize);
+
+    impl ToolExecutor for LongTool {
+        fn name(&self) -> &str {
+            "long_tool"
+        }
+
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<serde_json::Value, crate::executor::ToolExecutionError>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move { Ok(serde_json::Value::String("x".repeat(self.0))) })
+        }
+    }
+
+    // `[tools] max_output_chars` reaches the dispatcher the factory builds.
+    #[tokio::test]
+    async fn the_configured_output_limit_trims_a_longer_tool_output() {
+        // GIVEN a limit of 100 in the configuration, and a tool answering 500
+        // characters
+        let mut cfg = config_disabling(&[]);
+        cfg.max_output_chars = 100;
+        let dispatcher = build_dispatcher_with(&cfg, vec![Box::new(LongTool(500))]);
+
+        // WHEN the tool is called through the dispatcher
+        let output = dispatcher
+            .dispatch("long_tool", serde_json::json!({}))
+            .await
+            .expect("the tool runs");
+
+        // THEN the output keeps 100 characters of the original, head and tail,
+        // around the truncation marker
+        let text = output.as_str().expect("a trimmed output is a string");
+        let (head, rest) = text.split_once("\n\n... [").expect("the truncation marker");
+        let tail = rest.split_once("] ...\n\n").expect("the marker closes").1;
+        assert_eq!(head.len() + tail.len(), 100, "{text}");
+    }
+
+    // An extra executor replacing a native keeps the embedder's own filter.
+    #[test]
+    fn an_extra_executor_named_after_a_native_is_kept() {
+        // GIVEN the plain bash_executor disabled so a wrapped one replaces it
+        let cfg = config_disabling(&["bash_executor"]);
+        let extra: Vec<Box<dyn ToolExecutor>> = vec![Box::new(NamedTool("bash_executor"))];
+
+        // WHEN the dispatcher is built
+        let dispatcher = build_dispatcher_with(&cfg, extra);
+
+        // THEN exactly one bash_executor is registered: the replacement
+        let count = dispatcher
+            .tool_names()
+            .iter()
+            .filter(|n| **n == "bash_executor")
+            .count();
+        assert_eq!(count, 1);
+    }
+
     #[tokio::test]
     async fn ask_user_request_carries_the_session_the_dispatcher_serves() {
         // GIVEN a dispatcher built for one chat session, with the ask_user
@@ -428,6 +729,7 @@ mod tests {
         let root = std::env::temp_dir().join("apollia-native-dispatcher-session-test");
         let cfg = NativeDispatcherConfig {
             sandbox_roots: vec![root.clone()],
+            write_roots: vec![root.clone()],
             agent_id: "apollia:chat:s1".to_string(),
             venv_base_dir: root.join("venvs"),
             memory_namespace: None,
@@ -440,8 +742,9 @@ mod tests {
             brave_api_key: None,
             web_search_config: Default::default(),
             web_read_config: Default::default(),
-            governance_db_path: None,
             python_interpreter: None,
+            max_output_chars: crate::executor::DEFAULT_MAX_OUTPUT_CHARS,
+            sources: SourceAccess::default(),
         };
         let dispatcher = std::sync::Arc::new(build_native_dispatcher(&cfg));
         assert!(
@@ -476,5 +779,77 @@ mod tests {
         // the inbox open the conversation that asked
         assert_eq!(request.session_id.as_deref(), Some("s1"));
         call.abort();
+    }
+
+    #[tokio::test]
+    async fn a_file_tool_without_a_granted_folder_refuses_with_a_readable_message() {
+        // GIVEN an agent granted no folder at all
+        let mut cfg = config_disabling(&[]);
+        cfg.sandbox_roots = Vec::new();
+        cfg.write_roots = Vec::new();
+        let dispatcher = build_native_dispatcher(&cfg);
+
+        // WHEN it reads and writes a file
+        let read = dispatcher
+            .dispatch("file_read", serde_json::json!({ "path": "notes.txt" }))
+            .await;
+        let write = dispatcher
+            .dispatch(
+                "file_write",
+                serde_json::json!({ "path": "notes.txt", "content": "x" }),
+            )
+            .await;
+
+        // THEN both are refused, saying which folder is missing and how to grant one
+        for (result, what) in [(read, "to read"), (write, "for writing")] {
+            match result {
+                Err(ToolExecutionError::ExecutionFailed { code, message }) => {
+                    assert_eq!(code, "no_folder_granted");
+                    assert!(message.contains(what), "{message}");
+                    assert!(
+                        message.contains("granted to this agent, on its sheet"),
+                        "{message}"
+                    );
+                    assert!(
+                        message.contains("already added in Connections"),
+                        "{message}"
+                    );
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_folder_granted_to_read_only_refuses_a_write_there() {
+        // GIVEN an agent granted one folder, to read only
+        let folder = tempfile::tempdir().expect("tempdir");
+        std::fs::write(folder.path().join("notes.txt"), "kept").expect("seed file");
+        let mut cfg = config_disabling(&[]);
+        cfg.sandbox_roots = vec![folder.path().to_path_buf()];
+        cfg.write_roots = Vec::new();
+        let dispatcher = build_native_dispatcher(&cfg);
+
+        // WHEN it reads, then writes, in that folder
+        let read = dispatcher
+            .dispatch("file_read", serde_json::json!({ "path": "notes.txt" }))
+            .await;
+        let write = dispatcher
+            .dispatch(
+                "file_write",
+                serde_json::json!({ "path": "notes.txt", "content": "changed" }),
+            )
+            .await;
+
+        // THEN the read succeeds and the write is refused, the file untouched
+        assert!(read.is_ok(), "{read:?}");
+        assert!(
+            matches!(write, Err(ToolExecutionError::ExecutionFailed { ref code, .. }) if code == "no_folder_granted"),
+            "{write:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.path().join("notes.txt")).expect("read back"),
+            "kept"
+        );
     }
 }

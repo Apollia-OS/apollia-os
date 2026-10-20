@@ -106,6 +106,35 @@ impl GoogleScope {
         }
     }
 
+    /// Resolve the short name a caller asks for (`mail.send`, `calendar.read`,
+    /// ...) into its scope group, `None` when no group carries that name.
+    ///
+    /// These names are the vocabulary every consent caller speaks, the desktop
+    /// wizard and the HTTP route alike, so they live here once rather than in
+    /// each caller's own table.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "mail.send" => Self::MailSend,
+            "mail.drafts" => Self::MailDraftsCreate,
+            // Restricted `gmail.compose`: Expert Mode only, kept for power
+            // users who supply their own OAuth client.
+            "mail.compose" => Self::MailCompose,
+            "calendar.read" => Self::CalendarRead,
+            "calendar.write" => Self::CalendarWrite,
+            "drive.workspace" => Self::DriveWorkspace,
+            "sheets" => Self::SheetsReadWrite,
+            "docs" => Self::DocsReadWrite,
+            "slides" => Self::SlidesReadWrite,
+            "tasks" => Self::Tasks,
+            "forms" => Self::FormsReadWrite,
+            "youtube" => Self::YouTubeReadOnly,
+            "openid" => Self::OpenId,
+            "email" => Self::Email,
+            "profile" => Self::Profile,
+            _ => return None,
+        })
+    }
+
     /// Profile scopes always requested to resolve the connected account email.
     pub const fn default_profile() -> [Self; 3] {
         [Self::OpenId, Self::Email, Self::Profile]
@@ -154,6 +183,23 @@ impl MicrosoftScope {
         }
     }
 
+    /// Resolve the short name a caller asks for (`mail.read`, `files.write`,
+    /// ...) into its scope group, `None` when no group carries that name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "mail.read" => Self::MailRead,
+            "mail.send" => Self::MailSend,
+            "mail.readwrite" => Self::MailReadWrite,
+            "calendar.read" => Self::CalendarRead,
+            "calendar.write" => Self::CalendarWrite,
+            "files.read" => Self::FilesRead,
+            "files.write" => Self::FilesWrite,
+            "profile" => Self::Profile,
+            "offline" => Self::Offline,
+            _ => return None,
+        })
+    }
+
     /// Scopes always requested to resolve account identity + refresh.
     pub const fn default_baseline() -> [Self; 2] {
         [Self::Profile, Self::Offline]
@@ -172,6 +218,15 @@ pub enum ConnectorProvider {
 }
 
 impl ConnectorProvider {
+    /// Every connector provider, in the order a listing shows them.
+    pub const ALL: [Self; 2] = [Self::Google, Self::Microsoft];
+
+    /// Resolve a stable identifier (`google`, `microsoft`) back into its
+    /// provider, `None` for any other value.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.id() == id)
+    }
+
     /// Stable string identifier used in keyring namespacing.
     pub const fn id(self) -> &'static str {
         match self {
@@ -192,7 +247,7 @@ impl ConnectorProvider {
     /// the other two sources.
     ///
     /// Suits a shell session, a CI job, or a headless host. The interactive
-    /// path is Settings → Integrations, which writes
+    /// path is the page of the connection in Connections, which writes
     /// `~/.apollia/oauth-clients.toml` and survives a restart; an exported
     /// variable is only visible to processes launched from that same shell,
     /// which is a common way to think the client is configured when it is not.
@@ -289,8 +344,8 @@ impl ConnectorProvider {
     /// Priority order:
     /// 1. Runtime env var override (`APOLLIA_GOOGLE_CLIENT_ID` /
     ///    `APOLLIA_MICROSOFT_CLIENT_ID`), for a shell session or CI.
-    /// 2. `~/.apollia/oauth-clients.toml`, written by the Settings →
-    ///    Integrations panel. **This is the path an operator takes**, and the
+    /// 2. `~/.apollia/oauth-clients.toml`, written from the page of the
+    ///    connection. **This is the path an operator takes**, and the
     ///    only one that survives a restart of the application.
     /// 3. Build-time constant, see
     ///    [`default_client_id`](Self::default_client_id). Microsoft resolves
@@ -317,8 +372,8 @@ impl ConnectorProvider {
         }
     }
 
-    /// Resolve the effective Google API key at runtime: same 3-source
-    /// priority chain as [`resolve_client_id`](Self::resolve_client_id).
+    /// Resolve the effective Google API key at runtime: the runtime env var,
+    /// then the secret store, then the build-time constant.
     /// `None` is the normal case for Microsoft and for any dev build that
     /// hasn't been provisioned with a key. The Picker UI surfaces a clear
     /// "API key missing" error to direct the operator to Settings.
@@ -328,7 +383,10 @@ impl ConnectorProvider {
                 return Some(v);
             }
         }
-        if let Some(v) = crate::oauth_clients_file::lookup_api_key(self.id()) {
+        if let Some(v) = crate::oauth_client_secrets::load_default(
+            self.id(),
+            crate::oauth_client_secrets::OauthClientSecret::ApiKey,
+        ) {
             return Some(v);
         }
         let compiled = self.default_api_key();
@@ -339,8 +397,9 @@ impl ConnectorProvider {
         }
     }
 
-    /// Resolve the effective OAuth client secret at runtime: same 3-source
-    /// priority chain as [`resolve_client_id`](Self::resolve_client_id).
+    /// Resolve the effective OAuth client secret at runtime: the runtime env
+    /// var, then the secret store (see [`crate::oauth_client_secrets`]), then
+    /// the build-time constant.
     /// Returns `None` when no source provides a secret (the normal case for
     /// Microsoft, spec-compliant public clients don't carry one).
     pub fn resolve_client_secret(self) -> Option<String> {
@@ -349,7 +408,10 @@ impl ConnectorProvider {
                 return Some(v);
             }
         }
-        if let Some(v) = crate::oauth_clients_file::lookup_client_secret(self.id()) {
+        if let Some(v) = crate::oauth_client_secrets::load_default(
+            self.id(),
+            crate::oauth_client_secrets::OauthClientSecret::ClientSecret,
+        ) {
             return Some(v);
         }
         let compiled = self.default_client_secret();
@@ -503,6 +565,38 @@ mod tests {
             "Mail.ReadWrite"
         );
         assert_eq!(MicrosoftScope::Offline.oauth_scope(), "offline_access");
+    }
+
+    #[test]
+    fn test_scope_names_resolve_to_their_groups_and_nothing_else() {
+        // GIVEN the short names a consent caller sends
+        // WHEN each is resolved against its provider's catalogue
+        // THEN a known name finds its group and a foreign one finds nothing
+        assert_eq!(
+            GoogleScope::from_name("mail.send"),
+            Some(GoogleScope::MailSend)
+        );
+        assert_eq!(
+            GoogleScope::from_name("mail.drafts"),
+            Some(GoogleScope::MailDraftsCreate)
+        );
+        assert_eq!(
+            MicrosoftScope::from_name("files.write"),
+            Some(MicrosoftScope::FilesWrite)
+        );
+        assert_eq!(GoogleScope::from_name("drive.read_all"), None);
+        assert_eq!(MicrosoftScope::from_name("drive.workspace"), None);
+    }
+
+    #[test]
+    fn test_provider_ids_round_trip_and_refuse_a_stranger() {
+        // GIVEN every connector provider and one identifier none claims
+        // WHEN each identifier is resolved back
+        // THEN the providers round-trip and the stranger resolves to nothing
+        for provider in ConnectorProvider::ALL {
+            assert_eq!(ConnectorProvider::from_id(provider.id()), Some(provider));
+        }
+        assert_eq!(ConnectorProvider::from_id("github"), None);
     }
 
     #[test]

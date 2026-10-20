@@ -1,7 +1,7 @@
 //! The API operations no CLI leaf reaches, exercised through the real router.
 //!
 //! A sweep of the CLI traverses the API operations the CLI addresses, and only
-//! those. Eleven operations of the surface sit outside that path: nothing in
+//! those. The operations of [`unreached_ops`] sit outside that path: nothing in
 //! `apollia-cli` builds their URL, so no CLI sweep, however exhaustive, can
 //! observe them. This module is the instrument that covers them, and it drives
 //! [`APIServer::build_router_for_test`] rather than a hand-rolled router, so a
@@ -12,13 +12,15 @@
 //!
 //! The census sends a method the route does not declare and expects `405`,
 //! which axum returns only when the path matched. That proves the path is
-//! mounted, and it costs nothing, so every one of the eleven takes it.
+//! mounted, and it costs nothing, so every operation takes it.
 //!
 //! The live probes send the declared method and assert what the handler
-//! answers. Ten of the eleven take one. The eleventh, `get_task_timeline`,
-//! is measured and reported instead of run: `routes_timeline::resolve_data_dir`
-//! ignores `state.data_dir` and resolves the process home, so invoking it here
-//! would read the developer's own `~/.apollia`. See [`LIVE_PROBE_EXCLUSION`].
+//! answers. All but two take one. `get_task_timeline` is measured and
+//! reported instead of run: `routes_timeline::resolve_data_dir` ignores
+//! `state.data_dir` and resolves the process home, so invoking it here would
+//! read the developer's own `~/.apollia` ([`LIVE_PROBE_EXCLUSION`]).
+//! `list_connector_accounts` reads the OS keychain
+//! ([`KEYCHAIN_PROBE_EXCLUSION`]).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -55,7 +57,7 @@ struct UnreachedOp {
 const LIVE_PROBE_EXCLUSION: &str = "get_task_timeline resolves the process home \
 instead of state.data_dir, so a live probe would read the real ~/.apollia";
 
-/// The eleven operations, in the order the coverage table lists them.
+/// The operations, in the order the coverage table lists them.
 fn unreached_ops() -> Vec<UnreachedOp> {
     vec![
         UnreachedOp {
@@ -92,13 +94,6 @@ fn unreached_ops() -> Vec<UnreachedOp> {
             path: "/api/v1/tools",
             absent_method: Method::DELETE,
             live_probed: true,
-        },
-        UnreachedOp {
-            id: "set_server_approval",
-            method: Method::PATCH,
-            path: "/api/v1/mcp/servers/probe/approval",
-            absent_method: Method::GET,
-            live_probed: false,
         },
         UnreachedOp {
             id: "stream_mailbox",
@@ -156,7 +151,138 @@ fn unreached_ops() -> Vec<UnreachedOp> {
             absent_method: Method::POST,
             live_probed: false,
         },
+        UnreachedOp {
+            id: "list_registry_servers",
+            method: Method::GET,
+            path: "/api/v1/mcp/registry",
+            absent_method: Method::DELETE,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "get_registry_server",
+            method: Method::GET,
+            path: "/api/v1/mcp/registry/server?name=io.example.probe/server",
+            absent_method: Method::DELETE,
+            live_probed: true,
+        },
+        // The secret paths carry a key no placeholder can hold, so a probe that
+        // reaches the handler is refused before any secret store is opened.
+        UnreachedOp {
+            id: "put_mcp_secret",
+            method: Method::PUT,
+            path: "/api/v1/mcp/servers/probe/secrets/1-not-a-variable",
+            absent_method: Method::POST,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "delete_mcp_secret",
+            method: Method::DELETE,
+            path: "/api/v1/mcp/servers/probe/secrets/1-not-a-variable",
+            absent_method: Method::POST,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "start_connector_consent",
+            method: Method::POST,
+            path: "/api/v1/connectors/oauth/start",
+            absent_method: Method::GET,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "complete_connector_consent",
+            method: Method::POST,
+            path: "/api/v1/connectors/oauth/complete",
+            absent_method: Method::GET,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "list_connector_accounts",
+            method: Method::GET,
+            path: "/api/v1/connectors/accounts",
+            absent_method: Method::POST,
+            live_probed: false,
+        },
+        UnreachedOp {
+            id: "disconnect_connector_account",
+            method: Method::DELETE,
+            path: "/api/v1/connectors/accounts/not-a-provider/probe",
+            absent_method: Method::GET,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "list_imap_providers",
+            method: Method::GET,
+            path: "/api/v1/connectors/imap/providers",
+            absent_method: Method::POST,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "test_imap_mailbox",
+            method: Method::POST,
+            path: "/api/v1/connectors/imap/test",
+            absent_method: Method::GET,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "add_imap_mailbox",
+            method: Method::POST,
+            path: "/api/v1/connectors/imap/accounts",
+            absent_method: Method::GET,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "list_loaded_models",
+            method: Method::GET,
+            path: "/api/v1/llm/loaded-models",
+            absent_method: Method::DELETE,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "unload_loaded_model",
+            method: Method::POST,
+            path: "/api/v1/llm/loaded-models/unload",
+            absent_method: Method::GET,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "stream_events",
+            method: Method::GET,
+            path: "/api/v1/events",
+            absent_method: Method::POST,
+            live_probed: true,
+        },
+        UnreachedOp {
+            id: "pause_session",
+            method: Method::POST,
+            path: "/api/v1/sessions/probe-session/pause",
+            absent_method: Method::GET,
+            live_probed: true,
+        },
     ]
+}
+
+/// Why `list_connector_accounts` carries no live probe.
+const KEYCHAIN_PROBE_EXCLUSION: &str = "list_connector_accounts reads every provider's \
+account index from the OS keychain, so a live probe would read the real one";
+
+/// Seed `data_dir` with a fresh registry cache holding one server, so the
+/// registry routes answer from it and never reach the network.
+fn seed_registry_cache(data_dir: &std::path::Path) {
+    let cache = serde_json::json!([{
+        "server": {
+            "name": "io.example.probe/server",
+            "title": "Probe",
+            "description": "A server the census seeds",
+            "version": "1.0.0",
+            "repository": null,
+            "websiteUrl": null,
+            "packages": null,
+            "icons": null
+        },
+        "_meta": null
+    }]);
+    std::fs::write(data_dir.join("mcp-registry.json"), cache.to_string())
+        .expect("seed registry cache");
 }
 
 // ── Test fixtures ────────────────────────────────────────────────────────
@@ -202,7 +328,6 @@ fn base_state(data_dir: &std::path::Path) -> AppState<MockBackend> {
         router_handle,
         registry_handle,
         event_sender: event_tx,
-        agent_loader: Arc::new(crate::api::routes_agents::StubAgentLoader),
         backend: MockBackend,
         llm_router: crate::api::server::empty_shared_llm_router(),
         trigger_engine: None,
@@ -211,11 +336,13 @@ fn base_state(data_dir: &std::path::Path) -> AppState<MockBackend> {
         pending_approvals: None,
         plan_gates: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -235,6 +362,12 @@ fn base_state(data_dir: &std::path::Path) -> AppState<MockBackend> {
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: crate::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     }
 }
 
@@ -286,14 +419,15 @@ fn json_of(bytes: &[u8]) -> serde_json::Value {
 
 #[tokio::test]
 async fn test_every_operation_unreached_by_the_cli_is_mounted_on_the_router() {
-    // GIVEN the eleven operations no CLI leaf addresses, and the router the
-    // daemon actually serves
+    // GIVEN the operations no CLI leaf addresses, and the router the daemon
+    // actually serves, over a data directory whose registry cache is fresh
     let dir = tempfile::tempdir().expect("temp dir");
+    seed_registry_cache(dir.path());
     let ops = unreached_ops();
     assert_eq!(
         ops.len(),
-        14,
-        "the census must carry the fourteen operations the coverage table lists"
+        28,
+        "the census must carry the twenty-eight operations the coverage table lists"
     );
 
     // WHEN each is probed with a method its route does not declare
@@ -342,13 +476,13 @@ async fn test_every_operation_unreached_by_the_cli_is_mounted_on_the_router() {
         bound += 1;
     }
     assert_eq!(
-        bound, 12,
-        "the method binding of twelve operations must be probed"
+        bound, 26,
+        "the method binding of twenty-six operations must be probed"
     );
 }
 
 #[tokio::test]
-async fn test_twelve_of_the_fourteen_operations_carry_a_live_probe() {
+async fn test_twenty_six_of_the_twenty_nine_operations_carry_a_live_probe() {
     // GIVEN the census table, which records which operations a live probe
     // invokes the handler of
     let ops = unreached_ops();
@@ -365,18 +499,19 @@ async fn test_twelve_of_the_fourteen_operations_carry_a_live_probe() {
     // is the one whose handler reads the process home rather than the state's
     // data directory
     assert_eq!(
-        live, 12,
+        live, 26,
         "live probe count changed without the table saying so"
     );
-    // Two exclusions, and they are not the same kind. `get_task_timeline`
-    // cannot be live-probed here at all, for the reason the constant states.
-    // `set_server_approval` mutates a server the census does not create, so it
-    // carries a routing probe only until a probe builds that server: debt, and
-    // named as such rather than counted as coverage.
+    // Two exclusions: `get_task_timeline` and `list_connector_accounts` cannot
+    // be live-probed here at all, for the reasons their constants state.
     let mut excluded = excluded;
     excluded.sort_unstable();
-    assert_eq!(excluded, vec!["get_task_timeline", "set_server_approval"]);
+    assert_eq!(
+        excluded,
+        vec!["get_task_timeline", "list_connector_accounts"]
+    );
     assert!(LIVE_PROBE_EXCLUSION.contains("state.data_dir"));
+    assert!(KEYCHAIN_PROBE_EXCLUSION.contains("keychain"));
 }
 
 // ── Live probes ──────────────────────────────────────────────────────────
@@ -566,6 +701,62 @@ async fn test_mailbox_stream_relays_mailbox_events_and_filters_the_rest() {
 }
 
 #[tokio::test]
+async fn test_event_stream_relays_every_runtime_event_as_the_bus_carries_it() {
+    // GIVEN an open event stream
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state = base_state(dir.path());
+    let bus = state.event_sender.clone();
+    let router = APIServer::build_router_for_test(state);
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/events")
+        .body(Body::empty())
+        .expect("build request");
+    let response = router.oneshot(request).await.expect("router response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // WHEN an event no narrower stream forwards is published
+    let _ = bus.send(RuntimeEvent::ShutdownRequested);
+
+    // THEN it reaches the wire as a `runtime` frame holding its serde JSON,
+    // which a client deserializes back into the same event
+    let mut stream = response.into_body().into_data_stream();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("stream produced no frame within the deadline")
+        .expect("stream ended before emitting a frame")
+        .expect("frame error");
+    let text = String::from_utf8_lossy(&frame).to_string();
+    assert!(text.contains("event: runtime"), "frame was: {text}");
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .expect("the frame carries a data line");
+    let event: RuntimeEvent = serde_json::from_str(data).expect("the data is a runtime event");
+    assert!(matches!(event, RuntimeEvent::ShutdownRequested));
+}
+
+#[tokio::test]
+async fn test_pause_answers_503_without_the_chat_subsystem() {
+    // GIVEN a runtime started without the chat session manager
+    let dir = tempfile::tempdir().expect("temp dir");
+    let router = APIServer::build_router_for_test(base_state(dir.path()));
+
+    // WHEN the turn of a session is paused
+    let (status, body) = call(
+        router,
+        Method::POST,
+        "/api/v1/sessions/probe-session/pause",
+        Body::empty(),
+    )
+    .await;
+
+    // THEN the caller is told the subsystem is unavailable
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(json_of(&body)["error"].is_string());
+}
+
+#[tokio::test]
 async fn test_delegate_reports_an_unknown_skill_rather_than_waiting_for_a_worker() {
     // GIVEN a runtime whose registry holds no agent
     let dir = tempfile::tempdir().expect("temp dir");
@@ -662,6 +853,11 @@ async fn test_daily_costs_aggregates_the_calls_the_repository_holds() {
         latency_ms: Some(5),
         prompt_text: None,
         completion_text: None,
+        session_id: None,
+        turn_id: None,
+        ttft_ms: None,
+        finish_reason: None,
+        generation_ms: None,
     })
     .expect("save call");
     let mut state = base_state(dir.path());
@@ -746,4 +942,196 @@ async fn test_sidechains_answers_503_without_the_a2a_invoker() {
     // the 404 a task with no delegation gets
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(json_of(&body)["error"].is_string());
+}
+
+#[tokio::test]
+async fn test_registry_routes_answer_from_the_cache_without_the_network() {
+    // GIVEN a data directory whose registry cache is fresh and holds one server
+    let dir = tempfile::tempdir().expect("temp dir");
+    seed_registry_cache(dir.path());
+    let router = APIServer::build_router_for_test(base_state(dir.path()));
+
+    // WHEN the catalogue is listed, then that server and an unknown one are read
+    let (list_status, list_body) = call(
+        router.clone(),
+        Method::GET,
+        "/api/v1/mcp/registry",
+        Body::empty(),
+    )
+    .await;
+    let (one_status, one_body) = call(
+        router.clone(),
+        Method::GET,
+        "/api/v1/mcp/registry/server?name=io.example.probe%2Fserver",
+        Body::empty(),
+    )
+    .await;
+    let (missing_status, _) = call(
+        router,
+        Method::GET,
+        "/api/v1/mcp/registry/server?name=io.example.probe%2Fabsent",
+        Body::empty(),
+    )
+    .await;
+
+    // THEN the listing and the detail are the cached entry, and an unknown name is not found
+    assert_eq!(list_status, StatusCode::OK);
+    let list = json_of(&list_body);
+    assert_eq!(list.as_array().map(Vec::len), Some(1));
+    assert_eq!(list[0]["server"]["name"], "io.example.probe/server");
+    assert_eq!(one_status, StatusCode::OK);
+    assert_eq!(json_of(&one_body)["server"]["title"], "Probe");
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_secret_routes_refuse_a_key_no_placeholder_can_carry() {
+    // GIVEN the router the daemon serves
+    let dir = tempfile::tempdir().expect("temp dir");
+    let router = APIServer::build_router_for_test(base_state(dir.path()));
+
+    // WHEN a secret is put and deleted under a key that starts with a digit
+    let (put_status, put_body) = call(
+        router.clone(),
+        Method::PUT,
+        "/api/v1/mcp/servers/probe/secrets/1-not-a-variable",
+        Body::from(r#"{"value":"v"}"#),
+    )
+    .await;
+    let (delete_status, _) = call(
+        router,
+        Method::DELETE,
+        "/api/v1/mcp/servers/probe/secrets/1-not-a-variable",
+        Body::empty(),
+    )
+    .await;
+
+    // THEN both handlers refuse it before any secret store is opened, and the
+    // refusal never echoes the value
+    assert_eq!(put_status, StatusCode::BAD_REQUEST);
+    assert_eq!(delete_status, StatusCode::BAD_REQUEST);
+    let text = String::from_utf8_lossy(&put_body).to_string();
+    assert!(
+        text.contains("environment variable or header name"),
+        "body was: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_imap_routes_refuse_an_unusable_mailbox_before_reaching_a_server() {
+    // GIVEN the router the daemon serves
+    let dir = tempfile::tempdir().expect("temp dir");
+    let router = APIServer::build_router_for_test(base_state(dir.path()));
+
+    // WHEN the known providers are read, a mailbox on an unknown domain
+    // without a server is tested, and a mailbox without a password is added
+    let (providers_status, providers_body) = call(
+        router.clone(),
+        Method::GET,
+        "/api/v1/connectors/imap/providers",
+        Body::empty(),
+    )
+    .await;
+    let (test_status, test_body) = call(
+        router.clone(),
+        Method::POST,
+        "/api/v1/connectors/imap/test",
+        Body::from(r#"{"email":"ana@example.test","password":"p"}"#),
+    )
+    .await;
+    let (add_status, add_body) = call(
+        router,
+        Method::POST,
+        "/api/v1/connectors/imap/accounts",
+        Body::from(r#"{"email":"ana@gmail.com","password":""}"#),
+    )
+    .await;
+
+    // THEN each handler answers its typed refusal, and none opened a
+    // connection, the secret store or the mailbox list; the providers are read
+    // from the table compiled into the runtime
+    assert_eq!(providers_status, StatusCode::OK);
+    assert_eq!(json_of(&providers_body)["defaultPort"], 993);
+    assert!(json_of(&providers_body)["providers"]
+        .as_array()
+        .is_some_and(|providers| !providers.is_empty()));
+    assert_eq!(test_status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(&test_body)["code"], "unknown_provider");
+    assert_eq!(add_status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(&add_body)["code"], "invalid_password");
+    assert!(!dir
+        .path()
+        .join(apollia_connectors::imap::IMAP_INDEX_FILE)
+        .exists());
+}
+
+#[tokio::test]
+async fn test_connector_consent_routes_refuse_before_reaching_a_provider() {
+    // GIVEN the router the daemon serves
+    let dir = tempfile::tempdir().expect("temp dir");
+    let router = APIServer::build_router_for_test(base_state(dir.path()));
+
+    // WHEN a consent is started for an unknown provider, completed under a
+    // state never issued, and an account of an unknown provider disconnected
+    let (start_status, start_body) = call(
+        router.clone(),
+        Method::POST,
+        "/api/v1/connectors/oauth/start",
+        Body::from(r#"{"provider":"github","redirect_uri":"https://app.example.test/cb"}"#),
+    )
+    .await;
+    let (complete_status, _) = call(
+        router.clone(),
+        Method::POST,
+        "/api/v1/connectors/oauth/complete",
+        Body::from(r#"{"state":"never-issued","code":"c"}"#),
+    )
+    .await;
+    let (disconnect_status, _) = call(
+        router,
+        Method::DELETE,
+        "/api/v1/connectors/accounts/not-a-provider/probe",
+        Body::empty(),
+    )
+    .await;
+
+    // THEN each handler answers its refusal, and none opened a browser, a
+    // listener, a provider connection or the keychain
+    assert_eq!(start_status, StatusCode::BAD_REQUEST);
+    assert!(json_of(&start_body)["error"]
+        .as_str()
+        .is_some_and(|m| m.contains("github")));
+    assert_eq!(complete_status, StatusCode::NOT_FOUND);
+    assert_eq!(disconnect_status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_loaded_model_routes_tell_a_host_without_a_local_engine_apart() {
+    // GIVEN a runtime started without the embedded llama-server
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    // WHEN the resident models are listed and one is asked to unload
+    let (list_status, list_body) = call(
+        APIServer::build_router_for_test(base_state(dir.path())),
+        Method::GET,
+        "/api/v1/llm/loaded-models",
+        Body::empty(),
+    )
+    .await;
+    let (unload_status, unload_body) = call(
+        APIServer::build_router_for_test(base_state(dir.path())),
+        Method::POST,
+        "/api/v1/llm/loaded-models/unload",
+        Body::from(r#"{"modelPath":"/models/probe.gguf"}"#),
+    )
+    .await;
+
+    // THEN the list answers empty and says no engine exists, and the unload is
+    // refused as unavailable rather than as a model that is merely not loaded
+    assert_eq!(list_status, StatusCode::OK);
+    let listed = json_of(&list_body);
+    assert_eq!(listed["engineAvailable"], false);
+    assert_eq!(listed["models"].as_array().map(Vec::len), Some(0));
+    assert_eq!(unload_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(json_of(&unload_body)["error"].is_string());
 }

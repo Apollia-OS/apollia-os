@@ -110,6 +110,7 @@ import check_panic_free as panicfree  # noqa: E402
 import check_optional_builders as builders  # noqa: E402
 import check_design_tokens as designtokens  # noqa: E402
 import check_prose  # noqa: E402
+import check_ui_vocabulary as uivocab  # noqa: E402
 import binary_freshness  # noqa: E402
 import worktree_verdicts  # noqa: E402
 
@@ -806,6 +807,174 @@ def check_prose_tracker_rule() -> None:
                 "the excused path stayed silent with its exemption removed, so "
                 "the exemption assertion above proves nothing about the list it "
                 "is meant to bound",
+            )
+        finally:
+            check_prose.RULES = rules
+
+
+
+# ── The prose identity and host-name rules ───────────────────────────────────
+# Same family again. Both rules were added on a tree already swept clean, so a
+# green run says the sweep was complete and nothing about the two detectors.
+# They are driven on a temporary tree like the tracker rule above.
+#
+# Every fixture is composed from fragments, for the reason given above: this
+# file is inventoried by the guard it tests. The negatives are the neighbours
+# the rules must leave alone: the first name the tree uses as example data, a
+# host named by its role, a word that only starts like a hardware model, and a
+# file whose name carries a `.local` segment with no host in front of it.
+
+FIRST_NAME = "ni" + "dal"
+FAMILY_NAME = "zou" + "mita"
+ADDRESS_SAMPLE = "reach " + FIRST_NAME + "@example.com for the fixture"
+FAMILY_SAMPLE = "Copyright 2026 " + FAMILY_NAME.capitalize()
+HANDLE_SAMPLE = "* @" + FIRST_NAME + "-z"
+EXAMPLE_NAME_CLEAN = "the profile is named Ada, and the address is ada@example.com"
+IDENTITY_NAME = "docs/" + FIRST_NAME + "-notes.md"
+CODEOWNERS = ".github/CODEOWNERS"
+NESTED_CODEOWNERS = "docs/.github/CODEOWNERS"
+
+OWNED_HOST_SAMPLE = "ssh build@someone-" + "mac" + "-studio.local"
+BARE_HOST_SAMPLE = "http://" + "MacBook" + "-Pro.local:11434/v1"
+ROLE_HOST_CLEAN = "http://inference-box.local:11434/v1"
+WORD_HOST_CLEAN = "the machine.local and macro.local records resolve"
+LOCAL_FILE_CLEAN = "preferences live in AGENTS.local.md and justfile.local"
+
+
+def check_prose_identity_rules() -> None:
+    print("prose guard: a person and a workstation are refused, example data is not")
+
+    def rule_of(pattern: object) -> int:
+        return next(
+            i for i, r in enumerate(check_prose.RULES) if r.pattern is pattern
+        )
+
+    identity = rule_of(check_prose.PERSONAL_IDENTITY)
+    machine = rule_of(check_prose.MACHINE_HOSTNAME)
+    identity_label = check_prose.RULES[identity].label
+    machine_label = check_prose.RULES[machine].label
+
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        files = _prose_tree(
+            tmp,
+            {
+                "docs/address.md": ADDRESS_SAMPLE.encode("utf-8"),
+                "docs/family.md": FAMILY_SAMPLE.encode("utf-8"),
+                "docs/handle.md": HANDLE_SAMPLE.encode("utf-8"),
+                "docs/example-name.md": EXAMPLE_NAME_CLEAN.encode("utf-8"),
+                IDENTITY_NAME: CLEAN_SAMPLE.encode("utf-8"),
+                CODEOWNERS: HANDLE_SAMPLE.encode("utf-8"),
+                NESTED_CODEOWNERS: HANDLE_SAMPLE.encode("utf-8"),
+                "docs/owned-host.md": OWNED_HOST_SAMPLE.encode("utf-8"),
+                "docs/bare-host.md": BARE_HOST_SAMPLE.encode("utf-8"),
+                "docs/role-host.md": ROLE_HOST_CLEAN.encode("utf-8"),
+                "docs/word-host.md": WORD_HOST_CLEAN.encode("utf-8"),
+                "docs/local-file.md": LOCAL_FILE_CLEAN.encode("utf-8"),
+            },
+        )
+
+        found = check_prose.scan(tmp, files)
+        hits = {f.split(":")[0] for f in found}
+
+        for rel, what in (
+            ("docs/address.md", "a first name inside an address"),
+            ("docs/family.md", "a capitalized family name"),
+            ("docs/handle.md", "a handle"),
+        ):
+            case(
+                f"flags {what}",
+                f"{rel}:1: {identity_label}" in found,
+                f"the identity rule stayed silent on {what}, so the spelling "
+                f"would come back unnoticed. findings: {found!r}",
+            )
+        case(
+            "stays silent on the example first name of the tree",
+            "docs/example-name.md" not in hits,
+            f"example data was reported. Test fixtures need a first name, and "
+            f"a rule that refuses the agreed one gets switched off. "
+            f"findings: {found!r}",
+        )
+        case(
+            "flags the name carried by a file name",
+            f"{IDENTITY_NAME}: {identity_label}, in the file name" in found,
+            f"the name pass reported nothing, so a file could carry the name "
+            f"in its path and satisfy the rule in its body. findings: {found!r}",
+        )
+        case(
+            "the ownership file is the one excused path",
+            CODEOWNERS not in hits,
+            f"the excused path was reported, so the rule cannot be green "
+            f"while the ownership file addresses an account. findings: {found!r}",
+        )
+        case(
+            "an ownership file anywhere else is not excused",
+            f"{NESTED_CODEOWNERS}:1: {identity_label}" in found,
+            f"the exemption matched a path it does not name; it is anchored "
+            f"on the full relative path so one excused file cannot become a "
+            f"family of them. findings: {found!r}",
+        )
+        case(
+            "flags a workstation host name carrying an owner",
+            f"docs/owned-host.md:1: {machine_label}" in found,
+            f"the host-name rule stayed silent on the shape it exists to "
+            f"catch. findings: {found!r}",
+        )
+        case(
+            "flags a workstation host name in mixed case with a port",
+            f"docs/bare-host.md:1: {machine_label}" in found,
+            f"the default host name of a laptop escaped the rule. "
+            f"findings: {found!r}",
+        )
+        case(
+            "stays silent on a host named by its role",
+            "docs/role-host.md" not in hits,
+            f"a role-named host was reported, which is the replacement the "
+            f"rule itself asks for. findings: {found!r}",
+        )
+        case(
+            "stays silent on a word that only starts like a hardware model",
+            "docs/word-host.md" not in hits,
+            f"the model was matched as a prefix rather than as a whole "
+            f"token. findings: {found!r}",
+        )
+        case(
+            "stays silent on a file name with a local segment",
+            "docs/local-file.md" not in hits,
+            f"an override file name was read as a host. The tree documents "
+            f"several of them. findings: {found!r}",
+        )
+
+        # Negative control on the exemption, the shape the tracker rule uses.
+        rules = check_prose.RULES
+        try:
+            check_prose.RULES = [
+                r._replace(exempt=None) if i == identity else r
+                for i, r in enumerate(rules)
+            ]
+            widened = {f.split(":")[0] for f in check_prose.scan(tmp, files)}
+            case(
+                "negative control: dropping the ownership exemption is reported",
+                CODEOWNERS in widened,
+                "the excused path stayed silent with its exemption removed, so "
+                "the exemption assertion above proves nothing",
+            )
+        finally:
+            check_prose.RULES = rules
+
+        # Negative control on the detectors: with both rules removed the same
+        # tree is clean, so every positive above is owed to them and not to a
+        # neighbouring rule that happens to match the fixture.
+        try:
+            check_prose.RULES = [
+                r for i, r in enumerate(rules) if i not in (identity, machine)
+            ]
+            without = check_prose.scan(tmp, files)
+            case(
+                "negative control: without the two rules the fixtures are clean",
+                without == [],
+                f"another rule reports these fixtures, so the positives above "
+                f"do not isolate the rules under test. findings: {without!r}",
             )
         finally:
             check_prose.RULES = rules
@@ -2354,7 +2523,7 @@ def check_panic_sweep_scope() -> None:
         "crates/apollia-runtime/src/audit_journal/subscriber.rs",
         "crates/apollia-desktop/src/main.rs",
         "crates/apollia-core/src/budget.rs",
-        "crates/apollia-mcp/src/approvals.rs",
+        "crates/apollia-mcp/src/server_repository.rs",
     ]
     present = [path for path in kept if path in paths]
     case(
@@ -2570,6 +2739,164 @@ def check_design_tokens_ratchet() -> None:
     )
 
 
+# ── The interface vocabulary guard ───────────────────────────────────────────
+# Cases 3 and 10 on `check_ui_vocabulary.py`. Its tree arrives with every
+# faulty text exempted by name, so a green run says the exemption list matches
+# the catalogues, not that the detector reads a value. Drive it on a refused
+# value and an accepted one, and drive the exemption list from both sides.
+
+VOCAB_TERMS = ["runtime", "MCP", "ReAct", "assistant"]
+
+
+def check_ui_vocabulary_fires() -> None:
+    print("ui vocabulary: a banned term is refused, prose around it is not")
+
+    refused = [
+        ("a lower-case term in another case", "The Runtime is down."),
+        ("an acronym as written", "Add an MCP server."),
+        ("a plural", "Your assistants are ready."),
+    ]
+    for name, value in refused:
+        found = uivocab.catalogue_findings("en", {"home.x": value}, VOCAB_TERMS, [])
+        case(
+            f"refuses {name}",
+            len(found) == 1 and "home.x" in found[0],
+            f"{value!r} passed. The guard answered {found!r}",
+        )
+
+    accepted = [
+        ("a term inside a longer word", "A runtimeless view, built in-house."),
+        ("an acronym in another case", "React to a new message."),
+        ("a placeholder name", "Hello {runtime}, welcome."),
+    ]
+    for name, value in accepted:
+        found = uivocab.catalogue_findings("en", {"home.x": value}, VOCAB_TERMS, [])
+        case(
+            f"stays silent on {name}",
+            found == [],
+            f"{value!r} was refused: {found!r}. A guard that cries wolf is the "
+            f"one that ends up behind an exclusion",
+        )
+    for name, key in [
+        ("a key of the dev namespace", "dev.runtime_status"),
+        ("a key of an exempt block", "observability.runtime_title"),
+    ]:
+        found = uivocab.catalogue_findings("en", {key: "MCP runtime"}, VOCAB_TERMS, [])
+        case(f"stays silent on {name}", found == [], f"{key} was refused: {found!r}")
+
+    calls = {
+        "src/a.svelte": '<p>{$t("dev.trace")}</p>',
+        "src/b.svelte": 'import { developerMode } from "x";\n{$t("dev.trace")}',
+        "src/c.ts": 'get(t)("dev.trace")',
+    }
+    found = uivocab.call_findings(calls)
+    case(
+        "a dev. text in a file that never reads developerMode is refused",
+        len(found) == 2 and "src/a.svelte" in found[0] and "src/c.ts" in found[1],
+        f"the call side answered {found!r}",
+    )
+
+    sidebar = """
+  export const DEVELOPER_NAV: readonly DeveloperNavEntry[] = [
+    { route: "transcriptions" as Route, Icon: Mic, labelKey: "a" },
+    { route: "observability"  as Route, Icon: Activity, labelKey: "b" },
+    { route: "memory"         as Route, Icon: Database, labelKey: "c" },
+  ];
+"""
+    case(
+        "positive control: every exempt block in the developer group passes",
+        uivocab.block_findings(uivocab.developer_routes(sidebar)) == [],
+        "the sidebar of the tree's shape was refused",
+    )
+    moved = sidebar.replace('{ route: "observability"  as Route, Icon: Activity, labelKey: "b" },', "")
+    found = uivocab.block_findings(uivocab.developer_routes(moved))
+    case(
+        "a route taken out of the developer group fails its exempt block",
+        len(found) == 1 and "observability" in found[0],
+        f"the guard answered {found!r} once observability left the group",
+    )
+    without_memory = sidebar.replace('{ route: "memory"         as Route, Icon: Database, labelKey: "c" },', "")
+    found = uivocab.block_findings(uivocab.developer_routes(without_memory))
+    case(
+        "the Memory screen out of the developer group fails its exempt block",
+        len(found) == 1 and "memory" in found[0],
+        f"the guard answered {found!r} once memory left the group",
+    )
+    for name, key in [("a key of the Memory screen", "memory.namespaces.title")]:
+        found = uivocab.catalogue_findings("en", {key: "MCP runtime"}, VOCAB_TERMS, [])
+        case(f"stays silent on {name}", found == [], f"{key} was refused: {found!r}")
+    found = uivocab.catalogue_findings(
+        "en", {"agent_sheet.memory_title": "MCP runtime"}, VOCAB_TERMS, []
+    )
+    case(
+        "a memory text of the agent sheet stays controlled",
+        len(found) == 1 and "agent_sheet.memory_title" in found[0],
+        f"the agent sheet escaped the guard: {found!r}",
+    )
+
+    found = uivocab.product_name_findings(
+        "en", {"settings.updates.up_to_date": "Apollia OS is up to date"}
+    )
+    case(
+        "the engine name used for the application is refused",
+        len(found) == 1 and "settings.updates.up_to_date" in found[0],
+        f"an interface text named the application Apollia OS and passed: {found!r}",
+    )
+    for name, key, value in [
+        ("the name of the application", "settings.updates.up_to_date", "Apollia Desktop is up to date"),
+        ("the brand alone", "chat.empty", "Talk with Apollia."),
+        ("the engine named in a developer text", "dev.api_title", "The Apollia OS runtime API"),
+        ("the engine named on a developer screen", "observability.title", "Apollia OS events"),
+    ]:
+        found = uivocab.product_name_findings("en", {key: value})
+        case(f"stays silent on {name}", found == [], f"{key} was refused: {found!r}")
+
+    real = uivocab.SIDEBAR.read_text(encoding="utf-8")
+    case(
+        "the real sidebar carries every exempt route",
+        uivocab.block_findings(uivocab.developer_routes(real)) == [],
+        "the parser no longer reads DEVELOPER_NAV in Sidebar.svelte, so the "
+        "exempt blocks lean on a group it cannot see",
+    )
+
+
+def check_ui_vocabulary_ratchet() -> None:
+    print("ui vocabulary: the exemption list fails above its debt and below it")
+
+    leaves = {"home.a": "The runtime is down.", "home.b": "All good."}
+    case(
+        "positive control: a faulty key named in the list passes",
+        uivocab.catalogue_findings("en", leaves, VOCAB_TERMS, ["home.a"]) == [],
+        "an exempted key was still refused",
+    )
+    stale = uivocab.catalogue_findings("en", leaves, VOCAB_TERMS, ["home.a", "home.b"])
+    case(
+        "an exempted key that no longer carries a term fails",
+        len(stale) == 1 and "home.b" in stale[0] and "ratchet" in stale[0],
+        f"an exemption outlived its debt in silence: {stale!r}",
+    )
+    gone = uivocab.catalogue_findings("en", leaves, VOCAB_TERMS, ["home.a", "home.gone"])
+    case(
+        "an exempted key the catalogue lost fails",
+        len(gone) == 1 and "home.gone" in gone[0],
+        f"the guard answered {gone!r}",
+    )
+    unlisted = uivocab.catalogue_findings("en", leaves, VOCAB_TERMS, [])
+    case(
+        "a faulty key named by no entry is refused",
+        len(unlisted) == 1 and "home.a" in unlisted[0],
+        f"the guard answered {unlisted!r}",
+    )
+    glossary = json.loads(uivocab.GLOSSARY.read_text(encoding="utf-8"))
+    debt = sum(len(glossary[lang]["exemptions"]) for lang in uivocab.LOCALES)
+    case(
+        "the real exemption list is empty",
+        debt == 0,
+        "an exemption came back in the glossary; the list was emptied and the "
+        "ratchet holds it there",
+    )
+
+
 # ── The binary a guard judges ────────────────────────────────────────────────
 # The same family as everything above, on the one input none of these guards
 # owns. Four of them render a verdict by running `target/debug/apollia-os`, and
@@ -2775,6 +3102,8 @@ def main() -> int:
     print()
     check_prose_tracker_rule()
     print()
+    check_prose_identity_rules()
+    print()
     check_worktree_comparator()
     print()
     check_red_tests_are_named()
@@ -2793,6 +3122,10 @@ def main() -> int:
     print()
     check_design_tokens_ratchet()
     print()
+    check_ui_vocabulary_fires()
+    print()
+    check_ui_vocabulary_ratchet()
+    print()
     check_panic_sweep_fires()
     print()
     check_panic_sweep_scope()
@@ -2804,10 +3137,12 @@ def main() -> int:
             print(f"  {f}\n", file=sys.stderr)
         return 1
     print(
-        "\nsixteen properties hold: neither a comment nor a re-export is a use, "
+        "\nseventeen properties hold: neither a comment nor a re-export is a use, "
         "zero coverage says so, the font guard fires on a dirty tree and reads "
         "the same set whatever tree it runs in, the prose tracker rule fires "
-        "and its one exemption is bounded from both sides, two equal exit codes "
+        "and its one exemption is bounded from both sides, the prose identity "
+        "and host-name rules refuse a person and a workstation while example "
+        "data and role-named hosts pass, two equal exit codes "
         "over different measures are not the same verdict, and a failed "
         "assertion reaches the artifact with its cause while a passing one adds "
         "nothing to it, and the heavy-guard recorder names the tests that made "
@@ -2823,6 +3158,8 @@ def main() -> int:
         "design token guard reads what can style something rather than what "
         "is written about it, tells a value a token carries from one no token "
         "names, and holds both behind a ratchet that fails in both directions, "
+        "the interface vocabulary guard refuses a banned term and keeps the "
+        "prose around it, with its named exemptions under the same ratchet, "
         "and the four guards that judge the built binary refuse to judge one "
         "their tree did not produce, with the command that repairs it"
     )

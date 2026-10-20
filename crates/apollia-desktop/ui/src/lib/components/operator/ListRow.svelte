@@ -6,7 +6,7 @@
    * dimmed), padding profile, bottom hairline, hover, and the button role +
    * Enter-to-activate keyboard handling. The inner layout (columns, or
    * leading + content + trailing) is supplied by the caller via `children`, so
-   * domain rows (TaskRow, InboxRow, ConversationRow, ...) stay thin wrappers and
+   * domain rows (ConversationRow, ...) stay thin wrappers and
    * render pixel-identically to before.
    */
   import { cn } from "$lib/utils";
@@ -21,8 +21,8 @@
     dim?: boolean;
     /** Cross-axis alignment of the row's direct children. `stretch` matches the bare flex default. */
     align?: "start" | "center" | "stretch";
-    /** Padding profile: default = px-4 py-3, snug = px-3.5 py-3. */
-    pad?: "default" | "snug";
+    /** Padding profile: default = px-4 py-3, snug = px-3.5 py-3, compact = px-3.5 py-1.5. */
+    pad?: "default" | "snug" | "compact";
     /**
      * Visual variant:
      * - `row` (default) - full-width row with an optional bottom hairline.
@@ -68,7 +68,13 @@
   );
 
   const padClass = $derived(
-    isNav ? "px-2.5 py-2" : pad === "snug" ? "px-3.5 py-3" : "px-4 py-3",
+    isNav
+      ? "px-2.5 py-2"
+      : pad === "compact"
+        ? "px-3.5 py-1.5"
+        : pad === "snug"
+          ? "px-3.5 py-3"
+          : "px-4 py-3",
   );
 
   function handleKeydown(e: KeyboardEvent): void {

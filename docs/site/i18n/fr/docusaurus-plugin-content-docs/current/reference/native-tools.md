@@ -16,24 +16,24 @@ préfixe d'argument sont évaluées à chaque invocation, et les exécuteurs de
 code ne sont jamais autorisés en bloc), et le budget de pas du palier
 d'autonomie.
 
-<!-- claim:audit-list-reads-the-tool-invocation-trail -->
-Les deux registres d'audit ne voient pas les mêmes appels. La piste
-d'invocations d'outils, la table plate que `audit list` lit, n'est écrite que
-depuis `ctx.tools` sur le chemin agent : un appel d'outil du chat n'y figure
-donc jamais. Le journal chaîné par hachage, lui, enregistre bien le chat : la
-boucle ReAct de conversation émet `ToolOutputCaptured` pour chaque résultat
-d'outil et `LlmResponseCaptured` pour chaque complétion, et le souscripteur du
-journal transforme les deux en entrées signées et chaînées. Les sorties d'outils
-et les complétions du modèle d'une session de chat sont donc persistées
-verbatim dans un registre en ajout seul, lisible avec `audit show <run>` et
-vérifiable avec `audit verify`. Une session de chat conserve en outre
-l'enregistrement d'appel d'outil porté par son message d'assistant, sérialisé
-dans la colonne `tool_calls_json` de `chat_messages`, qui n'est pas un
-enregistrement audité.
+<!-- claim:journal-records-the-tool-calls-of-a-run -->
+Le journal d'audit enregistre les appels d'outils d'une conversation : la boucle
+de conversation annonce chaque appel avec son exécution, émet
+`ToolOutputCaptured` pour chaque résultat d'outil et `LlmResponseCaptured` pour
+chaque complétion, et le souscripteur du journal en fait des entrées signées et
+chaînées. Les sorties d'outils et les complétions du modèle d'une session de
+chat sont donc persistées verbatim dans un registre en ajout seul, lisible avec
+`audit show <run>` et vérifiable avec `audit verify`. Une session de chat
+conserve en outre l'enregistrement d'appel d'outil porté par son message
+d'assistant, sérialisé dans la colonne `tool_calls_json` de `chat_messages`, qui
+n'est pas un enregistrement audité.
 
-Un agent accède à ces outils via `ctx.tools`, ou se les voit transmis dans
-une boucle ReAct via `ctx.tools.describe(<name>)`. Chaque appel est distribué
-par le nom canonique de l'outil listé ci-dessous.
+Un agent se voit accorder ces outils par leur nom, dans sa liste d'accès :
+`access` sous `[agents.defaults]` dans le
+[manifeste de paquet](/reference/package-manifest), que la personne peut
+modifier sur la fiche de l'agent. Chaque appel est distribué par le nom
+canonique de l'outil listé ci-dessous. Le Python d'un paquet ne les appelle
+pas : `ctx.tools` vaut `None` dans un outil comme dans un workflow.
 
 ## Lister l'état effectif
 
@@ -46,19 +46,16 @@ apollia-os tools list
 
 Désactivez ou réactivez un outil avec `apollia-os tools disable <name>` et
 `apollia-os tools enable <name>`. Le réglage est écrit dans la base de
-gouvernance, et il gouverne le chemin agent seulement : les runners d'agent
-fusionnent cet instantané dans la liste des outils désactivés du dispatcher, si
-bien qu'un agent qui invoque un outil désactivé reçoit une erreur `UnknownTool`.
+gouvernance. Un outil est désactivé quand cette base le désactive ou quand la
+liste `disabled` de `[tools]` dans `apollia.toml` le nomme : les runners d'agent
+comme le chemin de conversation lisent l'union des deux, si bien qu'un agent qui
+invoque un outil désactivé reçoit une erreur `UnknownTool`.
 
-Le chemin de conversation du bureau ne lit pas la base de gouvernance. Il
-construit son dispatcher depuis la liste `disabled` de `[tools]` dans
-`apollia.toml`, où `tools disable` n'écrit jamais. Six natifs échappent même à
-cette liste : `file_write`, `file_edit`, `notebook_edit`, `bash_executor`,
-`python_executor` et `http_fetch` sont retirés du dispatcher puis réinjectés
-derrière leur enrobage d'approbation, sans condition, donc une conversation peut
-toujours les appeler quoi que dise la configuration. Restreindre ce qu'une
-conversation atteint passe par la porte d'approbation et le sélecteur d'outils
-du chat, pas par `apollia-os tools disable`.
+Sur le chemin de conversation, `file_write`, `file_edit`, `notebook_edit`,
+`bash_executor`, `python_executor` et `http_fetch` sont construits à part,
+enracinés dans les dossiers accordés à l'agent, et un outil désactivé n'est pas
+construit du tout. L'état est relu à chaque message : un outil désactivé pendant
+une conversation disparaît dès le message suivant, sans redémarrage.
 
 ## Disponibilité et identifiants
 
@@ -71,11 +68,9 @@ outil lit un identifiant optionnel.
 | `http_fetch` | `http` | aucun |
 | `web_search` | `web-search` | `brave.api_key` (optionnel ; repli sur DuckDuckGo) |
 | `web_read` | `web-read` | aucun |
-| `memory_search` | `memory-search` | aucun |
+| `memory_search`, `memory_write`, `profile_propose` | `memory-search` | aucun |
 | tous les autres outils natifs | toujours compilé | aucun |
 
-Les outils `permission_rule_*` requièrent en plus qu'une base de gouvernance
-soit configurée ; en son absence, ils ne sont pas enregistrés.
 `python_executor` requiert un Python 3 système sur l'hôte (voir les notes de
 plateforme ci-dessous).
 
@@ -150,20 +145,19 @@ face à `/private/var`, les préfixes verbatim Windows `\\?\`) se résolvent
 au lieu d'être refusés. Les échappatoires par lien symbolique et tout chemin
 dont la cible réelle sort de la racine sont rejetés.
 
-<!-- claim:chat-file-root-is-home-without-project -->
-Le répertoire qui fait office de racine dépend de la session. Avec un projet
-ouvert, c'est le répertoire du projet. Dans un chat sans projet, c'est le
-`default_workspace` de `[chat]` quand l'opérateur en a configuré un qui existe,
-et `~/.apollia` sinon ; la barrière sur ce chemin est l'approbation qui vous est
-demandée avant une écriture, pas une racine plus étroite. Votre répertoire
-personnel est le repli quand aucun des deux ne se résout, et le répertoire
-temporaire système seulement lorsque le répertoire personnel ne peut être résolu
-du tout. En pratique `~/.apollia` existe après le premier démarrage, donc un
-chat libre est enraciné là et non dans votre répertoire personnel.
+<!-- claim:file-tools-root-is-the-granted-folders -->
+Les racines sont les dossiers accordés à l'agent, agent de conversation intégré
+compris, dans une conversation comme dans une tâche. Un dossier du poste est une
+connexion, et ses outils s'accordent à un agent sur sa fiche : les outils de
+lecture atteignent tous les dossiers accordés, les outils d'écriture seulement
+ceux accordés pour écrire. Le premier dossier accordé, par date d'ajout, est
+celui où arrive un chemin relatif. Ni le répertoire personnel, ni le dossier de
+données, ni le dossier d'un ancien projet ne sont des racines. Un agent sans dossier
+accordé a des outils de fichiers qui refusent, en disant comment en accorder un.
 
 | Outil | Objectif | Paramètres clés |
 |---|---|---|
-| `file_read` | Lit un fichier, avec un offset et une limite optionnels pour les fichiers volumineux. Renvoie du texte UTF-8 avec numéros de ligne. | `path`, `offset`, `limit` |
+| `file_read` | Lit un fichier, avec un offset et une limite optionnels pour les fichiers volumineux. Renvoie du texte UTF-8 avec numéros de ligne. Un document PDF, Word (`.docx`), PowerPoint (`.pptx`) ou Excel (`.xlsx`, `.xlsm`, `.xls`, `.ods`) est lu comme le texte qu'il contient, en entier ou une page, une diapositive ou une feuille à la fois. | `path`, `offset`, `limit`, `page`, `sheet` |
 | `file_write` | Écrit du contenu dans un fichier, en créant les répertoires intermédiaires et en écrasant le fichier s'il existe déjà. | `path`, `content` |
 | `file_list` | Liste les fichiers et répertoires avec leur type et leur taille, de façon récursive en option. | `dir`, `recursive` |
 | `file_edit` | Remplace un texte exact dans un fichier. Échoue si `old_text` est introuvable ou n'est pas unique (sauf avec `replace_all`). | `path`, `old_text`, `new_text`, `replace_all` |
@@ -200,6 +194,20 @@ non fiables et est traité comme des données, jamais comme des instructions.
 | Outil | Objectif | Paramètres clés |
 |---|---|---|
 | `memory_search` | Recherche plein texte (FTS5, classement BM25) sur l'espace de noms propre de l'agent et les espaces de noms partagés déclarés. Les opérateurs FTS5 sont échappés automatiquement. | `query`, `namespace`, `limit`, `source` |
+| `memory_write` | Garde une note dans la mémoire propre de l'agent sous une clé (`remember`), en remplaçant ce que la clé contenait, ou la retire (`forget`). Seul l'espace de noms propre de l'agent est écrit. | `action`, `key`, `value` |
+| `profile_propose` | Propose un fait durable sur la personne pour son profil. L'appel est soumis à la personne à chaque fois, le fait affiché ; rien n'est écrit avant son accord. Un champ du formulaire de profil est refusé. | `key`, `fact` |
+| `source_search` | Recherche dans les dossiers et fichiers indexés cochés pour l'agent, par mots-clés, et par le sens quand un modèle d'embeddings est installé. Chaque résultat porte son extrait, son document, son emplacement, son score et sa source, et la réponse dit comment elle a été classée. Une source non cochée est refusée. | `query`, `sources`, `limit` (de 1 à 50) |
+| `code_context` | Lit l'état d'un dossier de code coché pour l'agent, au moment de l'appel : sa branche git, son statut et ses derniers commits, son fichier de règles (`APOLLIA.md`) et son arborescence. Rien du dossier n'atteint le prompt autrement. | `folder`, `parts` (`git`, `rules`, `tree`) |
+
+Chacun de ces outils n'est proposé à un agent que si sa source est cochée pour
+lui, quoi que listent ses accès : `memory_search` et `memory_write` quand sa
+mémoire l'est, `profile_propose` quand le profil l'est, `source_search` quand au
+moins un dossier ou un fichier indexé l'est, `code_context` quand un dossier de
+code l'est. Cocher Mémoire sur la fiche d'un
+agent est ce qui ouvre sa mémoire, en lecture et en écriture, et aucun des deux
+outils de mémoire ne demande d'accord : ils agissent sur l'espace propre de
+l'agent. La mémoire d'un agent est un seul espace, nommé d'après l'agent et
+gardé d'une conversation et d'une tâche à l'autre.
 
 La récupération de mémoire est toujours à l'initiative de l'agent : le
 runtime n'injecte jamais de mémoire dans le prompt d'un agent. L'assistant
@@ -218,15 +226,10 @@ un résultat `input_required`.
 
 ## Gouvernance des permissions
 
-Gestion des règles de permission dans la base de gouvernance, pilotée par
-l'agent. Chacune de ces actions est soumise à une approbation humaine dans
-la boucle avant de prendre effet.
-
-| Outil | Objectif | Paramètres clés |
-|---|---|---|
-| `permission_rule_add` | Persiste une nouvelle règle de permission, étiquetée avec l'identité de l'agent appelant. `arg_prefix` restreint la règle aux arguments commençant par ce préfixe, évalué à chaque invocation ; pour un exécuteur de code, elle ne couvre jamais qu'une seule commande simple. | `tool_name`, `action` (`allow`/`deny`), `scope` (`global`/`project`/`agent`), `arg_prefix`, `project_path`, `agent_id`, `expires_at` |
-| `permission_rule_remove` | Supprime une règle par son id. | `rule_id` |
-| `permission_rule_list` | Liste les règles, avec filtrage optionnel. Lecture seule. | `tool_name`, `created_by`, `scope` |
+Aucun outil natif ne lit ni n'écrit les règles de permission de la base de
+gouvernance : un agent ne peut donc pas s'accorder d'accès. Les règles sont
+gérées par l'utilisateur, depuis l'application de bureau ou avec
+`apollia-os permissions`.
 
 Pour savoir comment les règles de permission et les paliers d'autonomie
 déterminent ce qui s'exécute sans demander, voir

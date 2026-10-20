@@ -39,7 +39,7 @@ impl BuiltInChatAgent {
         ChatAgentResponse {
             content: String::new(),
             tool_calls: acc.all_tool_calls,
-            newly_authorized: acc.newly_authorized,
+            newly_authorized: Vec::new(),
             tokens_used: total_usage,
             thinking_trace,
             reasoning_boundaries,
@@ -49,6 +49,7 @@ impl BuiltInChatAgent {
             paused: true,
             context_window_tokens,
             context_tokens_used,
+            llm_calls: acc.llm_calls,
         }
     }
 
@@ -109,7 +110,7 @@ impl BuiltInChatAgent {
         ChatAgentResponse {
             content: clean,
             tool_calls: acc.all_tool_calls,
-            newly_authorized: acc.newly_authorized,
+            newly_authorized: Vec::new(),
             tokens_used: total_usage,
             thinking_trace,
             reasoning_boundaries,
@@ -119,6 +120,7 @@ impl BuiltInChatAgent {
             paused: true,
             context_window_tokens,
             context_tokens_used,
+            llm_calls: acc.llm_calls,
         }
     }
 
@@ -171,7 +173,7 @@ impl BuiltInChatAgent {
         ChatAgentResponse {
             content: clean,
             tool_calls: acc.all_tool_calls,
-            newly_authorized: acc.newly_authorized,
+            newly_authorized: Vec::new(),
             tokens_used: total_usage,
             thinking_trace,
             reasoning_boundaries,
@@ -181,6 +183,7 @@ impl BuiltInChatAgent {
             paused: false,
             context_window_tokens,
             context_tokens_used,
+            llm_calls: acc.llm_calls,
         }
     }
 }

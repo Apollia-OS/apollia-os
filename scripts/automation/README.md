@@ -17,13 +17,16 @@ testids). Always free the ports first, an editor or a stale run holds them:
 lsof -ti :5173 -ti :7771 -ti :8899 | xargs kill -9 2>/dev/null   # vite, runtime API, llama-server
 
 # Deterministic (no model), seeded ecosystem:
-just desktop-dev-automation-seeded scripts/automation/master-det.json
+just automation-seeded scripts/automation/master-det.json
 
 # With local inference (llama-server, --jinja), pass a real model:
-just desktop-dev-automation-seeded-llama scripts/automation/chat-llm.json ~/.apollia/models/<model>.gguf
+just automation-seeded-llama scripts/automation/chat-llm.json ~/.apollia/models/<model>.gguf
 
 # Destructive suite (disposable seed HOME) needs the opt-in flag:
-APOLLIA_AUTOMATION_ALLOW_DESTRUCTIVE=1 just desktop-dev-automation-seeded scripts/automation/destructive.json
+APOLLIA_AUTOMATION_ALLOW_DESTRUCTIVE=1 just automation-seeded scripts/automation/destructive.json
+
+# The first launch, timed, on a blank home (see "The first launch, timed"):
+just automation-first-run scripts/automation/first-run-llm.json ~/.apollia/models/<model>.gguf
 ```
 
 The recipes swap `HOME` to a throwaway `.apollia-seed-home` (the real `~/.apollia`
@@ -39,13 +42,73 @@ public registry. Without it a run longer than fifteen minutes (the cache TTL)
 swaps the two seeded servers for the twenty thousand public ones mid-book, and
 the connections section fails on network timing rather than on the product.
 
-Model: `-seeded-llama` defaults `CTX=131072 NP=1 --jinja`, and samples
-greedily on a fixed seed (`--temp 0 --seed 42`, `TEMP` and `SEED` override):
+Model: `-seeded-llama` starts llama-server with `--jinja`, a 131072-token
+context and one slot, and samples greedily on a fixed seed (`--temp 0 --seed
+42`). Each is a setting of the justfile (`APOLLIA_LLAMA_CTX`,
+`APOLLIA_LLAMA_SLOTS`, `APOLLIA_LLAMA_TEMP`, `APOLLIA_LLAMA_SEED`, see
+`.env.example`):
 a model book asserts what the model does next, so its answer has to be the
 same from one run to the next; the seed's `apollia.toml` pins
 `tool_turn_temperature = 0.0` for the same reason. For a dense model a
-full 131072 KV cache can be heavy; override with `CTX=32768`. The free-chat
+full 131072 KV cache can be heavy; override with `APOLLIA_LLAMA_CTX=32768`. The free-chat
 prompt is ~13.5k tokens (the loaded tool surface), so keep a comfortable margin.
+
+## The first launch, timed
+
+`first-run-llm.json` holds the first launch to its promise: from the window to
+the first result of a task in at most five minutes, downloads excluded. It
+plays the seven steps of the first launch (language, AI, embeddings model, who
+I am, first agent, connection, first task) with the example that qualifies
+requests, launches the batch on the demonstration workbook, waits for the
+first row read as succeeded, and fails past 300 seconds.
+
+It does not run under the seeded recipes. The seed holds a backend already
+declared and placeholder model files, so nothing of a first launch would be
+measured there. Its own recipe builds a home with nothing in it but the two
+model files, and removes that home at the start of every run:
+
+```sh
+just automation-first-run scripts/automation/first-run-llm.json \
+  ~/.apollia/models/<model>.gguf [~/.apollia/models/multilingual-e5-small-q8_0.gguf]
+```
+
+- **The home** is `.apollia-first-run-home` at the root of the checkout,
+  ignored by git. No `onboarding.completed_at`, no `apollia.toml`, no agent.
+- **The two model files are cloned into its models folder**, not linked: the
+  scan of that folder skips a symbolic link, and a hard link would let a write
+  through to the real file. A copy-on-write clone (`cp -c` on APFS,
+  `cp --reflink=auto` on Linux) costs no bytes; on a file system with neither
+  the files are copied, and a large model then takes its time before the run.
+  None of that is counted: the application is not started yet.
+- **The embeddings file must be `multilingual-e5-small-q8_0.gguf`**, under
+  that name. The embeddings step recognises a model by the file name the
+  registry gives it, and the recipe imports that one through a stubbed picker.
+  The recipe refuses before building anything when the file is missing.
+- **The application loads the language model itself**, with the engine it
+  finds, where the `-seeded-llama` recipe starts a `llama-server` beside it.
+  That loading is part of a first launch and is counted. The engine takes a
+  free port of its own, so only 5173 and 7771 have to be free.
+- **The network is in reach.** The recipe does not point the registry at a
+  dead address, and the agent of the example reads public pages while it
+  qualifies. A run without the network measures a failure, not a first launch.
+
+Read the verdict in `.apollia-automation/report.json`: `ok`, and the measure
+under `captures.first_run_ms`, in milliseconds, recorded whether the budget
+held or not. An overrun is a finding about the product, to report with its
+number; the recipe is not where it gets fixed.
+
+What the clock counts is said by its step, `expectElapsed` (see the script
+contract below): the time since the webview started loading the interface.
+What the process does before its window exists is not counted, and neither is
+the compilation `cargo tauri dev` does first.
+
+New conversation: the seed's `apollia.toml` sets `[desktop] chat_single_empty =
+false`. With the default, on, "New conversation" opens the empty conversation
+that already exists; the chat books leave conversations without a message
+behind them and count on a fresh one at every press. The press opens a
+conversation directly, and the agent or the model is chosen from the selector
+of its header; the picker shows only when the conversation cannot be created,
+which the chat book reaches by stubbing that command to refuse once.
 
 ## Running it on Linux and Windows
 
@@ -55,7 +118,7 @@ the window capture, and a `screenshot` step says so and carries on rather than
 failing a book whose gestures all passed. What a clone on another machine
 needs, measured rather than assumed:
 
-- **A binary built against that bundle**: `just cli-build`. A plain
+- **A binary built against that bundle**: `just build-cli`. A plain
   `cargo build` picks the machine's interpreter, which PyO3 refuses above 3.13,
   and on Linux the recipe also bakes the path to the bundle's libpython into
   the binary so it starts outside the shipped launcher.
@@ -63,7 +126,8 @@ needs, measured rather than assumed:
   `target/python-bundle/<triple>/python`, any triple. Without it the embedded
   interpreter is absent and every agent fails to load at boot, which reds a
   large share of the books for a reason that is not the product. Build it with
-  `bash packaging/build-python-bundle.sh <triple>`; the script covers
+  `bash packaging/build-python-bundle.sh <triple> target/python-bundle/<triple>`;
+  the script covers
   `*-unknown-linux-gnu` and `*-pc-windows-msvc` as well as Darwin.
 - **The Tauri CLI**, which every desktop recipe drives:
   `cargo install tauri-cli --version '^2'`, the version the release uses. The
@@ -78,8 +142,8 @@ needs, measured rather than assumed:
 Then the same commands as on macOS:
 
 ```
-just desktop-dev-automation-seeded scripts/automation/nav-det.json      # boots in a minute
-just desktop-dev-automation-seeded scripts/automation/master-det.json   # the whole deterministic suite
+just automation-seeded scripts/automation/nav-det.json      # boots in a minute
+just automation-seeded scripts/automation/master-det.json   # the whole deterministic suite
 ```
 
 The deterministic books never reach a model: the seed's GGUF and whisper files
@@ -90,10 +154,10 @@ is inference and dictation, which is where a platform usually breaks. One
 model book covers the first:
 
 ```
-just desktop-dev-automation-seeded-llama scripts/automation/chat-llm.json /path/to/model.gguf
+just automation-seeded-llama scripts/automation/chat-llm.json /path/to/model.gguf
 ```
 
-It needs `llama-server` on PATH (or `LLAMA_BIN=/path/to/llama-server`) built
+It needs `llama-server` on PATH (or `APOLLIA_LLAMA_BIN=/path/to/llama-server`) built
 for that machine. Dictation has no automated path with a real engine on any
 system: loading a whisper model and recording once is a manual check.
 
@@ -153,32 +217,40 @@ python3 scripts/automation/tools/publish_screenshots.py --locale both --apply
 ## The canonical suite
 
 - **Deterministic** (`<page>-det.json`, no model): one exhaustive book per surface
-  (operator + builder walk, empty/error states, dialogs opened then cancelled,
-  mutating controls driven to the boundary). `master-det.json` runs all 21 in one
-  boot and is the release gate (4108 steps); `just desktop-automation-verdict` reads its report. `tour-det` covers the Getting
-  started band and the guided tour (entry points, step navigation, the
-  anchorless fallback, the exit confirmation, finishing).
+  (the walk with developer mode off and on, empty/error states, dialogs opened
+  then cancelled, mutating controls driven to the boundary). `master-det.json`
+  runs the 18 books of `regen_master.py`'s `ORDER` in one boot and is the
+  release gate (4961 steps); `just automation-verdict` reads its report.
 - **Standalone deterministic**: `onboarding-full`, `mailbox-det`, `destructive`,
-  and three books written against the coverage report below, none of them in
+  and four books written against the coverage report below, none of them in
   `regen_master.py`'s `ORDER` yet because none has been through a runtime round:
   `danger-guard-det` (the cancel half of the four destructive guards: step-1
   cancel, mismatch, match, lock hint, step-2 cancel, and no `-confirm` ever
   clicked), `profile-facts-det` (the off-schema memory facts of the profile
   page, added, edited, deleted by the script itself), `llm-advanced-det` (the
-  advanced panel of the backend dialog, sampling parameters through extra JSON,
-  cancelled without saving). Fold one into `master-det` by adding it to `ORDER`
+  developer fields of the server form, the timeout and the extra JSON
+  parameters, each refusal played, cancelled without saving), `library-det` (the Library: the packages the
+  application ships read from the real store, then a stubbed package of every
+  kind opened, its update through a cancelled file chooser, its uninstall
+  dialog cancelled, refused and accepted, the empty state and the unreadable
+  list). Fold one into `master-det` by adding it to `ORDER`
   and re-running `regen_master.py --write`, after its first green solo run.
+  Eight more books sit outside `ORDER` as well: `agent-create-det`,
+  `agent-examples-det`, `example-trial-det`, `batch-launch-det`,
+  `batch-view-det`, `workflows-det`, `developer-det` and `design-det`.
 - **LLM** (need `-seeded-llama`): `chat-llm` (the flagship: tools, HITL, memory,
-  config, plan mode, ask_user, step budget), `hitl-critical`, `coach-llm`,
-  `chat-sanity`, `a2a`, `agents-a2a-llm`, `onboarding-llm`, `tour-llm` (act 1 of
-  the guided tour, annotated live on a real conversation), and `master-llm` (an
-  aggregate of chat/hitl/coach/tour, 234 steps). The tour section sits last so it
-  cannot perturb the three proven ones, and it forces operator mode because the
-  approval card is persona-picked.
+  config, plan mode, ask_user), `hitl-critical`, `coach-llm`,
+  `chat-sanity`, `a2a`, `agents-a2a-llm`, `onboarding-llm`, `hitl-always-llm`,
+  `plan-gate-llm`, and `master-llm` (an
+  aggregate of chat/hitl/coach, 191 steps).
+- **First launch** (needs `automation-first-run`, a blank home and
+  two model files): `first-run-llm`, the timed first launch described above.
+  Written against the source and statically validated; its first runtime
+  round is still to come.
 
 The whole corpus was last run green on 2026-07-28 against the redesigned UI:
 14 suites, 3056 steps, 0 failures. The LLM ones ran on
-`Qwen3.6-35B-A3B-MXFP4_MOE.gguf` with `CTX=32768 NP=1`.
+`Qwen3.6-35B-A3B-MXFP4_MOE.gguf` with a 32768-token context and one slot.
 
 The deterministic books went through a runtime round on 2026-09-06, page by
 page and then as `master-det`, after a pass that turned observed anchors into
@@ -193,7 +265,8 @@ A script is `{ name, stopOnError?, destructive?, steps: [...] }`. Step kinds
 (see `crates/apollia-desktop/ui/src/lib/automation/types.ts` for the full typed
 contract): `goto`, `waitFor`, `waitGone`, `click`, `fill`, `sendChat`, `expect`,
 `captureText`, `screenshot`, `sleep`, `awaitTurn`, `setChecked`, `selectOption`,
-`press`, `stubInvoke`, `clearStubs`, `resizeWindow`, `fault`, `emitEvent`. Targets are an exact
+`press`, `drag`, `stubInvoke`, `clearStubs`, `clearToasts`, `resizeWindow`, `fault`, `emitEvent`,
+`expectElapsed`. Targets are an exact
 `testid` or a `testidPrefix` (+ optional `nth`, negative counts from the end).
 `awaitTurn` drives a chat/agent turn to completion and auto-accepts HITL cards;
 `sendChat` targets the chat composer (`chat-input`).
@@ -201,8 +274,13 @@ contract): `goto`, `waitFor`, `waitGone`, `click`, `fill`, `sendChat`, `expect`,
 read that fragment before the step passes, which is how a recipe waits for a
 count or a status to change (the topbar's agents-at-work chip going back to
 `1 agent`) instead of sleeping for a guessed duration.
+`drag` presses on its target, moves the pointer to the centre of the element
+named by `toTestid` (`toNth` picks one of several), and releases there. It
+plays pointer events, which is how the application moves a conversation into a
+folder: the drag and drop of HTML never reaches the page, because the window
+keeps the drops of the system for itself.
 
-Five kinds act on the harness rather than on the DOM:
+Six kinds act on the harness rather than on the DOM:
 
 - **`stubInvoke { command, resolve? | reject? | patch?, once?, argsMatch? }`**
   answers one Tauri command from the script. Every webview call, the
@@ -244,9 +322,19 @@ Five kinds act on the harness rather than on the DOM:
 - **`emitEvent { event, payload? }`** emits a Tauri event from the webview, as
   the backend would; Tauri's JS `emit` reaches every listener, this webview's
   `listen` included. It is how a recipe delivers an event-borne request the
-  product cannot produce on demand (the critical filesystem HITL card, whose
-  level the classifier never returns). The payload imitates a backend type and
+  product cannot produce on demand (a consent card on a seeded session, which
+  only a live tool call raises). The payload imitates a backend type and
   the script's `notes` name it, for the same drift reason as a `stubInvoke`.
+
+- **`expectElapsed { maxMs, as }`** holds a duration to a budget. It reads the
+  time elapsed since the webview started loading the interface
+  (`performance.now()`), fails when it exceeds `maxMs`, and records the
+  measure, in milliseconds, under `captures[as]` of the report whichever way
+  the verdict falls. Place it right after the wait that closes what is being
+  timed, and keep screenshots after it: a window capture costs about a second
+  on macOS and would be counted. The clock starts with the window, so the
+  boot of the process before it and the compilation are outside the measure,
+  and a reload of the webview starts it again.
 
 Two more substitutions concern file inputs, whose chooser is served by wry as
 a modal `NSOpenPanel` that would freeze the boot: a `fill` on an
@@ -291,7 +379,7 @@ than expanding it to nothing.
   that needs an extra click to open, a tab that kept its previous selection. A
   runtime round is the only way to catch those.
 - **Regenerate `master-det`** after editing any `<page>-det.json`. `master-det`
-  is a concatenation (a head, then per page `[section marker, goto dashboard,
+  is a concatenation (a head, then per page `[section marker, goto chat,
   waitFor app-main]` + the page steps minus their 2-step onboarding preamble):
   ```sh
   python3 scripts/automation/tools/regen_master.py           # dry-run (checks it still matches)
@@ -328,7 +416,7 @@ than expanding it to nothing.
   minutes instead of hours. Data only, no runner change:
   ```sh
   python3 scripts/automation/tools/make_scan.py            # master-det -> master-det-scan, cap 3000ms
-  just desktop-dev-automation-seeded scripts/automation/master-det-scan.json
+  just automation-seeded scripts/automation/master-det-scan.json
   ```
 
 ## The language a run speaks
@@ -343,8 +431,10 @@ language buttons itself.
 
 ## What a run writes into this repository
 
-The seeded run redirects `HOME`, not the chat workspace: the seed's
-`apollia.toml` pins the workspace to this checkout, so a file the model is
+The seeded run redirects `HOME`, not the chat workspace: the seed's database
+fragments point the seeded project and its governance rows at this checkout
+(`__APOLLIA_SEED_WORKSPACE__`, expanded by `tests/cli/seed/build-seed.sh`), so
+a file the model is
 asked to create lands here rather than in the throwaway home. The model books
 write under `tmp/` and `notes/`, both ignored by git. Four of those files were
 once committed and read as leftovers in a public tree; nothing creates them but
@@ -362,8 +452,7 @@ a run, and nothing reads them back.
   or launcher on top no longer pollutes them. If a capture is ever wrong, check
   the window is a normal (non-minimized) window.
 - **A native file dialog is answered by a stub, or not at all.**
-  `memory-export-button`, `memory-import-pick`, `project-doc-attach-btn` and
-  `agent-update-btn` open an OS picker the runner cannot drive: an unstubbed
+  `memory-export-button`, `memory-import-pick` and `agents-install-apo-button` open an OS picker the runner cannot drive: an unstubbed
   click never returns and every later step of the boot fails. Arm
   `stubInvoke { command: "plugin:dialog|open", resolve: "${HOME}/...", once: true }`
   (`plugin:dialog|save` for the export) right before the click, or `resolve:
@@ -377,9 +466,13 @@ a run, and nothing reads them back.
   retire the armed state. Same shape wherever a confirm is rendered inline
   rather than as a dialog: check that the way back is reachable before writing
   the arming click.
-- **Two HITL surfaces**: file tools show the generic `ApprovalCard`
-  (`approval-card-*`, `approval-accept-*`, ...), not the `hitl-fs-modal`
-  fast-path. `bash_executor` is auto-refused with no card.
+- **One consent card**: file tools ask on the same card as every other tool,
+  with three answers and an optional reason. Developer mode off (the seed
+  default), it is `OperatorApprovalCard` (`operator-approval-*`, then
+  `operator-approval-accept-*`, `-always-*`, `-reason-*` and `-refuse-*`); on,
+  the raw `ApprovalCard` (`approval-card-*`, `approval-accept-*`,
+  `approval-always-*`, `approval-reason-*`, `approval-refuse-*`). There is no
+  separate file prompt. `bash_executor` is auto-refused with no card.
 - **The seed default backend** is `local-llama-server` (an OpenAI-compatible
   backend pointing at the llama-server on :8899). Deterministic runs never
   connect to it; the `-llama` runs route real inference through it.
@@ -425,16 +518,17 @@ a run, and nothing reads them back.
   first port as a file name, errors on it, and prints nothing at all, so it
   reports every port as free. That form is worse than useless: it is a check
   that always passes.
-- **The plan gate has two cards.** `ChatPlanHost` renders `ChatPlanReview` for the
-  operator (`chat-plan-review`, request-changes plus an adjust textarea) and
-  `ChatPlanReviewBuilder` for the builder (`chat-plan-review-builder`, approve or
-  reject only). A script that asserts one must pin the mode first, and it should
+- **The plan gate has two cards.** `ChatPlanHost` renders `ChatPlanReview` with
+  developer mode off (`chat-plan-review`, request-changes plus an adjust
+  textarea) and `ChatPlanReviewBuilder` with developer mode on
+  (`chat-plan-review-builder`, approve or reject only). A script that asserts
+  one must pin developer mode first, and it should
   end on an approval: leaving the plan pending never exercises the gate.
 - **`ask_user` cannot be answered by a fixed step.** The model picks the question
   type (open, single, multi) and `ask-user-submit` stays disabled until every
   question is answered. Use `ask-user-skip`, which is type-independent. Leaving the
   card pending keeps the session `processing`, which silently hides every
-  read-only-gated control downstream (`config-save` and friends).
+  control a busy conversation disables downstream.
 - **Sizing `awaitTurn`.** `maxApprovals` defaults to 25. The plan-review steps use 6
   on purpose, but the turn that FOLLOWS an approval executes the whole plan and needs
   the full budget, otherwise it aborts as a runaway turn.

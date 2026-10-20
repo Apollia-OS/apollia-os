@@ -1,24 +1,27 @@
 ---
-title: Installer Apollia sur Windows
+title: Installer Apollia Desktop sur Windows
 slug: /operator-help/installation/install-on-windows
 sidebar_position: 2
 ---
 
-# Installer Apollia sur Windows
+# Installer Apollia Desktop sur Windows
+
+L'application s'appelle Apollia Desktop. Ses installeurs et les fichiers qu'ils
+déposent sur le disque portent encore le nom du moteur qu'elle embarque,
+Apollia OS : c'est le nom que vous lirez ci-dessous.
 
 Chacun des fichiers ci-dessous est attaché à chaque publication sur la page de
 publication, `https://github.com/Apollia-OS/apollia-os/releases`.
 
 - **`Apollia-OS_<version>_x64_en-US.msi`** (recommandé) : installeur Windows standard avec entrées Démarrer + désinstallateur.
 - **`Apollia-OS_<version>_x64-setup.exe`** : l'installeur NSIS. Un seul fichier, et il installe au lieu de s'exécuter sur place : il enregistre un désinstallateur dans **Paramètres > Applications**, exactement comme le `.msi`.
-- **`Apollia-OS_<version>_x64_en-US-cuda.msi`** et **`Apollia-OS_<version>_x64-setup-cuda.exe`** : les deux mêmes installeurs avec une compilation CUDA du moteur d'inférence, pour une carte NVIDIA.
 - **`apollia-os-windows-x86-cpu.zip`** et **`apollia-os-windows-x86-vulkan.zip`** : les deux bundles en ligne de commande, un par moteur, CPU ou Vulkan.
 
 ## Pré-requis
 
 - Windows 10 22H2 / Windows 11.
 - 4 Go de RAM libres minimum.
-- Pour l'inférence sur GPU : un pilote compatible Vulkan, ou le pilote NVIDIA 550+ si vous prenez le bundle CUDA.
+- Pour l'inférence sur GPU : un pilote compatible Vulkan. Le moteur accéléré pour les cartes NVIDIA, que l'application propose après l'installation, demande le pilote NVIDIA 550+.
 - **Pas besoin** d'installer Visual C++ Redistributable : le CRT est statiquement embarqué.
 
 ## Installation (MSI)
@@ -28,9 +31,10 @@ publication, `https://github.com/Apollia-OS/apollia-os/releases`.
    (Apollia), la version et la double licence MIT / Apache-2.0.
 3. L'app apparaît dans le menu Démarrer.
 
-L'installeur n'est pas encore signé par un certificat Authenticode : SmartScreen
-signale donc un éditeur inconnu. Choisissez **Informations complémentaires**,
-puis **Exécuter quand même**.
+La chaîne de publication ne signe les installeurs avec un certificat
+Authenticode que lorsqu'elle en dispose. Sur un installeur non signé,
+SmartScreen signale un éditeur inconnu : choisissez **Informations
+complémentaires**, puis **Exécuter quand même**.
 
 Le pare-feu Windows demandera à autoriser `apollia-os.exe`, le moteur d'inférence `llama-server.exe` et `apollia-runner-*.exe` (reconnaissance vocale) au premier lancement : **autorisez-les pour les réseaux privés** (ces composants communiquent avec le daemon en loopback 127.0.0.1).
 
@@ -122,12 +126,17 @@ via Git Bash, WSL ou MSYS2, et échoue sans lui.
 Deux accélérations, et Windows y répond différemment.
 
 **L'inférence LLM locale tourne déjà sur le GPU.** Les installeurs embarquent une
-compilation Vulkan du moteur `llama-server`, et les installeurs `-cuda` une
-compilation CUDA pour les cartes NVIDIA ; le bundle en ligne de commande
+compilation Vulkan du moteur `llama-server` ; le bundle en ligne de commande
 `apollia-os-windows-x86-vulkan.zip` porte la version Vulkan. Vulkan pilote
 indifféremment les cartes NVIDIA, AMD et Intel. Rien à installer et rien à
 régler : avec un pilote qui fonctionne, le moteur utilise la carte. Le bundle
 `-cpu` est celui à prendre sur une machine sans pilote graphique.
+
+**Une carte NVIDIA peut aller plus loin.** Il y a un installeur par système, et
+aucun installeur à part pour les cartes NVIDIA. Quand l'application détecte une
+telle carte, son écran IA propose le moteur accéléré, **Accélérer avec votre
+carte NVIDIA** : un clic le télécharge avec les bibliothèques dont il a besoin,
+une fois sa signature vérifiée, et le prochain chargement d'un modèle l'utilise.
 
 **La dictée tourne aussi sur le GPU.** La reconnaissance vocale tourne dans le
 sidecar `apollia-runner`, bâti sur whisper, et l'installateur en livre deux :

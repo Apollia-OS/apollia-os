@@ -1,10 +1,23 @@
+<script lang="ts" module>
+  import type { NextStepsFacts as LoadFacts } from "$lib/stores/nextSteps";
+
+  /**
+   * What a load of the panel depends on: the facts, and the state of the
+   * developer mode. A change of either asks the store again.
+   */
+  export function nextStepsLoadKey(facts: LoadFacts, developerMode: boolean): string {
+    return `${developerMode ? "developer" : "default"}:${JSON.stringify(facts)}`;
+  }
+</script>
+
 <script lang="ts">
   /**
    * Next Steps panel - renders up to 3 Meta-LLM-generated
-   * cards for either the operator Dashboard (`context="global_context"`)
+   * cards for either the rolling global context (`context="global_context"`)
    * or the end-of-session debrief (`context="session_end"`).
    *
-   * The store handles caching, dismiss persistence, and feedback. This
+   * The store handles caching, dismiss persistence, and feedback, and words
+   * the request for the audience the developer mode names. This
    * component is the thin presentational layer + an allowlist-enforcing
    * action resolver so the LLM cannot steer the app anywhere it should
    * not go.
@@ -14,78 +27,51 @@
   import { Sparkles, RotateCw } from "lucide-svelte";
   import { invokeNextStepCommand } from "$lib/ipc/nextSteps";
   import NextStepCard from "./NextStepCard.svelte";
-  import { navigateTo, type Route } from "$lib/stores/navigation";
+  import { navigateTo } from "$lib/stores/navigation";
+  import { allowedGuideRoute } from "$lib/apolliaGuide/actionButtons";
   import {
     nextSteps,
     type NextStep,
     type NextStepsContext,
     type NextStepsFacts,
-    type NextStepsMode,
   } from "$lib/stores/nextSteps";
+  import { developerMode } from "$lib/stores/developerMode";
 
   interface Props {
     /** Unique cache key for this panel - e.g. `"global"` or `"session:<id>"`. */
     scopeKey: string;
     /** Which context the backend should narrate. */
     context: NextStepsContext;
-    /** Persona - operator (default) or builder. */
-    mode?: NextStepsMode;
     /** Frontend-computed facts passed verbatim to the backend. */
     facts: NextStepsFacts;
     /** Optional title override - defaults to `next_steps.title`. */
     title?: string;
   }
 
-  let {
-    scopeKey,
-    context,
-    mode = "operator",
-    facts,
-    title,
-  }: Props = $props();
+  let { scopeKey, context, facts, title }: Props = $props();
 
   const visible = $derived(nextSteps.visible(scopeKey));
-
-  // ── Allowlists (mirror backend, last line of defence) ────────────────
-
-  const ROUTE_ALLOWLIST: Record<string, { route: Route }> = {
-    "/dashboard": { route: "dashboard" },
-    "/agents": { route: "agents" },
-    "/projects": { route: "projects" },
-    "/tasks": { route: "tasks" },
-    "/chat": { route: "chat" },
-    "/automations": { route: "automations" },
-    "/automations?wizard=open": { route: "automations" },
-    "/integrations": { route: "integrations" },
-    "/inbox": { route: "inbox" },
-    "/llm": { route: "llm" },
-    "/triggers": { route: "automations" },
-    "/memory": { route: "memory" },
-    "/memory?new": { route: "memory" },
-    "/observability": { route: "observability" },
-    "/notifications": { route: "notifications" },
-    "/settings": { route: "settings" },
-  };
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
   onMount(() => {
-    nextSteps.load(scopeKey, context, mode, facts);
+    nextSteps.load(scopeKey, context, facts);
   });
 
-  // Re-fetch when facts change (cache-honoring - store guards the 12h TTL).
-  let lastFactsKey = "";
+  // Re-fetch when the facts change or the developer mode flips
+  // (cache-honoring - store guards the 12h TTL).
+  let lastLoadKey = "";
   $effect(() => {
     const currentFacts = facts;
-    const key = JSON.stringify(currentFacts);
-    if (key !== lastFactsKey) {
-      lastFactsKey = key;
-      nextSteps.load(scopeKey, context, mode, currentFacts);
+    const key = nextStepsLoadKey(currentFacts, $developerMode);
+    if (key !== lastLoadKey) {
+      lastLoadKey = key;
+      nextSteps.load(scopeKey, context, currentFacts);
     }
   });
 
   function handleRefresh() {
-    nextSteps.refresh(scopeKey, context, mode, facts);
+    nextSteps.refresh(scopeKey, context, facts);
   }
 
   // ── Action dispatch ──────────────────────────────────────────────────
@@ -94,9 +80,9 @@
     const btn = step.actionButton;
     if (btn.action === "navigate") {
       const route = btn.payload?.route as string | undefined;
-      const hit = route ? ROUTE_ALLOWLIST[route] : undefined;
-      if (hit) {
-        navigateTo(hit.route);
+      const target = route ? allowedGuideRoute(route) : null;
+      if (target) {
+        navigateTo(target);
       } else {
         console.warn("next-steps: dropped non-allowlisted route", route);
       }

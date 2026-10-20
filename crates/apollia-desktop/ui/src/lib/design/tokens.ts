@@ -110,6 +110,14 @@ export const chatLayout = {
 } as const;
 
 /**
+ * The narrowest a conversation gets in the split chat. The `grid-cols-panes-2`
+ * class reads it; under that width the pane area scrolls sideways.
+ */
+export const chatPane = {
+  minWidth: "var(--chat-pane-min-width)",
+} as const;
+
+/**
  * Stacking order.
  *
  * Tailwind ships no `zIndex` mapping, so before `tailwind.config.ts` grew
@@ -133,6 +141,10 @@ export const zLayer = {
   overlay: "var(--z-overlay)",
   /** Tooltips, above everything that can carry one. */
   tooltip: "var(--z-tooltip)",
+  /** The onboarding veil, above the whole application. */
+  onboarding: "var(--z-onboarding)",
+  /** The top bar and the detail sidebar while the onboarding veil is shown. */
+  onboardingAbove: "var(--z-onboarding-above)",
 } as const;
 
 export const tokens = {
@@ -145,5 +157,6 @@ export const tokens = {
   gradient,
   logoPaper,
   chatLayout,
+  chatPane,
   zLayer,
 } as const;

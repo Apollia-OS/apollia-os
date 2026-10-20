@@ -7,7 +7,9 @@
 use apollia_core::{McpHealth, SandboxProfile};
 use apollia_tools::descriptor::{McpTransport, ToolDescriptor, ToolKind};
 use apollia_tools::registry::ToolRegistryHandle;
+use apollia_tools::{ActionFamily, FamilySource};
 
+use crate::classify::classify_mcp_tool;
 use crate::config::McpServerConfig;
 use crate::manager::{
     McpClientManager, McpServerConfigView, McpServerDetail, McpServerStatus, McpToolSummary,
@@ -64,14 +66,25 @@ impl McpClientManager {
             )
         })
     }
-    /// Whether the named server requires per-tool approval (false if unknown).
-    pub(super) fn server_requires_approval(&self, server_name: &str) -> bool {
-        self.sessions
-            .get(server_name)
-            .map(|s| s.requires_approval())
-            .unwrap_or(false)
-    }
 }
+/// Whether the annotations a server declares on its tools classify them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServerHints {
+    /// A connection someone added: its hints classify, as
+    /// [`classify_mcp_tool`] reads them.
+    Read,
+    /// A server nobody added as a connection: nothing it declares classifies.
+    Ignored,
+}
+
+/// The registry names of the tools `session` exposes, `mcp:<server>/<tool>`.
+pub(super) fn registry_names(server_name: &str, session: &McpSession) -> Vec<String> {
+    session_tool_names(session)
+        .into_iter()
+        .map(|tool| format!("mcp:{server_name}/{tool}"))
+        .collect()
+}
+
 /// Register every tool exposed by a freshly started session in the tool registry
 /// under the `mcp:<server>/<tool>` naming convention.
 ///
@@ -79,22 +92,33 @@ impl McpClientManager {
 /// loaded at boot and the runtime exposes the synthetic `tool_search` tool
 /// instead, so the registry stays free of `mcp:` descriptors.
 ///
-/// A descriptor never carries the server's `requires_approval` flag as
-/// `dangerous`. `dangerous` is the resolver's word for a tool that runs without
-/// per-call gating and so needs the manifest's `dangerous_tools_allowed`; a
-/// server that requires approval is the opposite, every call to it is held by
-/// the approval gate of the executor at run time. Marking it `dangerous`
-/// refused the install of any agent declaring such a tool, while an agent
-/// declaring a tool of an ungated server installed freely. The flag can also
-/// be toggled on a running server, which a descriptor registered once would
-/// not follow.
+/// Each descriptor carries the action family [`classify_mcp_tool`] decides
+/// for the tool, and its source; see [`descriptor_risk`] for the two fields
+/// derived from it. Whether a call may run is decided on that family, by
+/// governance, when an agent makes it.
+///
+/// `hints` says whether the server's own annotations may classify its tools.
+/// A server nobody added as a connection, such as one a request brings, is
+/// read with [`ServerHints::Ignored`]: its tools stay unclassified whatever
+/// it declares about them.
 pub(super) async fn register_session_tools_in_registry(
     tool_registry: &ToolRegistryHandle,
     server_name: &str,
     tags: &[String],
     session: &McpSession,
+    hints: ServerHints,
 ) {
+    let has_account = session.config().has_account();
     for tool_def in session.tools() {
+        let (family, family_source) = match hints {
+            ServerHints::Read => classify_mcp_tool(
+                session.config().tool_families.get(&tool_def.name).copied(),
+                tool_def.annotations.as_ref(),
+                has_account,
+            ),
+            ServerHints::Ignored => classify_mcp_tool(None, None, has_account),
+        };
+        let (is_read_only, risk_score) = descriptor_risk(family, family_source);
         let mut tool_tags = vec!["mcp".to_string(), server_name.to_string()];
         tool_tags.extend(tags.iter().cloned());
 
@@ -115,9 +139,12 @@ pub(super) async fn register_session_tools_in_registry(
             output_schema: None,
             sandbox_profile: SandboxProfile::NetworkRestricted,
             tags: tool_tags,
-            dangerous: false,
-            is_read_only: false,
-            risk_score: 3,
+            family,
+            family_source,
+            // Nobody has designated which argument of an MCP tool is its target.
+            target_arg: None,
+            is_read_only,
+            risk_score,
             approval_risk_level: None,
             impact_description: None,
             reject_reason_required: false,
@@ -142,6 +169,22 @@ pub(super) async fn register_session_tools_in_registry(
         }
     }
 }
+/// The `is_read_only` flag and `risk_score` of an MCP tool's descriptor,
+/// derived from its family.
+///
+/// `is_read_only` lets a call run concurrently and before a plan is approved,
+/// so it is granted only to a reading family taken from the curated
+/// selection: a server's own read-only hint classifies the tool but is not
+/// trusted to unlock that path. The score follows the family: a read is low,
+/// a write, a send or code is medium, and an unclassified tool, sensitive by
+/// rule, scores as a write.
+pub(super) fn descriptor_risk(family: ActionFamily, source: FamilySource) -> (bool, u8) {
+    let reads = matches!(family, ActionFamily::Read | ActionFamily::ReadPersonal);
+    let is_read_only = reads && source == FamilySource::Selection;
+    let risk_score = if reads { 1 } else { 6 };
+    (is_read_only, risk_score)
+}
+
 /// The endpoint a registered descriptor reports for a session: where the server
 /// is reached, and over which wire protocol.
 ///
@@ -207,7 +250,6 @@ pub(super) fn build_status(
         name: name.to_string(),
         server_info: session.server_info().name.clone(),
         tools_count: session_tool_count(session),
-        requires_approval: session.requires_approval(),
         connected: true,
         pid: session.pid(),
         uptime_secs: Some(session.uptime_secs()),
@@ -285,7 +327,6 @@ pub(super) fn build_detail(
         args: config.args.clone(),
         env_keys: config.env.keys().cloned().collect(),
         transport: config.transport.clone(),
-        requires_approval: config.requires_approval,
         tags: config.tags.clone(),
     };
 
@@ -311,12 +352,13 @@ mod tests {
             env: std::collections::HashMap::new(),
             transport: transport.to_string(),
             url: url.map(str::to_string),
-            requires_approval: false,
             init_timeout_secs: 30,
             call_timeout_secs: 60,
             max_response_bytes: 8 * 1024 * 1024,
             max_tools: 256,
             tags: vec![],
+            tool_families: Default::default(),
+            origin: None,
         }
     }
 
@@ -373,5 +415,21 @@ mod tests {
         // claiming a subprocess that was never spawned
         assert_eq!(url, "sse://notion");
         assert!(matches!(transport, McpTransport::Http));
+    }
+
+    #[test]
+    fn test_descriptor_risk_follows_the_family() {
+        // GIVEN a read from the selection, a read from the server, a write
+        //       and an unclassified tool
+        // WHEN their descriptor flags are derived
+        let selection_read = descriptor_risk(ActionFamily::ReadPersonal, FamilySource::Selection);
+        let server_read = descriptor_risk(ActionFamily::Read, FamilySource::Server);
+        let write = descriptor_risk(ActionFamily::WriteOrDelete, FamilySource::Server);
+        let unclassified = descriptor_risk(ActionFamily::Unclassified, FamilySource::Unsourced);
+        // THEN only the selection's read is read-only, and every read scores low
+        assert_eq!(selection_read, (true, 1));
+        assert_eq!(server_read, (false, 1));
+        assert_eq!(write, (false, 6));
+        assert_eq!(unclassified, (false, 6));
     }
 }

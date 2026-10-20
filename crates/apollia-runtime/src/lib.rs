@@ -6,40 +6,77 @@
 //! - `AgentRegistry`, Tokio actor tracking `ProcessState` per agent.
 //! - `TaskRouter`, Tokio actor dispatching tasks to available agents.
 //! - `ExecutionCoordinator`, per-agent lifecycle coordinator.
-//! - `APIServer`, axum HTTP server on Unix socket + TCP 7771.
+//! - `APIServer`, axum HTTP server on Unix socket + TCP (`[api].port`, 7771 by default).
 //! - `Supervisor`, ordered startup + watchdog.
 
 pub mod a2a;
+pub mod agent_packages;
 pub mod agents;
 pub mod analyzers;
 pub mod api;
+pub mod app_lifecycle;
+pub mod artifacts;
 pub mod audit_journal;
+pub mod backend_keys;
+pub mod batch;
 pub mod chat;
+pub mod chat_assists;
 pub mod commands;
+pub mod companion;
+pub mod compat_server;
+pub mod composition;
+pub mod config_reload;
+pub mod connections;
 pub mod connectors_bridge;
+pub mod conversation_stats;
 pub mod coordinator;
+pub mod drive_folders;
 pub mod embedded;
+pub mod embeddings;
+pub mod engine_pids;
+pub mod engine_store;
 pub mod eventbus;
+pub mod governance;
 pub mod hooks;
+pub mod inference_servers;
+pub mod installed_models;
 pub mod llama_server;
-pub mod llama_server_backend;
 pub mod llm_timings;
+pub mod local_ai;
+pub mod local_engine;
 pub mod mailbox;
+pub mod memory_maintenance;
+pub mod memory_vectors;
+pub mod memory_view;
+pub mod mlx_engine;
+pub mod oauth_clients;
 pub mod observability;
+pub mod onboarding;
+pub mod package_tools;
+pub mod packages;
 pub mod perf_trace;
+pub mod permission_rules;
 pub mod plan_approval;
-pub mod projects;
+pub mod profile;
+pub mod project_migration;
+pub mod recommendation;
 pub mod registry;
 pub mod replay;
+pub mod residency;
 pub mod router;
 pub mod runner_supervisor;
-pub mod session;
+pub mod service;
 pub mod session_metrics;
 pub mod session_replay;
 pub mod shutdown;
+pub mod source_indexing;
 pub mod stt;
 pub mod supervisor;
 pub mod timeout_watcher;
+pub mod tool_credentials;
+pub mod tool_governance;
+pub mod trigger_targets;
+pub mod workflows;
 
 #[cfg(test)]
 mod test_support;
@@ -66,24 +103,16 @@ pub use mailbox::{AgentMailboxHandle, AgentMessage, MailboxError};
 // A2A routing
 pub use a2a::{
     make_delegate_fn, resolve_skill, A2AAgentCard, A2AError, A2AInvocationResult, A2AInvokeRequest,
-    A2AInvoker, A2ASkillInfo, A2AToolsProvider, A2aDelegateFn, A2aDelegateResult, A2aError,
-    A2aErrorResponse, SkillListing,
+    A2AInvoker, A2ASkillInfo, A2aDelegateFn, A2aDelegateResult, A2aError, A2aErrorResponse,
+    SkillListing,
 };
 
 // Chat subsystem
 pub use chat::ChatSessionManagerHandle;
 
-pub use session::SessionConfig;
 pub use session_metrics::{SessionMetricsActor, SessionMetricsStore};
 
 pub use stt::{SttEngineError, SttEngineHandle, SttStatus, TranscriptSource};
 
 // Custom slash commands
 pub use commands::{CommandRegistry, CustomCommand};
-
-// Community agent registry
-pub use agents::registry_remote::{
-    check_git_available, find_agent_file, git_clone, install_agent, install_from_dir,
-    parse_install_source, read_manifest_file, update_registry, AgentInstallSource, RegistryEntry,
-    RemoteInstallError, TempInstallDir,
-};

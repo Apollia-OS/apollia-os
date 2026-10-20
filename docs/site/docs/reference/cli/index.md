@@ -18,21 +18,19 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os agent start`↴](#apollia-os-agent-start)
 * [`apollia-os agent stop`↴](#apollia-os-agent-stop)
 * [`apollia-os agent show`↴](#apollia-os-agent-show)
+* [`apollia-os agent set`↴](#apollia-os-agent-set)
+* [`apollia-os agent reset`↴](#apollia-os-agent-reset)
+* [`apollia-os agent export`↴](#apollia-os-agent-export)
 * [`apollia-os agent status`↴](#apollia-os-agent-status)
 * [`apollia-os agent messages`↴](#apollia-os-agent-messages)
-* [`apollia-os agent install`↴](#apollia-os-agent-install)
 * [`apollia-os agent uninstall`↴](#apollia-os-agent-uninstall)
 * [`apollia-os agent enable`↴](#apollia-os-agent-enable)
 * [`apollia-os agent disable`↴](#apollia-os-agent-disable)
-* [`apollia-os agent update`↴](#apollia-os-agent-update)
-* [`apollia-os agent create`↴](#apollia-os-agent-create)
 * [`apollia-os agent package`↴](#apollia-os-agent-package)
 * [`apollia-os agent package list`↴](#apollia-os-agent-package-list)
 * [`apollia-os agent package show`↴](#apollia-os-agent-package-show)
 * [`apollia-os agent package uninstall`↴](#apollia-os-agent-package-uninstall)
 * [`apollia-os agent logs`↴](#apollia-os-agent-logs)
-* [`apollia-os agent validate`↴](#apollia-os-agent-validate)
-* [`apollia-os agent repair`↴](#apollia-os-agent-repair)
 * [`apollia-os a2a`↴](#apollia-os-a2a)
 * [`apollia-os a2a skills`↴](#apollia-os-a2a-skills)
 * [`apollia-os a2a invoke`↴](#apollia-os-a2a-invoke)
@@ -62,11 +60,8 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os tools show`↴](#apollia-os-tools-show)
 * [`apollia-os tools approvals`↴](#apollia-os-tools-approvals)
 * [`apollia-os tools approvals pending`↴](#apollia-os-tools-approvals-pending)
-* [`apollia-os tools approvals resolved`↴](#apollia-os-tools-approvals-resolved)
 * [`apollia-os audit`↴](#apollia-os-audit)
-* [`apollia-os audit list`↴](#apollia-os-audit-list)
 * [`apollia-os audit journal`↴](#apollia-os-audit-journal)
-* [`apollia-os audit stats`↴](#apollia-os-audit-stats)
 * [`apollia-os audit export`↴](#apollia-os-audit-export)
 * [`apollia-os audit verify`↴](#apollia-os-audit-verify)
 * [`apollia-os audit anchor`↴](#apollia-os-audit-anchor)
@@ -104,7 +99,16 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os model show`↴](#apollia-os-model-show)
 * [`apollia-os model hardware`↴](#apollia-os-model-hardware)
 * [`apollia-os model recommend`↴](#apollia-os-model-recommend)
+* [`apollia-os model embeddings`↴](#apollia-os-model-embeddings)
+* [`apollia-os model embeddings show`↴](#apollia-os-model-embeddings-show)
+* [`apollia-os model embeddings set-default`↴](#apollia-os-model-embeddings-set-default)
 * [`apollia-os model delete`↴](#apollia-os-model-delete)
+* [`apollia-os source`↴](#apollia-os-source)
+* [`apollia-os source list`↴](#apollia-os-source-list)
+* [`apollia-os source create`↴](#apollia-os-source-create)
+* [`apollia-os source delete`↴](#apollia-os-source-delete)
+* [`apollia-os source inspect`↴](#apollia-os-source-inspect)
+* [`apollia-os source report`↴](#apollia-os-source-report)
 * [`apollia-os trigger`↴](#apollia-os-trigger)
 * [`apollia-os trigger list`↴](#apollia-os-trigger-list)
 * [`apollia-os trigger status`↴](#apollia-os-trigger-status)
@@ -142,12 +146,20 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os permissions`↴](#apollia-os-permissions)
 * [`apollia-os permissions list`↴](#apollia-os-permissions-list)
 * [`apollia-os permissions revoke`↴](#apollia-os-permissions-revoke)
-* [`apollia-os permissions audit`↴](#apollia-os-permissions-audit)
 * [`apollia-os permissions add`↴](#apollia-os-permissions-add)
 * [`apollia-os chat`↴](#apollia-os-chat)
+* [`apollia-os chat list`↴](#apollia-os-chat-list)
 * [`apollia-os chat delete`↴](#apollia-os-chat-delete)
 * [`apollia-os chat rename`↴](#apollia-os-chat-rename)
 * [`apollia-os chat export`↴](#apollia-os-chat-export)
+* [`apollia-os chat capabilities`↴](#apollia-os-chat-capabilities)
+* [`apollia-os chat template`↴](#apollia-os-chat-template)
+* [`apollia-os chat settings`↴](#apollia-os-chat-settings)
+* [`apollia-os chat settings get`↴](#apollia-os-chat-settings-get)
+* [`apollia-os chat settings set`↴](#apollia-os-chat-settings-set)
+* [`apollia-os chat notes`↴](#apollia-os-chat-notes)
+* [`apollia-os chat notes get`↴](#apollia-os-chat-notes-get)
+* [`apollia-os chat notes set`↴](#apollia-os-chat-notes-set)
 * [`apollia-os chat config`↴](#apollia-os-chat-config)
 * [`apollia-os chat config get`↴](#apollia-os-chat-config-get)
 * [`apollia-os chat config set`↴](#apollia-os-chat-config-set)
@@ -160,9 +172,6 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os chat config authorizations revoke`↴](#apollia-os-chat-config-authorizations-revoke)
 * [`apollia-os mcp`↴](#apollia-os-mcp)
 * [`apollia-os mcp list`↴](#apollia-os-mcp-list)
-* [`apollia-os mcp set-approval`↴](#apollia-os-mcp-set-approval)
-* [`apollia-os mcp list-pending`↴](#apollia-os-mcp-list-pending)
-* [`apollia-os mcp revoke-approval`↴](#apollia-os-mcp-revoke-approval)
 * [`apollia-os mcp add`↴](#apollia-os-mcp-add)
 * [`apollia-os mcp remove`↴](#apollia-os-mcp-remove)
 * [`apollia-os mcp show`↴](#apollia-os-mcp-show)
@@ -183,10 +192,45 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os mcp secret delete`↴](#apollia-os-mcp-secret-delete)
 * [`apollia-os mcp server`↴](#apollia-os-mcp-server)
 * [`apollia-os update`↴](#apollia-os-update)
+* [`apollia-os package`↴](#apollia-os-package)
+* [`apollia-os package new`↴](#apollia-os-package-new)
+* [`apollia-os package build`↴](#apollia-os-package-build)
+* [`apollia-os package inspect`↴](#apollia-os-package-inspect)
+* [`apollia-os package preview`↴](#apollia-os-package-preview)
+* [`apollia-os package install`↴](#apollia-os-package-install)
+* [`apollia-os package trust`↴](#apollia-os-package-trust)
+* [`apollia-os package trust import`↴](#apollia-os-package-trust-import)
+* [`apollia-os package trust list`↴](#apollia-os-package-trust-list)
+* [`apollia-os package trust remove`↴](#apollia-os-package-trust-remove)
+* [`apollia-os policy`↴](#apollia-os-policy)
+* [`apollia-os policy keygen`↴](#apollia-os-policy-keygen)
+* [`apollia-os policy init`↴](#apollia-os-policy-init)
+* [`apollia-os policy sign`↴](#apollia-os-policy-sign)
+* [`apollia-os policy verify`↴](#apollia-os-policy-verify)
+* [`apollia-os policy show`↴](#apollia-os-policy-show)
 * [`apollia-os workspace`↴](#apollia-os-workspace)
 * [`apollia-os workspace status`↴](#apollia-os-workspace-status)
 * [`apollia-os workspace init`↴](#apollia-os-workspace-init)
 * [`apollia-os review`↴](#apollia-os-review)
+* [`apollia-os approvals`↴](#apollia-os-approvals)
+* [`apollia-os approvals pending`↴](#apollia-os-approvals-pending)
+* [`apollia-os approvals decide`↴](#apollia-os-approvals-decide)
+* [`apollia-os batch`↴](#apollia-os-batch)
+* [`apollia-os batch run`↴](#apollia-os-batch-run)
+* [`apollia-os batch status`↴](#apollia-os-batch-status)
+* [`apollia-os batch list`↴](#apollia-os-batch-list)
+* [`apollia-os batch accesses`↴](#apollia-os-batch-accesses)
+* [`apollia-os batch pause`↴](#apollia-os-batch-pause)
+* [`apollia-os batch resume`↴](#apollia-os-batch-resume)
+* [`apollia-os batch stop`↴](#apollia-os-batch-stop)
+* [`apollia-os batch retry`↴](#apollia-os-batch-retry)
+* [`apollia-os batch export`↴](#apollia-os-batch-export)
+* [`apollia-os workflow`↴](#apollia-os-workflow)
+* [`apollia-os workflow show`↴](#apollia-os-workflow-show)
+* [`apollia-os workflow run`↴](#apollia-os-workflow-run)
+* [`apollia-os workflow status`↴](#apollia-os-workflow-status)
+* [`apollia-os workflow logs`↴](#apollia-os-workflow-logs)
+* [`apollia-os workflow cancel`↴](#apollia-os-workflow-cancel)
 * [`apollia-os resilience`↴](#apollia-os-resilience)
 * [`apollia-os resilience list`↴](#apollia-os-resilience-list)
 * [`apollia-os resilience show`↴](#apollia-os-resilience-show)
@@ -196,8 +240,11 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os plan cache stats`↴](#apollia-os-plan-cache-stats)
 * [`apollia-os plan cache clear`↴](#apollia-os-plan-cache-clear)
 * [`apollia-os plan cache evict`↴](#apollia-os-plan-cache-evict)
+* [`apollia-os service`↴](#apollia-os-service)
+* [`apollia-os service install`↴](#apollia-os-service-install)
+* [`apollia-os service uninstall`↴](#apollia-os-service-uninstall)
+* [`apollia-os service status`↴](#apollia-os-service-status)
 * [`apollia-os doctor`↴](#apollia-os-doctor)
-* [`apollia-os inspect`↴](#apollia-os-inspect)
 * [`apollia-os logs`↴](#apollia-os-logs)
 * [`apollia-os version`↴](#apollia-os-version)
 * [`apollia-os connector`↴](#apollia-os-connector)
@@ -212,6 +259,10 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os connector client-secret set`↴](#apollia-os-connector-client-secret-set)
 * [`apollia-os connector api-key`↴](#apollia-os-connector-api-key)
 * [`apollia-os connector api-key set`↴](#apollia-os-connector-api-key-set)
+* [`apollia-os connector imap`↴](#apollia-os-connector-imap)
+* [`apollia-os connector imap test`↴](#apollia-os-connector-imap-test)
+* [`apollia-os connector imap add`↴](#apollia-os-connector-imap-add)
+* [`apollia-os connector imap list`↴](#apollia-os-connector-imap-list)
 * [`apollia-os connector drive`↴](#apollia-os-connector-drive)
 * [`apollia-os connector drive folder`↴](#apollia-os-connector-drive-folder)
 * [`apollia-os connector drive folder list`↴](#apollia-os-connector-drive-folder-list)
@@ -226,30 +277,21 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os config validate`↴](#apollia-os-config-validate)
 * [`apollia-os config edit`↴](#apollia-os-config-edit)
 * [`apollia-os config show`↴](#apollia-os-config-show)
+* [`apollia-os config keys`↴](#apollia-os-config-keys)
 * [`apollia-os config reset`↴](#apollia-os-config-reset)
 * [`apollia-os profile`↴](#apollia-os-profile)
+* [`apollia-os profile list`↴](#apollia-os-profile-list)
 * [`apollia-os profile show`↴](#apollia-os-profile-show)
+* [`apollia-os profile create`↴](#apollia-os-profile-create)
+* [`apollia-os profile rename`↴](#apollia-os-profile-rename)
 * [`apollia-os profile set`↴](#apollia-os-profile-set)
+* [`apollia-os profile set-default`↴](#apollia-os-profile-set-default)
+* [`apollia-os profile delete`↴](#apollia-os-profile-delete)
 * [`apollia-os profile forget`↴](#apollia-os-profile-forget)
 * [`apollia-os profile reset`↴](#apollia-os-profile-reset)
 * [`apollia-os profile schema`↴](#apollia-os-profile-schema)
 * [`apollia-os profile export`↴](#apollia-os-profile-export)
 * [`apollia-os profile import`↴](#apollia-os-profile-import)
-* [`apollia-os project`↴](#apollia-os-project)
-* [`apollia-os project list`↴](#apollia-os-project-list)
-* [`apollia-os project create`↴](#apollia-os-project-create)
-* [`apollia-os project show`↴](#apollia-os-project-show)
-* [`apollia-os project update`↴](#apollia-os-project-update)
-* [`apollia-os project delete`↴](#apollia-os-project-delete)
-* [`apollia-os project agents`↴](#apollia-os-project-agents)
-* [`apollia-os project agents list`↴](#apollia-os-project-agents-list)
-* [`apollia-os project agents add`↴](#apollia-os-project-agents-add)
-* [`apollia-os project agents remove`↴](#apollia-os-project-agents-remove)
-* [`apollia-os project templates`↴](#apollia-os-project-templates)
-* [`apollia-os project templates list`↴](#apollia-os-project-templates-list)
-* [`apollia-os project templates seed-builtins`↴](#apollia-os-project-templates-seed-builtins)
-* [`apollia-os project link`↴](#apollia-os-project-link)
-* [`apollia-os project chats`↴](#apollia-os-project-chats)
 * [`apollia-os trace`↴](#apollia-os-trace)
 * [`apollia-os digest`↴](#apollia-os-digest)
 * [`apollia-os completions`↴](#apollia-os-completions)
@@ -269,38 +311,43 @@ Apollia OS CLI binary (apollia-os)
 * `stop` - Stop a running runtime
 * `status` - Display runtime and agent status
 * `run` - Submit a task to an agent and wait for the result
-* `agent` - Agent management (list, start, stop, show, install, uninstall, enable, disable, update, create, package, logs, validate, repair)
+* `agent` - Agent management (list, start, stop, show, set, reset, export, status, messages, uninstall, enable, disable, package, logs)
 * `a2a` - Agent-to-Agent skill discovery and direct invocation
 * `task` - Task management (list, status, cancel, inspect, resume, approvals)
 * `eval` - Evaluation harness (run a TOML suite against the runtime, report a JSONL)
 * `tools` - Native tool governance (list, enable, disable, config, reload, credentials, show, approvals)
-* `audit` - Audit trail (list, stats, export, verify, show, replay)
+* `audit` - Audit trail (journal, export, verify, anchor, replay, show)
 * `hooks` - Lifecycle hooks (list)
 * `memory` - Memory management
 * `llm` - LLM backend diagnostics (status, ping, chat, costs, backends, reload)
 * `model` - Local model file management
+* `source` - The sources an agent may consult once checked: folders, files, mailboxes, the profile, memory (list, create, delete, inspect)
 * `trigger` - Trigger management (list, status, fire, enable, disable, logs, reload, create, update, delete)
 * `notify` - Notification channel management (test, list, logs, create, update, delete, events)
 * `stt` - Speech-to-Text management (status, transcribe, transcriptions, model, config)
 * `onboard` - Launch onboarding or re-onboarding on a specific topic
 * `permissions` - Permission rule management (list, revoke, audit)
-* `chat` - Interactive chat REPL + persisted session hygiene (delete, rename, export)
-* `mcp` - MCP server management (list, add, remove, show, test, restart, update, raw-config, set-approval, list-pending, revoke-approval, server)
+* `chat` - Interactive chat REPL + persisted session hygiene (list, delete, rename, export)
+* `mcp` - MCP server management (list, add, remove, show, test, restart, update, raw-config, server)
 * `update` - Check for and install updates from GitHub Releases
+* `package` - Agent package archives: build, inspect, preview and install a `.apo`, and trust publisher keys
+* `policy` - Organisation policy: create the key, write, sign, verify, show
 * `workspace` - Workspace inspection and initialization (status, init)
 * `review` - Automated code or plan review via the apollia-review agent
+* `approvals` - The decisions waiting for you (pending)
+* `batch` - Run an agent on every item of a source (run, status, list, accesses, pause, resume, stop, retry, export)
+* `workflow` - Run the workflows of installed packages (show, run, status, logs, cancel)
 * `resilience` - Circuit breaker inspection and reset (list, show, reset)
 * `plan` - Plan domain management (cache: stats, clear, evict)
+* `service` - Run the runtime as a service of your session (install, uninstall, status)
 * `doctor` - Diagnose the local Apollia environment (no runtime required)
-* `inspect` - Statically inspect a Python agent file (no runtime required)
 * `logs` - Tail or follow the runtime log file
 * `version` - Print the binary version (use `--json` for machine-readable output)
 * `connector` - Native SaaS connector management (list, accounts, test, revoke)
 * `config` - Global apollia.toml management (get, set, validate, edit, show)
 * `profile` - User profile management (show, set, forget, reset, export, import)
-* `project` - Project management (list, create, show, update, delete, agents, templates)
 * `trace` - Print the event-sourced trace of a task
-* `digest` - Aggregated activity overview (tasks + LLM costs + audit stats)
+* `digest` - Aggregated activity overview (tasks + LLM costs)
 * `completions` - Generate a shell completion script (bash, zsh, fish, powershell, ...)
 * `guide` - Short, task-oriented help by theme (chat, governance, audit, ...)
 * `do` - Map a natural-language request to a command (local model), then run it
@@ -333,7 +380,8 @@ Start the runtime in foreground
 
 ###### **Options:**
 
-* `--port <PORT>` - TCP port to listen on (default: 7771)
+* `--port <PORT>` - TCP port to listen on; overrides `[api].port` (default: 7771)
+* `--config <PATH>` - Configuration file to load instead of `~/.apollia/apollia.toml`
 
 
 
@@ -357,7 +405,7 @@ Display runtime and agent status
 
 Submit a task to an agent and wait for the result.
 
-Use the positional `<INPUT>` for free-text input (react/conversational agents). For worker agents that expect a typed skill payload, use `apollia-os a2a invoke <skill_id> --args '<JSON>'` instead, or pass `--input-json '<JSON>'` here to override the default text wrapping.
+Use the positional `<INPUT>` for free-text input. To send a structured payload, pass `--input-json '<JSON>'` here, which overrides the default text wrapping. To invoke a typed skill by its identifier, use `apollia-os a2a invoke <skill_id> --args '<JSON>'` instead.
 
 **Usage:** `apollia-os run [OPTIONS] <AGENT_ID> [INPUT]`
 
@@ -377,16 +425,7 @@ Use the positional `<INPUT>` for free-text input (react/conversational agents). 
 * `--detach` - Submit the task and return immediately without waiting for the result.
 
    The task ID is printed so it can be tracked with `apollia-os task status <id>`.
-* `--alternatives` - Display two alternative plans (conservative vs. exploratory) and choose which one to execute before submitting the task.
-
-   Requires the runtime to support plan alternatives (ORIA engine with LLM).
-* `--plan` - Pause after plan generation to review and approve the plan before execution. Prompts to approve, reject (with optional feedback), or quit. Incompatible with --alternatives
-* `--allowed-tools <TOOL>` - Restrict this session to the listed tools only (comma-separated).
-
-   When specified, only the named tools can be invoked. All other tools are blocked regardless of the global configuration.
-* `--disallowed-tools <TOOL>` - Explicitly block the listed tools for this session (comma-separated).
-
-   Takes priority over `--allowed-tools` when the same tool appears in both.
+* `--plan` - Pause after plan generation to review and approve the plan before execution. Prompts to approve, reject (with optional feedback), or quit
 * `--autonomy <LEVEL>` - Autonomy tier for this run (default: assisted).
 
    Controls the execution budget, memory injection, and verification. Accepted values: assisted, supervised, bounded_autonomous, long_autonomous.
@@ -395,28 +434,26 @@ Use the positional `<INPUT>` for free-text input (react/conversational agents). 
 
 ## `apollia-os agent`
 
-Agent management (list, start, stop, show, install, uninstall, enable, disable, update, create, package, logs, validate, repair)
+Agent management (list, start, stop, show, set, reset, export, status, messages, uninstall, enable, disable, package, logs)
 
 **Usage:** `apollia-os agent <COMMAND>`
 
 ###### **Subcommands:**
 
 * `list` - List all agents (installed and/or runtime)
-* `start` - Start (register) a new agent from a Python module path
+* `start` - Make a stored agent available again, after `agent stop`
 * `stop` - Stop (shutdown) a running agent
-* `show` - Display detailed information about an agent
+* `show` - Display detailed information about an agent, with its definition as resolved (package defaults, then your overrides)
+* `set` - Override one field of an agent's definition; a package update keeps it
+* `reset` - Go back to the package defaults: remove every override of an agent, or the override of one field. Recorded in the audit journal
+* `export` - Export an agent created in the interface as a `.apo` package
 * `status` - Show a compact runtime-status snapshot for `<agent_id>`
 * `messages` - List in-memory A2A messages for `<agent_id>` (oldest-first within window)
-* `install` - Install an agent permanently from a local path or a Git URL
-* `uninstall` - Uninstall a permanently installed agent
+* `uninstall` - Uninstall an agent installed on its own, through the runtime
 * `enable` - Enable an installed agent (will auto-start on boot)
 * `disable` - Disable an installed agent (will not auto-start on boot)
-* `update` - Update an installed agent with a new Python module
-* `create` - Create a new agent from an SDK template
-* `package` - Manage agent packages (multi-agent bundles described by agent.toml)
+* `package` - List, show and uninstall the installed packages
 * `logs` - Display recent log lines from a running agent
-* `validate` - Validate an agent manifest without installing or starting the agent
-* `repair` - Re-provision an installed agent's per-agent Python venv from its manifest
 
 
 
@@ -429,18 +466,21 @@ List all agents (installed and/or runtime)
 ###### **Options:**
 
 * `--supports-a2a` - Show only A2A-capable agents with their skill descriptors
+* `--definitions` - List the stored agents as resolved (package definition, then your overrides) instead of the runtime inventory
 
 
 
 ## `apollia-os agent start`
 
-Start (register) a new agent from a Python module path
+Make a stored agent available again, after `agent stop`.
 
-**Usage:** `apollia-os agent start <PATH>`
+An agent is available as soon as it is installed and enabled; this is only needed for one that was stopped.
+
+**Usage:** `apollia-os agent start <AGENT_ID>`
 
 ###### **Arguments:**
 
-* `<PATH>` - Path to the agent Python module
+* `<AGENT_ID>` - Agent identifier
 
 
 
@@ -458,13 +498,66 @@ Stop (shutdown) a running agent
 
 ## `apollia-os agent show`
 
-Display detailed information about an agent
+Display detailed information about an agent, with its definition as resolved (package defaults, then your overrides)
 
 **Usage:** `apollia-os agent show <AGENT_ID>`
 
 ###### **Arguments:**
 
 * `<AGENT_ID>` - Agent identifier
+
+
+
+## `apollia-os agent set`
+
+Override one field of an agent's definition; a package update keeps it.
+
+Fields: `name`, `mission`, `autonomy`, `planning` (never, auto or always) and `profile` (a profile identifier, see `profile list`) take one value; `examples`, `access` and `sources` take the whole list, one value per item (none for an empty list). A source is an identifier of `source list`, `profile` or `memory`; the runtime refuses any other. The source `profile` lets the agent read your profile through `ctx.profile`: `agent set <id> sources profile` checks it, a list without it unchecks it, and `agent reset --field sources` goes back to the package default. Recorded in the audit journal.
+
+**Usage:** `apollia-os agent set <AGENT_ID> <FIELD> [VALUES]...`
+
+###### **Arguments:**
+
+* `<AGENT_ID>` - Agent identifier
+* `<FIELD>` - Field to override: name, mission, examples, access, sources, autonomy, planning or profile
+* `<VALUES>` - The value, or the items of a list
+
+
+
+## `apollia-os agent reset`
+
+Go back to the package defaults: remove every override of an agent, or the override of one field. Recorded in the audit journal
+
+**Usage:** `apollia-os agent reset [OPTIONS] <AGENT_ID>`
+
+###### **Arguments:**
+
+* `<AGENT_ID>` - Agent identifier
+
+###### **Options:**
+
+* `--field <FIELD>` - Remove only the override of this field
+* `--confirm` - Skip the interactive confirmation prompt
+
+
+
+## `apollia-os agent export`
+
+Export an agent created in the interface as a `.apo` package.
+
+Its current values become the defaults of the package. No secret, no memory and no history is exported; the account of a connection stays here and becomes a required connection; an access to another package, agent or workflow is left out and listed. The publisher is the `author.name` setting, or `--publisher`. Needs the runtime.
+
+**Usage:** `apollia-os agent export [OPTIONS] <AGENT_ID>`
+
+###### **Arguments:**
+
+* `<AGENT_ID>` - Agent identifier
+
+###### **Options:**
+
+* `--sign` - Sign the package with the author key, generated in the secret store on the first signature
+* `--publisher <NAME>` - Publisher name for this export only
+* `-o`, `--output <FILE>` - File to write. Default: `<id>-<version>.apo` in the current folder
 
 
 
@@ -500,27 +593,11 @@ List in-memory A2A messages for `<agent_id>` (oldest-first within window)
 
 
 
-## `apollia-os agent install`
-
-Install an agent permanently from a local path or a Git URL.
-
-Accepts a local filesystem path (e.g. `./agents/my-agent.py`) or a Git remote URL (e.g. `https://github.com/user/my-agent.git`).  An optional `#<tag>` suffix pins the clone to a specific tag or branch (e.g. `https://github.com/user/my-agent.git#v1.2.0`).
-
-**Usage:** `apollia-os agent install [OPTIONS] <SOURCE>`
-
-###### **Arguments:**
-
-* `<SOURCE>` - Local path to a Python module or a Git URL (with optional #tag)
-
-###### **Options:**
-
-* `--skip-tests` - Skip the agent test suite (not recommended, reduces validation coverage)
-
-
-
 ## `apollia-os agent uninstall`
 
-Uninstall a permanently installed agent
+Uninstall an agent installed on its own, through the runtime.
+
+Removes its definition, its overrides, its model, its triggers, its environment and its files. Its memory and its history are kept unless asked otherwise. An agent of an installed package goes with its package.
 
 **Usage:** `apollia-os agent uninstall [OPTIONS] <NAME>`
 
@@ -530,6 +607,8 @@ Uninstall a permanently installed agent
 
 ###### **Options:**
 
+* `--clear-memory` - Erase the agent's memory instead of keeping it
+* `--clear-history` - Erase the agent's history (tasks, batches) instead of keeping it
 * `--confirm` - Skip the interactive confirmation prompt
 
 
@@ -558,40 +637,9 @@ Disable an installed agent (will not auto-start on boot)
 
 
 
-## `apollia-os agent update`
-
-Update an installed agent with a new Python module
-
-**Usage:** `apollia-os agent update <NAME> <PATH>`
-
-###### **Arguments:**
-
-* `<NAME>` - Agent name
-* `<PATH>` - Path to the new Python module
-
-
-
-## `apollia-os agent create`
-
-Create a new agent from an SDK template
-
-**Usage:** `apollia-os agent create [OPTIONS] <NAME>`
-
-###### **Arguments:**
-
-* `<NAME>` - Agent name in kebab-case (e.g. my-agent)
-
-###### **Options:**
-
-* `--type <TYPE>` - Template type: react, conversational, or orchestrated
-
-  Default value: `react`
-
-
-
 ## `apollia-os agent package`
 
-Manage agent packages (multi-agent bundles described by agent.toml)
+List, show and uninstall the installed packages
 
 **Usage:** `apollia-os agent package <COMMAND>`
 
@@ -599,7 +647,7 @@ Manage agent packages (multi-agent bundles described by agent.toml)
 
 * `list` - List all installed agent packages
 * `show` - Show details for an installed package
-* `uninstall` - Uninstall a package and all its agents and triggers
+* `uninstall` - Uninstall a package and everything it installed, through the runtime
 
 
 
@@ -625,7 +673,9 @@ Show details for an installed package
 
 ## `apollia-os agent package uninstall`
 
-Uninstall a package and all its agents and triggers
+Uninstall a package and everything it installed, through the runtime.
+
+Removes its agents with their overrides, models and triggers, its workflows and tools, its environments, its files and the MCP servers it brought; the connections it required stay. The memory and the history of its agents are kept unless asked otherwise.
 
 **Usage:** `apollia-os agent package uninstall [OPTIONS] <NAME>`
 
@@ -635,6 +685,8 @@ Uninstall a package and all its agents and triggers
 
 ###### **Options:**
 
+* `--clear-memory` - Erase the memory of its agents instead of keeping it
+* `--clear-history` - Erase the history of its agents and workflows (tasks, batches, workflow runs) instead of keeping it
 * `--confirm` - Skip the interactive confirmation prompt
 
 
@@ -655,32 +707,6 @@ Display recent log lines from a running agent
 
   Default value: `50`
 * `--follow` - Not implemented: refuses with an error naming `--last` instead
-
-
-
-## `apollia-os agent validate`
-
-Validate an agent manifest without installing or starting the agent
-
-**Usage:** `apollia-os agent validate <PATH>`
-
-###### **Arguments:**
-
-* `<PATH>` - Path to the Python agent module
-
-
-
-## `apollia-os agent repair`
-
-Re-provision an installed agent's per-agent Python venv from its manifest.
-
-Reads `~/.apollia/agents/packages/<name>/agent.toml` (or the single-file agent's manifest), then re-runs `setup_venv` with the declared `packages` list. Useful when an agent was installed before per-agent venv provisioning landed, or when a venv was deleted by hand.
-
-**Usage:** `apollia-os agent repair <NAME>`
-
-###### **Arguments:**
-
-* `<NAME>` - Installed agent name (as declared in the manifest)
 
 
 
@@ -743,7 +769,7 @@ Task management (list, status, cancel, inspect, resume, approvals)
 * `cancel` - Cancel a running task
 * `inspect` - Display the full execution plan of an orchestrated task
 * `resume` - Approve or reject a task pending HITL approval
-* `approvals` - List resolved HITL approvals (accepted or rejected)
+* `approvals` - List the task approvals waiting for a decision
 
 
 
@@ -825,13 +851,15 @@ Exactly one of `--approve` or `--reject` must be supplied.
 
 ## `apollia-os task approvals`
 
-List resolved HITL approvals (accepted or rejected)
+List the task approvals waiting for a decision.
+
+The decisions already taken are in the audit journal (`apollia-os audit journal`).
 
 **Usage:** `apollia-os task approvals [OPTIONS]`
 
 ###### **Options:**
 
-* `--pending` - Also include pending approvals
+* `--pending` - Accepted and without effect: the list holds the pending approvals only
 
 
 
@@ -1064,7 +1092,6 @@ Inspect the HITL queue from the tool registry's side
 ###### **Subcommands:**
 
 * `pending` - List approvals pending decision (tasks in `input_required`)
-* `resolved` - List approvals resolved within the `--days` window
 
 
 
@@ -1076,53 +1103,20 @@ List approvals pending decision (tasks in `input_required`)
 
 
 
-## `apollia-os tools approvals resolved`
-
-List approvals resolved within the `--days` window
-
-**Usage:** `apollia-os tools approvals resolved [OPTIONS]`
-
-###### **Options:**
-
-* `--days <DAYS>` - Days of history to include (default: 7)
-
-  Default value: `7`
-* `--limit <LIMIT>` - Maximum number of entries to return (default: 50)
-
-  Default value: `50`
-
-
-
 ## `apollia-os audit`
 
-Audit trail (list, stats, export, verify, show, replay)
+Audit trail (journal, export, verify, anchor, replay, show)
 
 **Usage:** `apollia-os audit <COMMAND>`
 
 ###### **Subcommands:**
 
-* `list` - List recent audit events (default)
 * `journal` - Browse the hash-chained journal across every run, newest first
-* `stats` - Display audit statistics
-* `export` - Export the audit trail as JSON, up to `--limit` events
+* `export` - Export the hash-chained journal to a file, as CSV or JSON
 * `verify` - Verify the audit journal's hash chains and signatures
 * `anchor` - Print the exportable head anchor of the global chain
-* `replay` - Replay a captured run and detect divergences
+* `replay` - Check that the captured trace of a run is complete and consistent
 * `show` - Show a run's full journal, including the model's LLM completions
-
-
-
-## `apollia-os audit list`
-
-List recent audit events (default)
-
-**Usage:** `apollia-os audit list [OPTIONS]`
-
-###### **Options:**
-
-* `--limit <LIMIT>` - Maximum number of events to display
-
-  Default value: `20`
 
 
 
@@ -1130,7 +1124,7 @@ List recent audit events (default)
 
 Browse the hash-chained journal across every run, newest first.
 
-Unlike `audit list` (the tool-invocation trail) and `audit show RUN` (one run), this reads the chained journal without needing a run id up front, so the audited register is reachable by browsing.
+Unlike `audit show RUN` (one run), this reads the chained journal without needing a run id up front, so the audited register is reachable by browsing. Each entry is printed as its summary: when, who, what, on what, with which result, and never the content of a call. The filters add up, and `--limit` and `--offset` count the entries that pass them.
 
 **Usage:** `apollia-os audit journal [OPTIONS]`
 
@@ -1142,30 +1136,41 @@ Unlike `audit list` (the tool-invocation trail) and `audit show RUN` (one run), 
 * `--offset <OFFSET>` - Number of entries to skip, newest first. Page through with it
 
   Default value: `0`
-* `--agent <AGENT>` - Keep the runs of this agent's tasks only. Repeat it for several agents
-
-
-
-## `apollia-os audit stats`
-
-Display audit statistics
-
-**Usage:** `apollia-os audit stats`
+* `--agent <AGENT>` - Keep what names this agent, and the runs of its tasks. Repeat it for several agents
+* `--family <FAMILY>` - Keep this action family: read, read_personal, write_or_delete, send_external, execute_code. Repeat it for several
+* `--nature <NATURE>` - Keep this nature: action, access_change, policy, system. Repeat it for several
+* `--result <RESULT>` - Keep this result: success, failure, refused. Repeat it for several
+* `--since <DATE>` - Start of the period, included: YYYY-MM-DD (UTC) or an RFC 3339 instant
+* `--until <DATE>` - End of the period, excluded: YYYY-MM-DD (UTC) or an RFC 3339 instant
 
 
 
 ## `apollia-os audit export`
 
-Export the audit trail as JSON, up to `--limit` events
+Export the hash-chained journal to a file, as CSV or JSON.
 
-**Usage:** `apollia-os audit export [OPTIONS]`
+The file holds every entry that passes the filters, newest first, each as its summary: when, who, what, on what, with which result, and its place in the chain. `--detail` adds the payload of each entry and the arguments and output of each tool call, which may hold personal data. The filters are those of `audit journal`. The file is written on this machine, and the export is itself recorded in the journal.
+
+**Usage:** `apollia-os audit export [OPTIONS] --format <FORMAT> --output <PATH>`
 
 ###### **Options:**
 
-* `--output <PATH>` - Destination file (default: stdout)
-* `--limit <LIMIT>` - Maximum number of events to include (default: 10000)
+* `--format <FORMAT>` - Format of the file
 
-  Default value: `10000`
+  Possible values:
+  - `csv`:
+    Comma-separated values, UTF-8, one header row
+  - `json`:
+    One JSON document with the entries
+
+* `--detail` - Add the detail of each entry: its payload, and the arguments and output of its tool call. May hold personal data
+* `--agent <AGENT>` - Keep what names this agent, and the runs of its tasks. Repeat it for several agents
+* `--family <FAMILY>` - Keep this action family: read, read_personal, write_or_delete, send_external, execute_code. Repeat it for several
+* `--nature <NATURE>` - Keep this nature: action, access_change, policy, system. Repeat it for several
+* `--result <RESULT>` - Keep this result: success, failure, refused. Repeat it for several
+* `--since <DATE>` - Start of the period, included: YYYY-MM-DD (UTC) or an RFC 3339 instant
+* `--until <DATE>` - End of the period, excluded: YYYY-MM-DD (UTC) or an RFC 3339 instant
+* `--output <PATH>` - File the export is written to
 
 
 
@@ -1195,9 +1200,9 @@ Storing this off-machine is the only defense against truncation of the global ta
 
 ## `apollia-os audit replay`
 
-Replay a captured run and detect divergences.
+Check that the captured trace of a run is complete and consistent.
 
-Compares the replayed run against its captured trace across every category: LLM responses, tool outputs, and plan construction. Divergences are grouped by category in the human output and listed in the `--json` payload. `run` accepts a full run_id or an unambiguous prefix of at least 8 characters. Exit 0 = identical, exit 2 = diverged, exit 1 = any error (run not found, ambiguous prefix, incomplete trace, runtime unreachable).
+Steps through the trace the journal captured, offline: each model response is read back, and each tool call it asked for is matched with the tool output captured next, as are the changes of the plan. No model is called, no tool runs and the agent is not run again: this tells whether the trace holds together, not whether the agent would answer the same today. Divergences are grouped by category in the human output and listed in the `--json` payload. `run` accepts a full run_id or an unambiguous prefix of at least 8 characters. Exit 0 = identical, exit 2 = diverged, exit 1 = any error (run not found, ambiguous prefix, incomplete trace, runtime unreachable).
 
 **Usage:** `apollia-os audit replay <RUN>`
 
@@ -1211,7 +1216,7 @@ Compares the replayed run against its captured trace across every category: LLM 
 
 Show a run's full journal, including the model's LLM completions.
 
-Unlike `audit list`/`export` (the tool-only audit trail), this reads the hash-chained journal so the captured reasoning (prompts/responses) is readable. Accepts a run_id or a task_id (resolved to its run_id).
+Reads the hash-chained journal, so the captured reasoning (prompts/responses) is readable. Accepts a run_id or a task_id (resolved to its run_id).
 
 **Usage:** `apollia-os audit show <RUN_OR_TASK>`
 
@@ -1506,17 +1511,9 @@ Send a direct prompt to an LLM backend and print the response
 
 ## `apollia-os llm costs`
 
-Display aggregated usage and costs (tokens and estimated cost per backend).
+Display aggregated usage and costs (tokens and estimated cost per backend)
 
-Without flags, prints the cost table. Use `--get-threshold` to print `[llm] cost_alert_threshold_usd` from `apollia.toml`, or `--threshold N` to set it.
-
-**Usage:** `apollia-os llm costs [OPTIONS]`
-
-###### **Options:**
-
-* `--get-threshold` - Read the cost alert threshold from `apollia.toml` instead of the cost table
-* `--threshold <USD>` - Set the cost alert threshold (USD). Writes `[llm] cost_alert_threshold_usd = N` to `apollia.toml`. Pass `0` or a negative value to clear the threshold
-* `--config <PATH>` - Optional `apollia.toml` path override. Without it, the same file the runtime loads at startup: `./apollia.toml` when the working directory holds one, otherwise `$XDG_CONFIG_HOME/apollia/apollia.toml` (default `~/.config/apollia/apollia.toml`)
+**Usage:** `apollia-os llm costs`
 
 
 
@@ -1561,7 +1558,7 @@ Show the full configuration of a backend (including config_json)
 
 Create a new LLM backend.
 
-`--provider` drives the shape of the `config_json` sent to the runtime. For `llama-cpp` (local GGUF models), `--model` must be the absolute path to the .gguf file. For cloud providers, `--model` is the identifier (e.g. `claude-sonnet-4-6`, `gpt-4o`).
+`--provider` drives the shape of the `config_json` sent to the runtime. For `llama-cpp` (local GGUF models), `--model` must be the absolute path to the .gguf file. For an OpenAI-compatible server or Ollama, `--model` is the identifier the server knows (e.g. `qwen3-32b`).
 
 **Usage:** `apollia-os llm backends create [OPTIONS] --provider <PROVIDER> --model <MODEL> <NAME>`
 
@@ -1571,12 +1568,12 @@ Create a new LLM backend.
 
 ###### **Options:**
 
-* `--provider <PROVIDER>` - Provider: `llama-cpp` (local GGUF), `anthropic`, `openai`, `mistral`, `ollama`. `--kind` is accepted as an alias for backward compatibility
+* `--provider <PROVIDER>` - Provider: `llama-cpp` (local GGUF), `openai` (any OpenAI-compatible server, designated by `--base-url`), `ollama`. Any other value is refused. `--kind` is accepted as an alias for backward compatibility
 * `--model <MODEL>` - Model identifier or path (absolute path for `llama-cpp`)
-* `--api-key <KEY>` - API key (cloud providers only). Stored as-is in `config_json.api_key`. Prefer `--api-key-env VAR_NAME` to avoid persisting the key in system.db
+* `--api-key <KEY>` - API key of the server, when it requires one. The runtime moves it into the secret store before saving the backend: `config_json` keeps only `api_key_in_store`, never the key
 * `--api-key-env <VAR_NAME>` - Environment variable name holding the API key.
 
-   The runtime reads `std::env::var(NAME)` at boot. Recommended to keep the key out of system.db.
+   The runtime reads `std::env::var(NAME)` at boot; only the variable name is saved.
 * `--base-url <URL>` - Base URL (Ollama, self-hosted OpenAI-compatible gateway, ...)
 * `--device <DEVICE>` - Device recorded on the backend row: `metal`, `cuda`, `cpu`.
 
@@ -1610,9 +1607,9 @@ Works in merge mode: flags that are not supplied keep their current value. The r
 
 ###### **Options:**
 
-* `--provider <PROVIDER>` - New provider (rarely useful, changes the backend implementation)
+* `--provider <PROVIDER>` - New provider (rarely useful, changes the backend implementation): `llama-cpp`, `openai` or `ollama`
 * `--model <MODEL>` - New model (absolute path for `llama-cpp`)
-* `--api-key <KEY>` - New API key (cloud providers)
+* `--api-key <KEY>` - New API key of the server
 * `--api-key-env <VAR_NAME>` - New environment variable name for the API key
 * `--base-url <URL>` - New base URL
 * `--device <DEVICE>` - New device recorded on the backend row. It selects nothing today: the local engine offloads according to the llama-server build it ships with and to `APOLLIA_LLAMA_N_GPU_LAYERS`
@@ -1671,7 +1668,7 @@ First-run helper: configure a local LLM in one step.
 
 ###### **Options:**
 
-* `--local` - Use the local llama-cpp backend (required for v0.1.0; a cloud provider is declared with `llm backends create --api-key`)
+* `--local` - Use the local llama-cpp backend (required: a server elsewhere is declared with `llm backends create --base-url`)
 * `--model <PATH>` - Path to the `.gguf` model file
 * `--name <NAME>` - Backend name (default: `local`). Overwrites the existing entry of the same name
 
@@ -1680,7 +1677,7 @@ First-run helper: configure a local LLM in one step.
 
    It selects nothing today. The local engine offloads according to the llama-server build it ships with and to `APOLLIA_LLAMA_N_GPU_LAYERS`, and reads no device field.
 * `--system-db <PATH>` - Override the system database path (default: `~/.apollia/system.db`)
-* `--models-dir <DIR>` - Override the models directory (default: `~/.apollia/models/`)
+* `--models-dir <DIR>` - Override the models directory. Without it, `[models] dir` of `apollia.toml`, else `~/.apollia/models/`
 
 
 
@@ -1697,6 +1694,7 @@ Local model file management
 * `show` - Fetch metadata + file list for a HuggingFace model
 * `hardware` - Report the runtime's detected hardware profile (RAM, CPU, GPU)
 * `recommend` - Rank the models this machine should run
+* `embeddings` - The embeddings model search by meaning uses
 * `delete` - Remove a local model file from `~/.apollia/models/`
 
 
@@ -1764,6 +1762,39 @@ Rank the models this machine should run
 
 
 
+## `apollia-os model embeddings`
+
+The embeddings model search by meaning uses
+
+**Usage:** `apollia-os model embeddings <COMMAND>`
+
+###### **Subcommands:**
+
+* `show` - Show the default embeddings model, and whether its file is installed
+* `set-default` - Set the default embeddings model, by its registry identifier
+
+
+
+## `apollia-os model embeddings show`
+
+Show the default embeddings model, and whether its file is installed
+
+**Usage:** `apollia-os model embeddings show`
+
+
+
+## `apollia-os model embeddings set-default`
+
+Set the default embeddings model, by its registry identifier
+
+**Usage:** `apollia-os model embeddings set-default <MODEL>`
+
+###### **Arguments:**
+
+* `<MODEL>` - Identifier of an embeddings entry of the registry, as `GET /api/v1/llm/embeddings` lists them (for example `multilingual-e5-small`)
+
+
+
 ## `apollia-os model delete`
 
 Remove a local model file from `~/.apollia/models/`
@@ -1777,6 +1808,86 @@ Remove a local model file from `~/.apollia/models/`
 ###### **Options:**
 
 * `--confirm` - Skip the confirmation prompt
+
+
+
+## `apollia-os source`
+
+The sources an agent may consult once checked: folders, files, mailboxes, the profile, memory (list, create, delete, inspect)
+
+**Usage:** `apollia-os source <COMMAND>`
+
+###### **Subcommands:**
+
+* `list` - List the sources, oldest first
+* `create` - Add a source
+* `delete` - Remove a source. Agents that list it stop seeing it
+* `inspect` - Preview a workbook or a CSV file as a batch would read it: the sheet and header row proposed, the first twenty rows, the columns
+* `report` - Show the report of the migration of the former projects into sources: what each project became, and what could not be carried over
+
+
+
+## `apollia-os source list`
+
+List the sources, oldest first
+
+**Usage:** `apollia-os source list`
+
+
+
+## `apollia-os source create`
+
+Add a source
+
+**Usage:** `apollia-os source create [OPTIONS] --kind <KIND> --label <LABEL>`
+
+###### **Options:**
+
+* `--kind <KIND>` - What the source is: folder, file, mail, profile, memory or code_folder
+* `--label <LABEL>` - The name the user sees
+* `--reference <REFERENCE>` - What the source points at: a folder connection, a file path, a mail connection, a memory space. Required for folder, file and mail
+* `--group <GROUP>` - A group the source belongs to, such as the files of one project
+
+
+
+## `apollia-os source delete`
+
+Remove a source. Agents that list it stop seeing it
+
+**Usage:** `apollia-os source delete [OPTIONS] <ID>`
+
+###### **Arguments:**
+
+* `<ID>` - Source identifier, as `source list` shows it
+
+###### **Options:**
+
+* `--confirm` - Skip the interactive confirmation prompt
+
+
+
+## `apollia-os source inspect`
+
+Preview a workbook or a CSV file as a batch would read it: the sheet and header row proposed, the first twenty rows, the columns
+
+**Usage:** `apollia-os source inspect [OPTIONS] <FILE>`
+
+###### **Arguments:**
+
+* `<FILE>` - The .xlsx, .xlsm, .xlsb, .xls, .ods or .csv file
+
+###### **Options:**
+
+* `--sheet <SHEET>` - Show this sheet instead of the proposed one
+* `--header-row <HEADER_ROW>` - Read the header on this row (from 1) instead of the proposed one
+
+
+
+## `apollia-os source report`
+
+Show the report of the migration of the former projects into sources: what each project became, and what could not be carried over
+
+**Usage:** `apollia-os source report`
 
 
 
@@ -2260,22 +2371,21 @@ Permission rule management (list, revoke, audit)
 
 ###### **Subcommands:**
 
-* `list` - List persisted rules (project + global)
+* `list` - List persisted rules, for one agent and for every agent
 * `revoke` - Revoke a rule by identifier, or every matching rule with `--all`
-* `audit` - Show the permission decision history
 * `add` - Add a persisted permission rule for a tool + optional argument prefix
 
 
 
 ## `apollia-os permissions list`
 
-List persisted rules (project + global)
+List persisted rules, for one agent and for every agent
 
 **Usage:** `apollia-os permissions list [OPTIONS]`
 
 ###### **Options:**
 
-* `--scope <SCOPE>` - Filter by scope: `global`, `project` or `session`
+* `--scope <SCOPE>` - Filter by scope: `agent` or `global`
 * `--tool <TOOL>` - Filter by tool name
 
 
@@ -2288,30 +2398,13 @@ Revoke a rule by identifier, or every matching rule with `--all`
 
 ###### **Arguments:**
 
-* `<ID>` - Numeric identifier of a persisted rule.
-
-   IDs prefixed with `s` denote session-scoped rules; they are not revocable from the CLI (use the desktop app or restart the daemon).
+* `<ID>` - Numeric identifier of a persisted rule
 
 ###### **Options:**
 
 * `--all` - Revoke every rule matching `--scope`
-* `--scope <SCOPE>` - Scope targeted by `--all`: `global` (default) or `project`
+* `--scope <SCOPE>` - Scope targeted by `--all`: `agent` or `global`
 * `--yes` - Skip the interactive confirmation (useful for scripts)
-
-
-
-## `apollia-os permissions audit`
-
-Show the permission decision history
-
-**Usage:** `apollia-os permissions audit [OPTIONS]`
-
-###### **Options:**
-
-* `--tool <TOOL>` - Filter by tool name
-* `--limit <LIMIT>` - Maximum number of entries to display
-
-  Default value: `50`
 
 
 
@@ -2319,7 +2412,7 @@ Show the permission decision history
 
 Add a persisted permission rule for a tool + optional argument prefix.
 
-Persists into `governance.db` directly (no runtime required). Session scope is not supported here because session rules live in the runtime memory; use the chat REPL approval flow instead.
+Persists into `governance.db` directly (no runtime required). The rule applies to one agent (`--scope agent --agent <ID>`) or to every agent (`--scope global`).
 
 **Usage:** `apollia-os permissions add [OPTIONS] --tool <NAME>`
 
@@ -2333,19 +2426,19 @@ Persists into `governance.db` directly (no runtime required). Session scope is n
 
   Possible values: `allow`, `deny`
 
-* `--scope <SCOPE>` - Rule scope: `project` or `global` (session is not persistable)
+* `--scope <SCOPE>` - Rule scope: `agent` (one agent) or `global` (every agent)
 
   Default value: `global`
 
-  Possible values: `project`, `global`
+  Possible values: `agent`, `global`
 
-* `--project-path <PATH>` - Project canonical path (required when `--scope project`)
+* `--agent <ID>` - Agent the rule applies to (required when `--scope agent`)
 
 
 
 ## `apollia-os chat`
 
-Interactive chat REPL + persisted session hygiene (delete, rename, export).
+Interactive chat REPL + persisted session hygiene (list, delete, rename, export).
 
 Without a subcommand: launches the REPL (resume with `--resume <id>`, or list recent sessions with `--list`). With a subcommand: operates on `~/.apollia/chat.db` directly; no runtime required.
 
@@ -2353,9 +2446,14 @@ Without a subcommand: launches the REPL (resume with `--resume <id>`, or list re
 
 ###### **Subcommands:**
 
-* `delete` - Delete a persisted chat session and all of its messages
+* `list` - List the persisted chat sessions, each with the folder it is in
+* `delete` - Delete a persisted chat session and all of its messages, for good
 * `rename` - Set the user-defined title of a persisted chat session
 * `export` - Export a persisted chat session to a file
+* `capabilities` - Show what the model of a chat session can do: the reasoning setting it offers (none, on or off, or a level) and whether it reads images
+* `template` - Show the prompt template the model of a chat session receives: the one its preset carries, else the one the local engine reports for the loaded model
+* `settings` - Read or replace what one conversation changes from its agent: its request settings, its instructions, the accesses it switches off
+* `notes` - Read or replace the notes kept beside one conversation
 * `config` - Manage the Chat Libre configuration (system prompt, allowed tools, backend)
 
 ###### **Options:**
@@ -2365,9 +2463,25 @@ Without a subcommand: launches the REPL (resume with `--resume <id>`, or list re
 
 
 
+## `apollia-os chat list`
+
+List the persisted chat sessions, each with the folder it is in.
+
+Reads the chat database, no runtime required. A session the desktop application sent to its trash is not listed.
+
+**Usage:** `apollia-os chat list [OPTIONS]`
+
+###### **Options:**
+
+* `--db <PATH>` - Override the chat database path (default: `~/.apollia/chat.db`)
+
+
+
 ## `apollia-os chat delete`
 
-Delete a persisted chat session and all of its messages
+Delete a persisted chat session and all of its messages, for good.
+
+Nothing goes to the trash of the desktop application: a session deleted here cannot be restored. A session already in that trash is erased the same way.
 
 **Usage:** `apollia-os chat delete [OPTIONS] <SESSION_ID>`
 
@@ -2422,6 +2536,118 @@ Export a persisted chat session to a file
 
 
 
+## `apollia-os chat capabilities`
+
+Show what the model of a chat session can do: the reasoning setting it offers (none, on or off, or a level) and whether it reads images.
+
+Reaches the runtime; exits 2 when it is not running.
+
+**Usage:** `apollia-os chat capabilities <SESSION_ID>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>` - Session id
+
+
+
+## `apollia-os chat template`
+
+Show the prompt template the model of a chat session receives: the one its preset carries, else the one the local engine reports for the loaded model.
+
+Reaches the runtime; exits 2 when it is not running. Never loads a model: one that is not loaded has no template to show.
+
+**Usage:** `apollia-os chat template <SESSION_ID>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>` - Session id
+
+
+
+## `apollia-os chat settings`
+
+Read or replace what one conversation changes from its agent: its request settings, its instructions, the accesses it switches off
+
+**Usage:** `apollia-os chat settings <COMMAND>`
+
+###### **Subcommands:**
+
+* `get` - Print what a conversation changes from its agent
+* `set` - Replace the settings of a conversation
+
+
+
+## `apollia-os chat settings get`
+
+Print what a conversation changes from its agent.
+
+Reaches the runtime; exits 2 when it is not running.
+
+**Usage:** `apollia-os chat settings get <SESSION_ID>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>` - Session id
+
+
+
+## `apollia-os chat settings set`
+
+Replace the settings of a conversation.
+
+Reaches the runtime; exits 2 when it is not running. The fields are `preset`, `thinking`, `reasoning_effort` (`low`, `medium`, `high`), `preserve_thinking` (the reasoning of the earlier answers goes back to the model), `temperature`, `max_tokens`, `context_overflow` (`summarize_middle`, `sliding_window`, `stop_at_limit`), `instructions`, `disabled_accesses`, `proposed_accesses`, `only_accesses` and `profile_access`. `{}` returns the conversation to the settings of its agent.
+
+**Usage:** `apollia-os chat settings set <SESSION_ID> <SETTINGS>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>` - Session id
+* `<SETTINGS>` - The settings, a JSON object. A field left out is inherited
+
+
+
+## `apollia-os chat notes`
+
+Read or replace the notes kept beside one conversation
+
+**Usage:** `apollia-os chat notes <COMMAND>`
+
+###### **Subcommands:**
+
+* `get` - Print the notes kept beside a conversation
+* `set` - Replace the notes kept beside a conversation. They are never sent to a model
+
+
+
+## `apollia-os chat notes get`
+
+Print the notes kept beside a conversation.
+
+Reaches the runtime; exits 2 when it is not running.
+
+**Usage:** `apollia-os chat notes get <SESSION_ID>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>` - Session id
+
+
+
+## `apollia-os chat notes set`
+
+Replace the notes kept beside a conversation. They are never sent to a model.
+
+Reaches the runtime; exits 2 when it is not running.
+
+**Usage:** `apollia-os chat notes set <SESSION_ID> <NOTES>`
+
+###### **Arguments:**
+
+* `<SESSION_ID>` - Session id
+* `<NOTES>` - The notes. An empty string erases them
+
+
+
 ## `apollia-os chat config`
 
 Manage the Chat Libre configuration (system prompt, allowed tools, backend)
@@ -2430,9 +2656,9 @@ Manage the Chat Libre configuration (system prompt, allowed tools, backend)
 
 ###### **Subcommands:**
 
-* `get` - Print the current chat libre configuration
-* `set` - Update one field of the chat libre configuration
-* `reset` - Reset the configuration to the defaults (empty prompt, no tools)
+* `get` - Print the settings of the free chat (the Apollia agent)
+* `set` - Update one setting of the free chat (the Apollia agent)
+* `reset` - Reset the settings to the defaults (no prompt, no tools, default model)
 * `permissions` - Manage persisted permission rules scoped to the Apollia Chat agent
 * `authorizations` - Inspect or revoke in-memory session authorizations
 
@@ -2440,43 +2666,34 @@ Manage the Chat Libre configuration (system prompt, allowed tools, backend)
 
 ## `apollia-os chat config get`
 
-Print the current chat libre configuration
+Print the settings of the free chat (the Apollia agent)
 
-**Usage:** `apollia-os chat config get [OPTIONS]`
-
-###### **Options:**
-
-* `--db <PATH>`
+**Usage:** `apollia-os chat config get`
 
 
 
 ## `apollia-os chat config set`
 
-Update one field of the chat libre configuration
+Update one setting of the free chat (the Apollia agent)
 
-**Usage:** `apollia-os chat config set [OPTIONS] <KEY> <VALUE>`
+**Usage:** `apollia-os chat config set <KEY> <VALUE>`
 
 ###### **Arguments:**
 
 * `<KEY>` - Field name: `system-prompt`, `allowed-tools`, or `llm-backend`
 * `<VALUE>` - New value. For `allowed-tools`, expects a comma-separated list. For `llm-backend`, the literal `none` clears the backend
 
-###### **Options:**
-
-* `--db <PATH>`
-
 
 
 ## `apollia-os chat config reset`
 
-Reset the configuration to the defaults (empty prompt, no tools)
+Reset the settings to the defaults (no prompt, no tools, default model)
 
 **Usage:** `apollia-os chat config reset [OPTIONS]`
 
 ###### **Options:**
 
 * `--confirm`
-* `--db <PATH>`
 
 
 
@@ -2484,7 +2701,7 @@ Reset the configuration to the defaults (empty prompt, no tools)
 
 Manage persisted permission rules scoped to the Apollia Chat agent.
 
-Mirrors the Desktop Settings → Chat permissions panel: lists or deletes rules stored in `governance.db` with `agent_id = apollia:chat`. Rules of scope `session` live in the runtime memory and are not visible here (same caveat as `permissions list`).
+Mirrors the Desktop Settings → Chat permissions panel: lists or deletes rules stored in `governance.db` with `agent_id = apollia:chat`. The authorizations a running chat holds for its session only are not rules and are not visible here.
 
 **Usage:** `apollia-os chat config permissions <COMMAND>`
 
@@ -2566,16 +2783,13 @@ Revoke a single in-memory session authorization (requires runtime route)
 
 ## `apollia-os mcp`
 
-MCP server management (list, add, remove, show, test, restart, update, raw-config, set-approval, list-pending, revoke-approval, server)
+MCP server management (list, add, remove, show, test, restart, update, raw-config, server)
 
 **Usage:** `apollia-os mcp <COMMAND>`
 
 ###### **Subcommands:**
 
 * `list` - List configured and, optionally, discovered MCP servers
-* `set-approval` - Approve all calls to a tool on a server, persisted with the configured TTL
-* `list-pending` - List all pending HITL approval requests awaiting human decision
-* `revoke-approval` - Revoke a previously granted tool approval
 * `add` - Register a new MCP server with the runtime (persisted in the config)
 * `remove` - Remove an MCP server from the runtime
 * `show` - Show the details of an MCP server
@@ -2585,7 +2799,7 @@ MCP server management (list, add, remove, show, test, restart, update, raw-confi
 * `raw-config` - Show the raw persisted configuration of an MCP server
 * `oauth` - Interactive OAuth (PKCE) management for HTTP/streamable-http MCP servers
 * `secret` - Manage MCP server secrets (env-var values) in the OS keychain
-* `server` - Launch Apollia as an MCP stdio server for external clients
+* `server` - Serve the exposed agents and workflows to an MCP client over stdio
 
 
 
@@ -2601,62 +2815,6 @@ List configured and, optionally, discovered MCP servers
 
    Performs a 3-second broadcast scan for `_apollia-mcp._tcp.local.` in addition to listing servers from the configuration file.
 * `--config <PATH>` - Path to the MCP configuration file (default: `~/.apollia/mcp.toml`)
-* `--json` - Output machine-readable JSON
-
-
-
-## `apollia-os mcp set-approval`
-
-Approve all calls to a tool on a server, persisted with the configured TTL.
-
-After approval, calls to `<tool>` on `<server>` bypass the HITL suspension gate until the approval expires (default TTL: 24 h, configurable in apollia.toml).
-
-**Usage:** `apollia-os mcp set-approval [OPTIONS] <SERVER> <TOOL>`
-
-###### **Arguments:**
-
-* `<SERVER>` - MCP server name (as declared in mcp.toml)
-* `<TOOL>` - Tool name to approve
-
-###### **Options:**
-
-* `--db <PATH>` - Path to the approvals database (default: `~/.apollia/mcp_approvals.db`)
-* `--ttl-hours <HOURS>` - Override the TTL for this approval, in hours (0 = never expires)
-
-  Default value: `24`
-* `--json` - Output machine-readable JSON
-
-
-
-## `apollia-os mcp list-pending`
-
-List all pending HITL approval requests awaiting human decision
-
-**Usage:** `apollia-os mcp list-pending [OPTIONS]`
-
-###### **Options:**
-
-* `--db <PATH>` - Path to the approvals database (default: `~/.apollia/mcp_approvals.db`)
-* `--json` - Output machine-readable JSON
-
-
-
-## `apollia-os mcp revoke-approval`
-
-Revoke a previously granted tool approval.
-
-After revocation, calls to `<tool>` on `<server>` will be suspended again until a new approval is granted with `set-approval`.
-
-**Usage:** `apollia-os mcp revoke-approval [OPTIONS] <SERVER> <TOOL>`
-
-###### **Arguments:**
-
-* `<SERVER>` - MCP server name (as declared in mcp.toml)
-* `<TOOL>` - Tool name to revoke
-
-###### **Options:**
-
-* `--db <PATH>` - Path to the approvals database (default: `~/.apollia/mcp_approvals.db`)
 * `--json` - Output machine-readable JSON
 
 
@@ -2680,7 +2838,6 @@ Register a new MCP server with the runtime (persisted in the config)
 
   Possible values: `stdio`, `streamable-http`, `sse`
 
-* `--require-approval` - Require HITL approval for every tool call an agent task makes
 
 
 
@@ -2740,7 +2897,7 @@ Restart an MCP server
 
 Update the raw configuration of an existing MCP server.
 
-At least one of `--command`, `--arg`, `--url`, or `--require-approval` must be supplied. Fields that are omitted keep their previous value.
+At least one of `--command`, `--arg` or `--url` must be supplied. Fields that are omitted keep their previous value.
 
 **Usage:** `apollia-os mcp update [OPTIONS] <NAME>`
 
@@ -2753,10 +2910,6 @@ At least one of `--command`, `--arg`, `--url`, or `--require-approval` must be s
 * `--command <COMMAND>` - New stdio command (stdio transport)
 * `--arg <ARG>` - New argument list for the command, one `--arg` per argument. Given once or more, it replaces the stored list whole
 * `--url <URL>` - New HTTP/SSE URL
-* `--require-approval <BOOL>` - Enable / disable the HITL approval lock
-
-  Possible values: `true`, `false`
-
 
 
 
@@ -2962,22 +3115,11 @@ Delete the stored secret for `(<server>, <env_var>)`
 
 ## `apollia-os mcp server`
 
-Launch Apollia as an MCP stdio server for external clients.
+Serve the exposed agents and workflows to an MCP client over stdio.
 
-Exposes native tools to MCP clients (Claude Desktop, VS Code, Cursor). Use `--with-runtime` to additionally expose `submit_task`.
+A bridge to the running daemon: an MCP client (an editor, another assistant) spawns it and sees the agents and workflows marked exposed, and nothing else. The daemon refuses it until `mcp.server_enabled` is turned on.
 
-**Usage:** `apollia-os mcp server [OPTIONS]`
-
-###### **Options:**
-
-* `--with-runtime` - Enable the `submit_task` tool by starting the full Apollia runtime.
-
-   Without this flag, only the 9 stateless native tools are exposed.
-
-  Default value: `false`
-* `--sandbox-root <PATH>` - Sandbox root for file tools (default: user home directory).
-
-   File operations are restricted to this directory tree.
+**Usage:** `apollia-os mcp server`
 
 
 
@@ -2991,6 +3133,252 @@ Check for and install updates from GitHub Releases
 
 * `--check` - Only check for a newer version without downloading or installing
 * `--yes` - Install without asking for interactive confirmation
+
+
+
+## `apollia-os package`
+
+Agent package archives: build, inspect, preview and install a `.apo`, and trust publisher keys
+
+**Usage:** `apollia-os package <COMMAND>`
+
+###### **Subcommands:**
+
+* `new` - Write the starting folder of a package: an agent declared in `apollia.toml` and one Python tool
+* `build` - Build a `.apo` archive from a package folder
+* `inspect` - Show the manifest, the entries and the signature state of a `.apo` archive
+* `preview` - Show what a `.apo` package contains and asks for, before installing it
+* `install` - Install a `.apo` package, or update it
+* `trust` - Trusted publisher keys: a package signed by one is shown under its label
+
+
+
+## `apollia-os package new`
+
+Write the starting folder of a package: an agent declared in `apollia.toml` and one Python tool.
+
+The folder is `<name>` under the current folder, or under `--output-dir`. It builds as written with `package build`. Nothing is overwritten: an existing folder is refused.
+
+**Usage:** `apollia-os package new [OPTIONS] <NAME>`
+
+###### **Arguments:**
+
+* `<NAME>` - Package name: lowercase letters, digits, `-` and `_`
+
+###### **Options:**
+
+* `--output-dir <DIR>` - Folder to create the package folder in. Default: the current one
+
+
+
+## `apollia-os package build`
+
+Build a `.apo` archive from a package folder.
+
+Validates `apollia.toml`, refuses a folder whose Python modules define tools or workflows that the manifest does not describe (write the descriptors with `python -m apollia describe <folder>`), and writes the archive. No Python code runs.
+
+**Usage:** `apollia-os package build [OPTIONS] <DIR>`
+
+###### **Arguments:**
+
+* `<DIR>` - Package folder, holding `apollia.toml` at its root
+
+###### **Options:**
+
+* `--sign` - Sign the archive with the author key. The key is read from the secret store under `--key`; it is generated and stored there the first time
+* `--key <LABEL>` - Label of the author key in the secret store
+
+  Default value: `default`
+* `-o`, `--output <FILE>` - Archive to write. Default: `<name>-<version>.apo` in the current folder
+
+
+
+## `apollia-os package inspect`
+
+Show the manifest, the entries and the signature state of a `.apo` archive.
+
+The signature state is `unsigned`, or `signed` with the declared publisher and the fingerprint of the key. A signature that does not match the content is refused with exit 1.
+
+**Usage:** `apollia-os package inspect <FILE>`
+
+###### **Arguments:**
+
+* `<FILE>` - The `.apo` archive
+
+
+
+## `apollia-os package preview`
+
+Show what a `.apo` package contains and asks for, before installing it.
+
+Reports the agents, workflows and tools, the accesses each agent asks for and what each permits, the publisher and the signature (trusted when its key is in the keyring), the connections the package requires (present or missing) and the MCP servers it brings, and, for an installed package, what the new version adds. Nothing is written. Needs the runtime.
+
+**Usage:** `apollia-os package preview <FILE>`
+
+###### **Arguments:**
+
+* `<FILE>` - The `.apo` archive
+
+
+
+## `apollia-os package install`
+
+Install a `.apo` package, or update it.
+
+A signature that does not hold is refused; an unsigned package installs with a notice. The local overrides of its agents are kept on update. Needs the runtime.
+
+**Usage:** `apollia-os package install [OPTIONS] <FILE>`
+
+###### **Arguments:**
+
+* `<FILE>` - The `.apo` archive
+
+###### **Options:**
+
+* `--confirm-deps` - Accept the Python dependencies the package installs
+* `--confirm-changes` - Accept what an update adds: accesses, required connections, MCP servers (read `package preview` first)
+* `--allow-downgrade` - Install a version older than the installed one
+
+
+
+## `apollia-os package trust`
+
+Trusted publisher keys: a package signed by one is shown under its label
+
+**Usage:** `apollia-os package trust <COMMAND>`
+
+###### **Subcommands:**
+
+* `import` - Trust a publisher's public key, given as 64 hexadecimal characters or as a file holding them
+* `list` - List the trusted publisher keys
+* `remove` - Stop trusting a publisher key
+
+
+
+## `apollia-os package trust import`
+
+Trust a publisher's public key, given as 64 hexadecimal characters or as a file holding them
+
+**Usage:** `apollia-os package trust import --label <LABEL> <KEY>`
+
+###### **Arguments:**
+
+* `<KEY>` - The key, or a file holding it
+
+###### **Options:**
+
+* `--label <LABEL>` - Name to show for the publisher
+
+
+
+## `apollia-os package trust list`
+
+List the trusted publisher keys
+
+**Usage:** `apollia-os package trust list`
+
+
+
+## `apollia-os package trust remove`
+
+Stop trusting a publisher key
+
+**Usage:** `apollia-os package trust remove [OPTIONS] <FINGERPRINT>`
+
+###### **Arguments:**
+
+* `<FINGERPRINT>` - SHA-256 fingerprint of the key, as `package trust list` shows it
+
+###### **Options:**
+
+* `--confirm` - Remove without asking
+
+
+
+## `apollia-os policy`
+
+Organisation policy: create the key, write, sign, verify, show
+
+**Usage:** `apollia-os policy <COMMAND>`
+
+###### **Subcommands:**
+
+* `keygen` - Create the organisation key pair in a folder
+* `init` - Write a commented `policy.toml` that imposes nothing, dated now
+* `sign` - Sign the `policy.toml` of a folder with the organisation private key
+* `verify` - Check a policy folder: schema, signature, and rights in the system folder
+* `show` - Show the policy the runtime reads at startup, or none
+
+
+
+## `apollia-os policy keygen`
+
+Create the organisation key pair in a folder.
+
+Writes `org.key`, the private key, readable by its owner only from the moment it is created, and `org.pub`, the public key; prints the fingerprint of the public key. Existing files are never replaced. Keep `org.key` off the workstations.
+
+**Usage:** `apollia-os policy keygen --out <DIR>`
+
+###### **Options:**
+
+* `--out <DIR>` - Folder that receives `org.key` and `org.pub`, created when missing
+
+
+
+## `apollia-os policy init`
+
+Write a commented `policy.toml` that imposes nothing, dated now.
+
+The folder is created when missing; an existing `policy.toml` is never replaced.
+
+**Usage:** `apollia-os policy init <DIR>`
+
+###### **Arguments:**
+
+* `<DIR>` - Policy folder
+
+
+
+## `apollia-os policy sign`
+
+Sign the `policy.toml` of a folder with the organisation private key.
+
+Writes `SIGNATURE` and `org.pub` next to it, replacing earlier ones. A policy that breaks the schema is not signed.
+
+**Usage:** `apollia-os policy sign [OPTIONS] --key <FILE> <DIR>`
+
+###### **Arguments:**
+
+* `<DIR>` - Policy folder
+
+###### **Options:**
+
+* `--key <FILE>` - The organisation private key, as written by `policy keygen`
+* `--publisher <NAME>` - Publisher name declared in the signature
+
+  Default value: `Organisation`
+
+
+
+## `apollia-os policy verify`
+
+Check a policy folder: schema, signature, and rights in the system folder.
+
+The rights are checked when the folder is the one the runtime reads. A folder that does not hold is refused with exit 1, whatever the cause; the cause (`schema`, `signature`, `key`, `owner`, or `missing` when the folder does not exist) is named in the message, and `--json` carries the verdict, the reason and its detail.
+
+**Usage:** `apollia-os policy verify <DIR>`
+
+###### **Arguments:**
+
+* `<DIR>` - Policy folder
+
+
+
+## `apollia-os policy show`
+
+Show the policy the runtime reads at startup, or none
+
+**Usage:** `apollia-os policy show`
 
 
 
@@ -3040,6 +3428,298 @@ Automated code or plan review via the apollia-review agent
 * `--task <ID>` - Apollia task ID whose execution plan should be reviewed
 * `--pr <N>` - GitHub pull-request number to fetch via `gh pr diff`
 * `--diff <FILE>` - Local diff / patch file to analyse
+
+
+
+## `apollia-os approvals`
+
+The decisions waiting for you (pending)
+
+**Usage:** `apollia-os approvals <COMMAND>`
+
+###### **Subcommands:**
+
+* `pending` - List every decision waiting for you: consents, paused tasks, batch items waiting for an access, questions from agents and from workflows
+* `decide` - Answer one waiting decision: the run that waits goes on with it
+
+
+
+## `apollia-os approvals pending`
+
+List every decision waiting for you: consents, paused tasks, batch items waiting for an access, questions from agents and from workflows
+
+**Usage:** `apollia-os approvals pending`
+
+
+
+## `apollia-os approvals decide`
+
+Answer one waiting decision: the run that waits goes on with it
+
+**Usage:** `apollia-os approvals decide [OPTIONS] <ID> <ANSWER>`
+
+###### **Arguments:**
+
+* `<ID>` - The `id` of the item, as `approvals pending` prints it
+* `<ANSWER>` - The answer, one of those the item takes
+
+  Possible values:
+  - `once`:
+    This call, or this item, only
+  - `always`:
+    This one and every later one of the same agent in the same family
+  - `refuse`:
+    Not this one
+  - `answer`:
+    The answer to a question, given with `--value`
+
+
+###### **Options:**
+
+* `--value <TEXT>` - The answer to a question: one of its choices, or free text
+* `--reason <TEXT>` - Why, for a refusal; handed to the run that asked
+
+
+
+## `apollia-os batch`
+
+Run an agent on every item of a source (run, status, list, accesses, pause, resume, stop, retry, export)
+
+**Usage:** `apollia-os batch <COMMAND>`
+
+###### **Subcommands:**
+
+* `run` - Run an agent on every item of a source, in the runtime
+* `status` - Show a batch: its state, its counters and each of its items
+* `list` - List the batches, newest first
+* `accesses` - List the sensitive accesses of an agent, those `run --grant` may grant
+* `pause` - Pause a running batch: no further item starts
+* `resume` - Resume a paused batch
+* `stop` - Stop a batch: running items are cancelled, pending ones never run
+* `retry` - Run the failed items of a batch, and those waiting for an access, again
+* `export` - Export the result of a batch to a file: one row per item, its input columns, its output, its status and the sources it cites
+
+
+
+## `apollia-os batch run`
+
+Run an agent on every item of a source, in the runtime
+
+**Usage:** `apollia-os batch run [OPTIONS] --source-type <SOURCE_TYPE> --source <SOURCE> <AGENT>`
+
+###### **Arguments:**
+
+* `<AGENT>` - The agent every item is run by: a stored agent without code
+
+###### **Options:**
+
+* `--source-type <SOURCE_TYPE>` - The type of source, as a reader registers it
+* `--source <SOURCE>` - What the source is opened on: a file, a folder, a connection
+* `--option <KEY=VALUE>` - An option of the source type, as `key=value`; repeatable
+* `--grant <GRANTS>` - A sensitive access granted for the duration of the batch, as `batch accesses` lists it; repeatable
+* `--concurrency <CONCURRENCY>` - How many items run at once, 1 to 16 (default 1)
+* `--max-failures <MAX_FAILURES>` - Failed items tolerated before the batch is interrupted (default 10)
+
+
+
+## `apollia-os batch status`
+
+Show a batch: its state, its counters and each of its items
+
+**Usage:** `apollia-os batch status <BATCH_ID>`
+
+###### **Arguments:**
+
+* `<BATCH_ID>` - The batch id `batch run` printed
+
+
+
+## `apollia-os batch list`
+
+List the batches, newest first
+
+**Usage:** `apollia-os batch list [OPTIONS]`
+
+###### **Options:**
+
+* `--limit <LIMIT>` - At most this many batches
+
+  Default value: `50`
+
+
+
+## `apollia-os batch accesses`
+
+List the sensitive accesses of an agent, those `run --grant` may grant
+
+**Usage:** `apollia-os batch accesses <AGENT>`
+
+###### **Arguments:**
+
+* `<AGENT>` - The agent a batch would run
+
+
+
+## `apollia-os batch pause`
+
+Pause a running batch: no further item starts
+
+**Usage:** `apollia-os batch pause <BATCH_ID>`
+
+###### **Arguments:**
+
+* `<BATCH_ID>` - The batch id
+
+
+
+## `apollia-os batch resume`
+
+Resume a paused batch
+
+**Usage:** `apollia-os batch resume <BATCH_ID>`
+
+###### **Arguments:**
+
+* `<BATCH_ID>` - The batch id
+
+
+
+## `apollia-os batch stop`
+
+Stop a batch: running items are cancelled, pending ones never run
+
+**Usage:** `apollia-os batch stop <BATCH_ID>`
+
+###### **Arguments:**
+
+* `<BATCH_ID>` - The batch id
+
+
+
+## `apollia-os batch retry`
+
+Run the failed items of a batch, and those waiting for an access, again
+
+**Usage:** `apollia-os batch retry [OPTIONS] <BATCH_ID>`
+
+###### **Arguments:**
+
+* `<BATCH_ID>` - The batch id
+
+###### **Options:**
+
+* `--grant <GRANTS>` - A sensitive access granted for the rest of the batch; repeatable
+
+
+
+## `apollia-os batch export`
+
+Export the result of a batch to a file: one row per item, its input columns, its output, its status and the sources it cites
+
+**Usage:** `apollia-os batch export [OPTIONS] --format <FORMAT> <BATCH_ID>`
+
+###### **Arguments:**
+
+* `<BATCH_ID>` - The batch id
+
+###### **Options:**
+
+* `--format <FORMAT>` - The file format
+
+  Possible values: `xlsx`, `csv`, `json`
+
+* `-o`, `--output <PATH>` - Where to write the file; `-` writes it to standard output. Default: `batch-<id>.<format>` in the current folder
+
+
+
+## `apollia-os workflow`
+
+Run the workflows of installed packages (show, run, status, logs, cancel)
+
+**Usage:** `apollia-os workflow <COMMAND>`
+
+###### **Subcommands:**
+
+* `show` - Show a workflow: what it does, its steps, and each input with its type
+* `run` - Run a workflow, in the runtime
+* `status` - Show a run: its status, its result and each of its steps
+* `logs` - The runs of a workflow, newest first
+* `cancel` - Stop a run: its step in progress is interrupted, the next ones never start
+
+
+
+## `apollia-os workflow show`
+
+Show a workflow: what it does, its steps, and each input with its type
+
+**Usage:** `apollia-os workflow show <WORKFLOW>`
+
+###### **Arguments:**
+
+* `<WORKFLOW>` - The workflow, `<package>/<workflow>`
+
+
+
+## `apollia-os workflow run`
+
+Run a workflow, in the runtime
+
+**Usage:** `apollia-os workflow run [OPTIONS] <WORKFLOW>`
+
+###### **Arguments:**
+
+* `<WORKFLOW>` - The workflow, `<package>/<workflow>`
+
+###### **Options:**
+
+* `--input <KEY=VALUE>` - An input, as `key=value`; repeatable. A value is read as the type the workflow declares for it: a date as `YYYY-MM-DD`, a file as its absolute path
+* `--wait` - Follow the run to its end; exit 3 when it fails or is stopped
+
+
+
+## `apollia-os workflow status`
+
+Show a run: its status, its result and each of its steps
+
+**Usage:** `apollia-os workflow status <RUN_ID>`
+
+###### **Arguments:**
+
+* `<RUN_ID>` - The run id `workflow run` printed
+
+
+
+## `apollia-os workflow logs`
+
+The runs of a workflow, newest first
+
+**Usage:** `apollia-os workflow logs [OPTIONS] <WORKFLOW>`
+
+###### **Arguments:**
+
+* `<WORKFLOW>` - The workflow, `<package>/<workflow>`
+
+###### **Options:**
+
+* `--limit <LIMIT>` - At most this many runs
+
+  Default value: `50`
+
+
+
+## `apollia-os workflow cancel`
+
+Stop a run: its step in progress is interrupted, the next ones never start
+
+**Usage:** `apollia-os workflow cancel [OPTIONS] <RUN_ID>`
+
+###### **Arguments:**
+
+* `<RUN_ID>` - The run id
+
+###### **Options:**
+
+* `--confirm` - Skip the interactive confirmation prompt
 
 
 
@@ -3156,6 +3836,56 @@ Evict entries older than `--max-age-days` days (default: 7)
 
 
 
+## `apollia-os service`
+
+Run the runtime as a service of your session (install, uninstall, status)
+
+**Usage:** `apollia-os service <COMMAND>`
+
+###### **Subcommands:**
+
+* `install` - Install the runtime as a service of your session and start it
+* `uninstall` - Stop the service and remove its definition
+* `status` - Report whether the service is installed and running
+
+
+
+## `apollia-os service install`
+
+Install the runtime as a service of your session and start it.
+
+macOS: a LaunchAgent; Linux: a systemd user unit; Windows: a task at logon. No administrator right is needed.
+
+**Usage:** `apollia-os service install [OPTIONS]`
+
+###### **Options:**
+
+* `--no-load` - Write the service definition without handing it to the service manager: nothing starts now, the next logon starts it
+
+
+
+## `apollia-os service uninstall`
+
+Stop the service and remove its definition.
+
+Prompts for confirmation unless `--confirm` is passed.
+
+**Usage:** `apollia-os service uninstall [OPTIONS]`
+
+###### **Options:**
+
+* `--confirm` - Skip the interactive confirmation prompt
+
+
+
+## `apollia-os service status`
+
+Report whether the service is installed and running
+
+**Usage:** `apollia-os service status`
+
+
+
 ## `apollia-os doctor`
 
 Diagnose the local Apollia environment (no runtime required).
@@ -3163,20 +3893,6 @@ Diagnose the local Apollia environment (no runtime required).
 Verifies the Apollia home directory, the config file, local SQLite databases, the Python bridge, and the runtime socket. Prints a status table and exits 0 when healthy, 1 when at least one check errors.
 
 **Usage:** `apollia-os doctor`
-
-
-
-## `apollia-os inspect`
-
-Statically inspect a Python agent file (no runtime required).
-
-Loads the agent module in isolation, introspects its manifest, and checks declared datasources, templates, secrets, and permissions without starting the runtime. Exits 0 when the inspection succeeds (warnings allowed), 1 when it fails.
-
-**Usage:** `apollia-os inspect <PATH>`
-
-###### **Arguments:**
-
-* `<PATH>` - Path to the agent `.py` file
 
 
 
@@ -3223,6 +3939,7 @@ Operates on the multi-account keyring without requiring the runtime to be starte
 * `client-id` - Manage OAuth client_id overrides in `~/.apollia/oauth-clients.toml`
 * `client-secret` - Manage OAuth client_secret overrides in `~/.apollia/oauth-clients.toml`
 * `api-key` - Manage API key overrides (Google Picker) in `~/.apollia/oauth-clients.toml`
+* `imap` - A mailbox reached over IMAP with an application password: test, add, list. Read-only: nothing in the mailbox is ever changed
 * `drive` - Manage per-account Google Drive folder preferences
 
 
@@ -3379,6 +4096,68 @@ Pass an empty string (`""`) to clear the override.
 
 
 
+## `apollia-os connector imap`
+
+A mailbox reached over IMAP with an application password: test, add, list. Read-only: nothing in the mailbox is ever changed
+
+**Usage:** `apollia-os connector imap <COMMAND>`
+
+###### **Subcommands:**
+
+* `test` - Log in to a mailbox and open its inbox read-only; store nothing
+* `add` - Verify a mailbox like `test`, then connect it: the password goes to the secret store, the rest to `~/.apollia/imap-accounts.json`
+* `list` - List the mailboxes connected on this machine
+
+
+
+## `apollia-os connector imap test`
+
+Log in to a mailbox and open its inbox read-only; store nothing.
+
+For a known provider (Gmail, iCloud, Yahoo, Orange, Free, La Poste) the address is enough; the server and port are filled in.
+
+**Usage:** `apollia-os connector imap test [OPTIONS] <EMAIL>`
+
+###### **Arguments:**
+
+* `<EMAIL>` - Address of the mailbox
+
+###### **Options:**
+
+* `--host <HOST>` - IMAP server; filled from the address for a known provider
+* `--port <PORT>` - IMAP port, implicit TLS; the provider's, else 993
+* `--username <USERNAME>` - Identifier sent at login; the address when absent
+* `--password-stdin` - Read the application password from the first line of standard input, instead of `APOLLIA_IMAP_PASSWORD`
+
+
+
+## `apollia-os connector imap add`
+
+Verify a mailbox like `test`, then connect it: the password goes to the secret store, the rest to `~/.apollia/imap-accounts.json`
+
+**Usage:** `apollia-os connector imap add [OPTIONS] <EMAIL>`
+
+###### **Arguments:**
+
+* `<EMAIL>` - Address of the mailbox
+
+###### **Options:**
+
+* `--host <HOST>` - IMAP server; filled from the address for a known provider
+* `--port <PORT>` - IMAP port, implicit TLS; the provider's, else 993
+* `--username <USERNAME>` - Identifier sent at login; the address when absent
+* `--password-stdin` - Read the application password from the first line of standard input, instead of `APOLLIA_IMAP_PASSWORD`
+
+
+
+## `apollia-os connector imap list`
+
+List the mailboxes connected on this machine
+
+**Usage:** `apollia-os connector imap list`
+
+
+
 ## `apollia-os connector drive`
 
 Manage per-account Google Drive folder preferences.
@@ -3502,6 +4281,7 @@ Edits the on-disk config without touching the runtime. The section helpers `tool
 * `validate` - Parse the config file and report any error
 * `edit` - Open the config file in `$EDITOR`
 * `show` - Print the resolved configuration (parsed struct as JSON)
+* `keys` - List every key of apollia.toml: path, type, default, reload class, whether the organization policy can fix it, and whether it is withdrawn
 * `reset` - Wipe `~/.apollia/`, an irreversible factory reset
 
 
@@ -3585,6 +4365,14 @@ Cascades through file > defaults. Environment overlay is performed at runtime st
 
 
 
+## `apollia-os config keys`
+
+List every key of apollia.toml: path, type, default, reload class, whether the organization policy can fix it, and whether it is withdrawn
+
+**Usage:** `apollia-os config keys`
+
+
+
 ## `apollia-os config reset`
 
 Wipe `~/.apollia/`, an irreversible factory reset.
@@ -3611,8 +4399,13 @@ Operates on `~/.apollia/user_memory.db` directly; no runtime required.
 
 ###### **Subcommands:**
 
-* `show` - Display every key currently stored in the global user profile
-* `set` - Insert or replace the value of `KEY`
+* `list` - List the profiles: identifier, name, and which one is the default
+* `show` - Display a profile: its fields, then the free-form entries every profile shares. Without an identifier, the default profile
+* `create` - Create a profile with empty fields; it is not the default
+* `rename` - Rename a profile
+* `set` - Write one field of a profile: `name`, `role`, `function`, `tools`, `preferences` or `free_text`. Any other key is a free-form entry, shared by every profile
+* `set-default` - Make a profile the default; the previous default stops being one
+* `delete` - Delete a profile. The default profile cannot be deleted: make another one the default first
 * `forget` - Remove the entry stored at `KEY`
 * `reset` - Reset the entire profile (deletes every entry)
 * `schema` - Print the canonical schema (the known structured fields)
@@ -3621,11 +4414,11 @@ Operates on `~/.apollia/user_memory.db` directly; no runtime required.
 
 
 
-## `apollia-os profile show`
+## `apollia-os profile list`
 
-Display every key currently stored in the global user profile
+List the profiles: identifier, name, and which one is the default
 
-**Usage:** `apollia-os profile show [OPTIONS]`
+**Usage:** `apollia-os profile list [OPTIONS]`
 
 ###### **Options:**
 
@@ -3633,19 +4426,102 @@ Display every key currently stored in the global user profile
 
 
 
-## `apollia-os profile set`
+## `apollia-os profile show`
 
-Insert or replace the value of `KEY`
+Display a profile: its fields, then the free-form entries every profile shares. Without an identifier, the default profile
 
-**Usage:** `apollia-os profile set [OPTIONS] <KEY> <VALUE>`
+**Usage:** `apollia-os profile show [OPTIONS] [ID]`
 
 ###### **Arguments:**
 
-* `<KEY>` - Profile key (e.g. `name`, `email`, `preferences.tone`)
-* `<VALUE>` - Value to store
+* `<ID>` - Profile identifier, or `default` (the default when omitted)
 
 ###### **Options:**
 
+* `--db <PATH>` - Optional override for the user_memory.db path
+
+
+
+## `apollia-os profile create`
+
+Create a profile with empty fields; it is not the default
+
+**Usage:** `apollia-os profile create [OPTIONS] <NAME>`
+
+###### **Arguments:**
+
+* `<NAME>` - Display name of the profile (e.g. `Formateur`)
+
+###### **Options:**
+
+* `--db <PATH>`
+
+
+
+## `apollia-os profile rename`
+
+Rename a profile
+
+**Usage:** `apollia-os profile rename [OPTIONS] <ID> <NAME>`
+
+###### **Arguments:**
+
+* `<ID>` - Profile identifier, or `default`
+* `<NAME>` - New display name
+
+###### **Options:**
+
+* `--db <PATH>`
+
+
+
+## `apollia-os profile set`
+
+Write one field of a profile: `name`, `role`, `function`, `tools`, `preferences` or `free_text`. Any other key is a free-form entry, shared by every profile
+
+**Usage:** `apollia-os profile set [OPTIONS] <ID> <FIELD> <VALUE>`
+
+###### **Arguments:**
+
+* `<ID>` - Profile identifier, or `default`
+* `<FIELD>` - Field to write (e.g. `role`)
+* `<VALUE>` - Value to store; an empty value empties a field
+
+###### **Options:**
+
+* `--db <PATH>`
+
+
+
+## `apollia-os profile set-default`
+
+Make a profile the default; the previous default stops being one
+
+**Usage:** `apollia-os profile set-default [OPTIONS] <ID>`
+
+###### **Arguments:**
+
+* `<ID>` - Profile identifier
+
+###### **Options:**
+
+* `--db <PATH>`
+
+
+
+## `apollia-os profile delete`
+
+Delete a profile. The default profile cannot be deleted: make another one the default first
+
+**Usage:** `apollia-os profile delete [OPTIONS] <ID>`
+
+###### **Arguments:**
+
+* `<ID>` - Profile identifier
+
+###### **Options:**
+
+* `--confirm` - Skip the interactive confirmation prompt
 * `--db <PATH>`
 
 
@@ -3719,250 +4595,6 @@ Import entries from a JSON file produced by `export`
 
 
 
-## `apollia-os project`
-
-Project management (list, create, show, update, delete, agents, templates).
-
-Operates locally on `~/.apollia/projects.db`; the runtime does not need to be running.
-
-**Usage:** `apollia-os project <COMMAND>`
-
-###### **Subcommands:**
-
-* `list` - List every registered project (alphabetical)
-* `create` - Create a new project and print its id
-* `show` - Print the full detail of a project (documents, providers, agents)
-* `update` - Update one or more mutable fields on an existing project
-* `delete` - Delete a project and cascade its documents/providers
-* `agents` - List the agents linked to a project
-* `templates` - List or seed the available project templates
-* `link` - Link (or unlink) a chat session to a project
-* `chats` - List chat sessions linked to a project
-
-
-
-## `apollia-os project list`
-
-List every registered project (alphabetical)
-
-**Usage:** `apollia-os project list [OPTIONS]`
-
-###### **Options:**
-
-* `--db <PATH>`
-
-
-
-## `apollia-os project create`
-
-Create a new project and print its id
-
-**Usage:** `apollia-os project create [OPTIONS] <NAME>`
-
-###### **Arguments:**
-
-* `<NAME>` - Project display name
-
-###### **Options:**
-
-* `--description <DESCRIPTION>` - Optional one-line description
-* `--instructions <INSTRUCTIONS>` - Optional initial instructions (Markdown)
-* `--workspace <DIR>` - Optional workspace directory used by context providers
-* `--db <PATH>`
-
-
-
-## `apollia-os project show`
-
-Print the full detail of a project (documents, providers, agents)
-
-**Usage:** `apollia-os project show [OPTIONS] <ID>`
-
-###### **Arguments:**
-
-* `<ID>` - Project id (UUID)
-
-###### **Options:**
-
-* `--db <PATH>`
-
-
-
-## `apollia-os project update`
-
-Update one or more mutable fields on an existing project
-
-**Usage:** `apollia-os project update [OPTIONS] <ID>`
-
-###### **Arguments:**
-
-* `<ID>` - Project id
-
-###### **Options:**
-
-* `--name <NAME>`
-* `--description <DESCRIPTION>`
-* `--instructions <INSTRUCTIONS>`
-* `--workspace <DIR>`
-* `--db <PATH>`
-
-
-
-## `apollia-os project delete`
-
-Delete a project and cascade its documents/providers
-
-**Usage:** `apollia-os project delete [OPTIONS] <ID>`
-
-###### **Arguments:**
-
-* `<ID>` - Project id
-
-###### **Options:**
-
-* `--confirm` - Skip the confirmation prompt
-* `--db <PATH>`
-
-
-
-## `apollia-os project agents`
-
-List the agents linked to a project
-
-**Usage:** `apollia-os project agents <COMMAND>`
-
-###### **Subcommands:**
-
-* `list` - List agent names linked to a project
-* `add` - Link an agent to a project
-* `remove` - Unlink an agent from a project
-
-
-
-## `apollia-os project agents list`
-
-List agent names linked to a project
-
-**Usage:** `apollia-os project agents list [OPTIONS] <PROJECT>`
-
-###### **Arguments:**
-
-* `<PROJECT>` - Project id
-
-###### **Options:**
-
-* `--db <PATH>`
-
-
-
-## `apollia-os project agents add`
-
-Link an agent to a project
-
-**Usage:** `apollia-os project agents add [OPTIONS] <PROJECT> <AGENT>`
-
-###### **Arguments:**
-
-* `<PROJECT>` - Project id
-* `<AGENT>` - Agent name
-
-###### **Options:**
-
-* `--db <PATH>`
-
-
-
-## `apollia-os project agents remove`
-
-Unlink an agent from a project
-
-**Usage:** `apollia-os project agents remove [OPTIONS] <PROJECT> <AGENT>`
-
-###### **Arguments:**
-
-* `<PROJECT>` - Project id
-* `<AGENT>` - Agent name
-
-###### **Options:**
-
-* `--confirm` - Skip the interactive confirmation prompt
-* `--db <PATH>`
-
-
-
-## `apollia-os project templates`
-
-List or seed the available project templates
-
-**Usage:** `apollia-os project templates <COMMAND>`
-
-###### **Subcommands:**
-
-* `list` - List the available templates (builtin + custom)
-* `seed-builtins` - Re-seed the builtin templates into the database
-
-
-
-## `apollia-os project templates list`
-
-List the available templates (builtin + custom)
-
-**Usage:** `apollia-os project templates list [OPTIONS]`
-
-###### **Options:**
-
-* `--db <PATH>`
-
-
-
-## `apollia-os project templates seed-builtins`
-
-Re-seed the builtin templates into the database
-
-**Usage:** `apollia-os project templates seed-builtins [OPTIONS]`
-
-###### **Options:**
-
-* `--db <PATH>`
-
-
-
-## `apollia-os project link`
-
-Link (or unlink) a chat session to a project.
-
-Writes `chat_sessions.project_id` directly via `apollia_runtime::chat::ChatSessionRepository` so the runtime does not need to be running. Pass `--unlink` to clear the session's project link instead of setting it; the project_id positional is then ignored.
-
-**Usage:** `apollia-os project link [OPTIONS] --session <ID> <PROJECT_ID>`
-
-###### **Arguments:**
-
-* `<PROJECT_ID>` - Project id (UUID returned by `project list`)
-
-###### **Options:**
-
-* `--session <ID>` - Chat session id (returned by `chat --list`)
-* `--unlink` - Clear the session's project_id instead of setting it
-* `--chat-db <PATH>` - Override the chat database path (default: `~/.apollia/chat.db`)
-
-
-
-## `apollia-os project chats`
-
-List chat sessions linked to a project
-
-**Usage:** `apollia-os project chats [OPTIONS] <PROJECT_ID>`
-
-###### **Arguments:**
-
-* `<PROJECT_ID>` - Project id (UUID)
-
-###### **Options:**
-
-* `--chat-db <PATH>` - Override the chat database path
-
-
-
 ## `apollia-os trace`
 
 Print the event-sourced trace of a task
@@ -3986,7 +4618,7 @@ Print the event-sourced trace of a task
 
 ## `apollia-os digest`
 
-Aggregated activity overview (tasks + LLM costs + audit stats)
+Aggregated activity overview (tasks + LLM costs)
 
 **Usage:** `apollia-os digest [OPTIONS]`
 

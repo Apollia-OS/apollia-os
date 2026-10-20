@@ -6,6 +6,29 @@ use super::super::*;
 use tracing::Instrument;
 
 impl BuiltInChatAgent {
+    /// Open the stream of an escalated call on `backend`, measured and
+    /// published as the router publishes its own.
+    async fn stream_escalated(
+        backend: &Arc<dyn apollia_llm::CompletionModel>,
+        request: CompletionRequest,
+        bus: &EventBusSender,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<StreamChunk, apollia_llm::LlmError>> + Send>,
+        >,
+        apollia_llm::LlmError,
+    > {
+        let call = apollia_llm::ObservedCall {
+            backend: backend.backend_name().to_owned(),
+            model: backend.model_id().to_owned(),
+            context: request.call_context.clone(),
+            bus: Some(bus.clone()),
+            started: std::time::Instant::now(),
+        };
+        let stream = backend.stream(request).await?;
+        Ok(apollia_llm::observe_stream(stream, call))
+    }
+
     /// Run the ReAct loop to completion and return the terminal response.
     ///
     /// Drives the stream/tool-call cycle until the LLM produces a final text
@@ -36,18 +59,33 @@ impl BuiltInChatAgent {
         // Real context window of the active model, in tokens, when it reports one.
         // `None` (e.g. cloud backend or before the local model loads) leaves the
         // context gauge in an "unknown" state rather than showing a wrong value.
-        let context_window_tokens = self
-            .llm_router
-            .context_window_tokens()
-            .and_then(|w| u32::try_from(w).ok());
+        // The backend the agent prefers when the router reaches it; the
+        // default otherwise, and a preference the router lacks is said on the
+        // bus rather than failing the turn.
+        let turn_backend = self.preferred_backend.as_deref().and_then(|name| {
+            self.llm_router.resolve_agent_model(
+                &self.agent_id,
+                Some(name),
+                None,
+                Some(&self.event_bus),
+            )
+        });
+        let context_window_tokens = match turn_backend.as_deref() {
+            Some(name) => self
+                .llm_router
+                .get(Some(name))
+                .and_then(|backend| backend.context_window()),
+            None => self.llm_router.context_window_tokens(),
+        }
+        .and_then(|w| u32::try_from(w).ok());
         // Prompt-token count of the most recent LLM call. Overwritten each turn so
         // it reflects the current context occupancy (not a cumulative sum) for the
         // context gauge.
         let mut last_prompt_tokens: u32 = 0;
         let mut acc = ReactAccumulators {
             all_tool_calls: Vec::new(),
-            newly_authorized: Vec::new(),
             authorized: authorized_tools.clone(),
+            llm_calls: Vec::new(),
         };
         let obs = ObservabilityConfig::default();
         // Each entry is (reasoning text, number of tool calls already made when
@@ -70,6 +108,12 @@ impl BuiltInChatAgent {
         // moved into the estimator.
         #[allow(clippy::needless_borrow)]
         let tool_reserve = apollia_llm::estimate_tool_specs_tokens(&tool_specs);
+        // Grows during the loop: a tool `tool_search` names is declared from the
+        // next iteration on, since the model can only call declared tools.
+        let mut specs: Vec<ToolSpec> = tool_specs.to_vec();
+        // The request settings of the turn: the conversation, its preset or
+        // the agent's, the package, the model.
+        let request_settings = self.turn_request_settings(turn_backend.as_deref());
 
         loop {
             // Cooperative pause checkpoint: a pause request cancels the token; we
@@ -120,7 +164,7 @@ impl BuiltInChatAgent {
             // injected when the list is empty).
             let was_compacted = self
                 .maybe_compact_context(llm_messages, session_id, tool_reserve)
-                .await;
+                .await?;
             if was_compacted {
                 if let Some(todo) = self.todo.as_ref() {
                     Self::inject_todo_after_compaction(todo, session_id, llm_messages).await;
@@ -135,12 +179,20 @@ impl BuiltInChatAgent {
                 }
             }
 
-            let request = CompletionRequest {
+            promote_discovered_tools(&mut specs, &acc.all_tool_calls);
+            let mut request = CompletionRequest {
                 messages: llm_messages.clone(),
-                tools: tool_specs.to_vec(),
-                temperature: self.turn_temperature(!tool_specs.is_empty()),
+                tools: specs.clone(),
+                call_context: self
+                    .turn_id
+                    .as_ref()
+                    .map(|turn_id| apollia_llm::CallContext {
+                        session_id: session_id.to_string(),
+                        turn_id: turn_id.clone(),
+                    }),
                 ..Default::default()
             };
+            self.apply_request_settings(&request_settings, &mut request);
 
             // Opens the iteration this request belongs to. Everything the
             // stream consumer and the tool dispatcher record from here on is
@@ -244,7 +296,7 @@ impl BuiltInChatAgent {
                             },
                         ));
                     }
-                    r = backend.stream(request) => r,
+                    r = Self::stream_escalated(&backend, request, &self.event_bus) => r,
                 }
             } else {
                 tokio::select! {
@@ -267,7 +319,7 @@ impl BuiltInChatAgent {
                             },
                         ));
                     }
-                    r = self.llm_router.stream_with_observability(None, request, &obs) => r,
+                    r = self.llm_router.stream_with_observability(turn_backend.as_deref(), request, Some(&self.event_bus), &obs) => r,
                 }
             };
             let stream = stream_result.map_err(|e| ChatError::InternalError(e.to_string()))?;
@@ -275,6 +327,7 @@ impl BuiltInChatAgent {
             // Consume stream, emit ChatToken per token, accumulate text
             let mut accumulated_text = String::new();
             let mut chunk_usage = TokenUsage::default();
+            let mut meter = apollia_llm::CallMeter::new(dispatched_at);
             let stream_result = self
                 .consume_stream(
                     stream,
@@ -283,12 +336,18 @@ impl BuiltInChatAgent {
                         message_id,
                         cancel: &ids.cancel,
                         dispatched_at,
+                        meter: &mut meter,
                     },
                     &mut accumulated_text,
                     &mut chunk_usage,
                 )
                 .instrument(iteration_span.clone())
                 .await;
+            acc.llm_calls.push(if ids.cancel.is_cancelled() {
+                meter.cancelled()
+            } else {
+                meter.finished()
+            });
             // Fold this call's usage into the exchange total, and record its
             // prompt size as the current context occupancy.
             total_usage.merge(&chunk_usage);
@@ -352,12 +411,14 @@ impl BuiltInChatAgent {
             };
             let _ = self.event_bus.send(RuntimeEvent::LlmResponseCaptured {
                 run_id: run_id.clone(),
-                backend: self.llm_router.default_name().to_string(),
-                // The turn streams through the default backend (`None` above),
-                // so its model is the one that answered.
+                backend: turn_backend
+                    .clone()
+                    .unwrap_or_else(|| self.llm_router.default_name().to_string()),
+                // The turn streams through `turn_backend` (the default when
+                // `None`), so its model is the one that answered.
                 model: self
                     .llm_router
-                    .get(None)
+                    .get(turn_backend.as_deref())
                     .map(|b| b.model_id().to_owned())
                     .unwrap_or_default(),
                 content: accumulated_text.clone(),
@@ -404,7 +465,21 @@ impl BuiltInChatAgent {
                         },
                     ));
                 }
-                Ok(tool_calls) => {
+                Ok(mut tool_calls) => {
+                    // A local model may write a nested argument as the text of
+                    // the value. It is decoded where the schema of the tool
+                    // asks for a structure, before anything reads the call.
+                    let decoded = apollia_llm::tool_arguments::decode_stringified_arguments(
+                        &mut tool_calls,
+                        &specs,
+                    );
+                    if decoded > 0 {
+                        tracing::info!(
+                            session_id = %ids.session_id,
+                            decoded,
+                            "chat.tool_call.arguments.decoded"
+                        );
+                    }
                     // Index of the first record produced by this turn, so the
                     // plan-phase advance inspects only the calls just run.
                     let turn_start = acc.all_tool_calls.len();

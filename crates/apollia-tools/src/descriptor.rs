@@ -24,9 +24,21 @@ pub struct ToolDescriptor {
     pub sandbox_profile: SandboxProfile,
     /// Arbitrary tags for filtering and discovery.
     pub tags: Vec<String>,
-    /// Must be `true` when `sandbox_profile` is `SandboxProfile::Full`.
-    /// Forces an explicit opt-in to unrestricted execution.
-    pub dangerous: bool,
+    /// What the tool does, in one of the action families shared by native
+    /// tools, connectors and MCP tools. Computed when the descriptor is built,
+    /// never by the model. Absent from a payload, it reads as
+    /// [`ActionFamily::Unclassified`], which is treated as sensitive.
+    #[serde(default)]
+    pub family: ActionFamily,
+    /// Where [`Self::family`] comes from.
+    #[serde(default)]
+    pub family_source: FamilySource,
+    /// Name of the argument that says what a call acts on: a path, a
+    /// recipient, an address. Never an argument that carries content. `None`
+    /// for a tool with no such argument, and for every MCP tool, whose
+    /// arguments nobody has designated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_arg: Option<String>,
     /// If `true`, this tool does not modify any state and may be executed concurrently
     /// alongside other read-only tools. Defaults to `false`: if this flag is omitted,
     /// the tool is treated as mutating and never parallelised.
@@ -52,6 +64,81 @@ pub struct ToolDescriptor {
     /// resolving the approval. Defaults to `false`.
     #[serde(default)]
     pub reject_reason_required: bool,
+}
+
+/// The action family of a tool: what it does to the user's data or machine.
+///
+/// The five families are the vocabulary the agent sheet and the governance
+/// layer share. `Unclassified` is the state of a tool nobody has classified
+/// yet and is treated as sensitive; `Exempt` is reserved to a tool that acts on
+/// nothing but the conversation itself (`ask_user`) or on the agent's own
+/// memory (`memory_search`, `memory_write`), which the person opens by checking
+/// Memory on the sheet of the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionFamily {
+    /// Reads data the user explicitly granted, or public data.
+    Read,
+    /// Reads personal data held by a connected account (mail, calendar, files).
+    ReadPersonal,
+    /// Creates, modifies or deletes data.
+    WriteOrDelete,
+    /// Sends something outside the machine (a message, a request).
+    SendExternal,
+    /// Executes code the model wrote.
+    ExecuteCode,
+    /// Not classified. Treated as sensitive.
+    #[default]
+    Unclassified,
+    /// Outside the families: acts on the conversation only.
+    Exempt,
+}
+
+impl ActionFamily {
+    /// The name the family carries on the wire and in the journal.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActionFamily::Read => "read",
+            ActionFamily::ReadPersonal => "read_personal",
+            ActionFamily::WriteOrDelete => "write_or_delete",
+            ActionFamily::SendExternal => "send_external",
+            ActionFamily::ExecuteCode => "execute_code",
+            ActionFamily::Unclassified => "unclassified",
+            ActionFamily::Exempt => "exempt",
+        }
+    }
+
+    /// The family a standing consent covers for this tool, `None` for a tool
+    /// that is unclassified or exempt, which no standing consent can cover.
+    pub fn consent_family(self) -> Option<apollia_permissions::ConsentFamily> {
+        use apollia_permissions::ConsentFamily;
+        match self {
+            ActionFamily::Read => Some(ConsentFamily::Read),
+            ActionFamily::ReadPersonal => Some(ConsentFamily::ReadPersonal),
+            ActionFamily::WriteOrDelete => Some(ConsentFamily::WriteOrDelete),
+            ActionFamily::SendExternal => Some(ConsentFamily::SendExternal),
+            ActionFamily::ExecuteCode => Some(ConsentFamily::ExecuteCode),
+            ActionFamily::Unclassified | ActionFamily::Exempt => None,
+        }
+    }
+}
+
+/// Origin of a descriptor's [`ActionFamily`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FamilySource {
+    /// Deduced from the hints the tool's server declares.
+    Server,
+    /// Taken from the classification of the curated selection.
+    Selection,
+    /// No source: the family is `Unclassified`.
+    #[default]
+    #[serde(rename = "none")]
+    Unsourced,
+    /// Fixed in Apollia's own code (native tools, native connectors).
+    Builtin,
+    /// Declared by the package that ships the tool, in its `apollia.toml`.
+    Package,
 }
 
 /// Coarse-grained risk classification surfaced in approval UIs.
@@ -85,6 +172,10 @@ impl ApprovalRiskLevel {
     }
 }
 
+/// Longest target kept, in characters. A target names a place; anything longer
+/// is cut rather than stored whole.
+pub const MAX_TARGET_CHARS: usize = 200;
+
 /// Upper bound of the [`ToolDescriptor::risk_score`] scale.
 ///
 /// The scale is 0 to 10 and [`ApprovalRiskLevel::from_risk_score`] reads it that
@@ -101,8 +192,8 @@ impl ToolDescriptor {
     ///
     /// Returns `ToolDescriptorError::EmptyName` if `name` is empty.
     /// Returns `ToolDescriptorError::InvalidInputSchema` if `input_schema` is `Null`.
-    /// Returns `ToolDescriptorError::FullProfileRequiresDangerous` if `sandbox_profile`
-    /// is `Full` but `dangerous` is `false`.
+    /// Returns `ToolDescriptorError::FullProfileRequiresExecuteCode` if
+    /// `sandbox_profile` is `Full` but `family` is not [`ActionFamily::ExecuteCode`].
     /// Returns `ToolDescriptorError::RiskScoreOutOfRange` if `risk_score` is above
     /// [`MAX_RISK_SCORE`].
     pub fn validate(&self) -> Result<(), ToolDescriptorError> {
@@ -114,8 +205,10 @@ impl ToolDescriptor {
             return Err(ToolDescriptorError::InvalidInputSchema);
         }
 
-        if self.sandbox_profile.requires_dangerous_flag() && !self.dangerous {
-            return Err(ToolDescriptorError::FullProfileRequiresDangerous);
+        if self.sandbox_profile.requires_dangerous_flag()
+            && self.family != ActionFamily::ExecuteCode
+        {
+            return Err(ToolDescriptorError::FullProfileRequiresExecuteCode);
         }
 
         if self.risk_score > MAX_RISK_SCORE {
@@ -125,6 +218,42 @@ impl ToolDescriptor {
         }
 
         Ok(())
+    }
+
+    /// What a call with `args` acts on, read from the argument
+    /// [`Self::target_arg`] names and from no other.
+    ///
+    /// An address is reduced to its host, so a query string never travels; a
+    /// list of recipients is joined; any other value is taken as text. `None`
+    /// when the tool designates no argument, or when the call does not carry it.
+    pub fn call_target(&self, args: &serde_json::Value) -> Option<String> {
+        let value = args.get(self.target_arg.as_deref()?)?;
+        let text = match value {
+            serde_json::Value::String(text) => text.trim().to_owned(),
+            serde_json::Value::Array(items) => items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => return None,
+        };
+        if text.is_empty() {
+            return None;
+        }
+        // Only a value written as `scheme://` is read as an address: a Windows
+        // path such as `C:\dir` parses as one too, and is a path.
+        let address = text
+            .contains("://")
+            .then(|| url::Url::parse(&text).ok())
+            .flatten();
+        let target = match address {
+            Some(address) => match address.host_str() {
+                Some(host) => host.to_owned(),
+                None => address.path().to_owned(),
+            },
+            None => text,
+        };
+        Some(target.chars().take(MAX_TARGET_CHARS).collect())
     }
 }
 
@@ -142,6 +271,14 @@ pub enum ToolKind {
         transport: McpTransport,
         /// Name of the specific tool exposed by that server.
         tool_name: String,
+    },
+    /// Python tool shipped by an installed package, `pkg:<package>/<tool>`.
+    /// Its module is loaded on the first call, never at registration.
+    Package {
+        /// Name of the package that ships the tool.
+        package: String,
+        /// Python module, relative to the package root (`tools/invoices.py`).
+        module: String,
     },
     /// Python tool registered by the agent author at runtime.
     Custom {
@@ -174,9 +311,9 @@ pub enum ToolDescriptorError {
     /// `version` does not conform to expected format.
     #[error("invalid version string: {0}")]
     InvalidVersion(String),
-    /// `sandbox_profile` is `Full` but `dangerous` is `false`.
-    #[error("SandboxProfile::Full requires dangerous=true")]
-    FullProfileRequiresDangerous,
+    /// `sandbox_profile` is `Full` but `family` is not `ExecuteCode`.
+    #[error("SandboxProfile::Full requires the execute_code family")]
+    FullProfileRequiresExecuteCode,
     /// `input_schema` is `serde_json::Value::Null`.
     #[error("input_schema must not be null")]
     InvalidInputSchema,
@@ -204,7 +341,9 @@ mod tests {
             output_schema: None,
             sandbox_profile: SandboxProfile::FileSystem,
             tags: vec!["shell".to_string()],
-            dangerous: false,
+            family: ActionFamily::ExecuteCode,
+            family_source: FamilySource::Builtin,
+            target_arg: None,
             is_read_only: false,
             risk_score: 0,
             approval_risk_level: None,
@@ -247,17 +386,17 @@ mod tests {
     }
 
     #[test]
-    fn test_full_profile_without_dangerous_flag_fails_validation() {
-        // GIVEN
+    fn test_full_profile_outside_execute_code_fails_validation() {
+        // GIVEN a Full-profile descriptor whose family is not execute_code
         let mut descriptor = make_valid_descriptor();
         descriptor.sandbox_profile = SandboxProfile::Full;
-        descriptor.dangerous = false;
+        descriptor.family = ActionFamily::WriteOrDelete;
         // WHEN
         let result = descriptor.validate();
         // THEN
         assert!(matches!(
             result,
-            Err(ToolDescriptorError::FullProfileRequiresDangerous)
+            Err(ToolDescriptorError::FullProfileRequiresExecuteCode)
         ));
     }
 
@@ -294,11 +433,11 @@ mod tests {
     }
 
     #[test]
-    fn test_full_profile_with_dangerous_flag_passes_validation() {
-        // GIVEN: Full profile is allowed when dangerous=true
+    fn test_full_profile_with_execute_code_family_passes_validation() {
+        // GIVEN: Full profile is allowed for the execute_code family
         let mut descriptor = make_valid_descriptor();
         descriptor.sandbox_profile = SandboxProfile::Full;
-        descriptor.dangerous = true;
+        descriptor.family = ActionFamily::ExecuteCode;
         // WHEN / THEN
         assert!(descriptor.validate().is_ok());
     }
@@ -359,7 +498,7 @@ mod tests {
             "kind": {"type": "native"},
             "input_schema": {"type": "object"},
             "sandbox_profile": "read_only",
-            "tags": [], "dangerous": false
+            "tags": []
         }"#;
         // WHEN
         let d: ToolDescriptor = serde_json::from_str(json).expect("deserialisation failed");
@@ -369,6 +508,143 @@ mod tests {
         assert!(d.approval_risk_level.is_none());
         assert!(d.impact_description.is_none());
         assert!(!d.reject_reason_required);
+        assert_eq!(d.family, ActionFamily::Unclassified);
+        assert_eq!(d.family_source, FamilySource::Unsourced);
+        assert_eq!(d.target_arg, None);
+    }
+
+    #[test]
+    fn a_call_target_is_the_designated_argument_and_nothing_else() {
+        // GIVEN a tool that designates `path`, called with a path and a content
+        let mut d = make_valid_descriptor();
+        d.target_arg = Some("path".to_string());
+        let args = json!({ "path": "/home/u/notes.md", "content": "the whole letter" });
+        // WHEN the target of the call is read
+        let target = d.call_target(&args);
+        // THEN it is the path, and the content is nowhere in it
+        assert_eq!(target.as_deref(), Some("/home/u/notes.md"));
+    }
+
+    #[test]
+    fn an_address_is_reduced_to_its_host() {
+        // GIVEN a tool that designates `url`, called with a query string
+        let mut d = make_valid_descriptor();
+        d.target_arg = Some("url".to_string());
+        let args = json!({ "url": "https://example.org/search?q=my+illness&token=abc" });
+        // WHEN the target of the call is read
+        let target = d.call_target(&args);
+        // THEN only the host is kept
+        assert_eq!(target.as_deref(), Some("example.org"));
+    }
+
+    #[test]
+    fn recipients_are_joined_and_a_long_target_is_cut() {
+        // GIVEN a tool that designates `to`
+        let mut d = make_valid_descriptor();
+        d.target_arg = Some("to".to_string());
+        // WHEN it is called with a list of recipients, then with a very long one
+        let joined = d.call_target(&json!({ "to": ["a@example.org", "b@example.org"] }));
+        let long = d.call_target(&json!({ "to": "x".repeat(MAX_TARGET_CHARS + 50) }));
+        // THEN the list reads as one line and the long value is cut
+        assert_eq!(joined.as_deref(), Some("a@example.org, b@example.org"));
+        assert_eq!(long.map(|t| t.chars().count()), Some(MAX_TARGET_CHARS));
+    }
+
+    #[test]
+    fn a_tool_without_a_designated_argument_has_no_target() {
+        // GIVEN a tool that designates nothing, and one whose argument is absent
+        let plain = make_valid_descriptor();
+        let mut designated = make_valid_descriptor();
+        designated.target_arg = Some("path".to_string());
+        // WHEN their targets are read
+        let none = plain.call_target(&json!({ "path": "/tmp/a" }));
+        let absent = designated.call_target(&json!({ "command": "ls" }));
+        // THEN neither has one
+        assert_eq!(none, None);
+        assert_eq!(absent, None);
+    }
+
+    #[test]
+    fn consent_family_keeps_the_wire_name_and_drops_the_unconsentable() {
+        // GIVEN every action family
+        let families = [
+            ActionFamily::Read,
+            ActionFamily::ReadPersonal,
+            ActionFamily::WriteOrDelete,
+            ActionFamily::SendExternal,
+            ActionFamily::ExecuteCode,
+            ActionFamily::Unclassified,
+            ActionFamily::Exempt,
+        ];
+        for family in families {
+            // WHEN it is turned into the family a standing consent covers
+            let consent = family.consent_family();
+            // THEN the five families keep their wire name, and the
+            // unclassified and exempt ones have none
+            let wire = serde_json::to_value(family).expect("serialise");
+            match family {
+                ActionFamily::Unclassified | ActionFamily::Exempt => assert!(consent.is_none()),
+                _ => assert_eq!(consent.map(|c| c.as_str()), wire.as_str()),
+            }
+        }
+    }
+
+    #[test]
+    fn every_action_family_round_trips_through_serde() {
+        // GIVEN every family with the wire identifier it must carry
+        let cases = [
+            (ActionFamily::Read, "read"),
+            (ActionFamily::ReadPersonal, "read_personal"),
+            (ActionFamily::WriteOrDelete, "write_or_delete"),
+            (ActionFamily::SendExternal, "send_external"),
+            (ActionFamily::ExecuteCode, "execute_code"),
+            (ActionFamily::Unclassified, "unclassified"),
+            (ActionFamily::Exempt, "exempt"),
+        ];
+        for (family, wire) in cases {
+            // WHEN it is serialised then read back
+            let json = serde_json::to_value(family).expect("serialisation failed");
+            let back: ActionFamily = serde_json::from_value(json.clone()).expect("read back");
+            // THEN the wire identifier is the documented one and nothing is lost
+            assert_eq!(json, wire);
+            assert_eq!(back, family);
+            assert_eq!(family.as_str(), wire);
+        }
+    }
+
+    #[test]
+    fn every_family_source_round_trips_through_serde() {
+        // GIVEN every source with the wire identifier it must carry
+        let cases = [
+            (FamilySource::Server, "server"),
+            (FamilySource::Selection, "selection"),
+            (FamilySource::Unsourced, "none"),
+            (FamilySource::Builtin, "builtin"),
+        ];
+        for (source, wire) in cases {
+            // WHEN it is serialised then read back
+            let json = serde_json::to_value(source).expect("serialisation failed");
+            let back: FamilySource = serde_json::from_value(json.clone()).expect("read back");
+            // THEN the wire identifier is the documented one and nothing is lost
+            assert_eq!(json, wire);
+            assert_eq!(back, source);
+        }
+    }
+
+    #[test]
+    fn a_descriptor_carries_its_family_and_source_on_the_wire() {
+        // GIVEN a descriptor classified as sending outside, from the selection
+        let mut d = make_valid_descriptor();
+        d.family = ActionFamily::SendExternal;
+        d.family_source = FamilySource::Selection;
+        // WHEN it is serialised then read back
+        let json = serde_json::to_value(&d).expect("serialisation failed");
+        let back: ToolDescriptor = serde_json::from_value(json.clone()).expect("read back");
+        // THEN both fields travel, under their documented names
+        assert_eq!(json["family"], "send_external");
+        assert_eq!(json["family_source"], "selection");
+        assert_eq!(back.family, ActionFamily::SendExternal);
+        assert_eq!(back.family_source, FamilySource::Selection);
     }
 
     #[test]

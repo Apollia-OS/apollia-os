@@ -1,5 +1,6 @@
 use apollia_connectors::google::operations as google_operations;
-use apollia_tools::descriptor::ApprovalRiskLevel;
+use apollia_connectors::operation::ApprovalPolicy;
+use apollia_tools::descriptor::{ActionFamily, ApprovalRiskLevel, FamilySource};
 
 use super::*;
 
@@ -85,30 +86,42 @@ fn delete_event_requires_confirm_phrase() {
     assert_eq!(d.approval_risk_level, Some(ApprovalRiskLevel::Critical));
 }
 
+fn accounts() -> [apollia_auth::AccountId; 1] {
+    [apollia_auth::AccountId::new("ada@example.com")]
+}
+
 #[test]
 fn google_executors_come_from_the_runtime_not_the_interface() {
     // GIVEN a process with no desktop: this test binary links apollia-runtime
     // and nothing of apollia-desktop, and no Tauri context exists
-    // WHEN the Google executors are built
-    let executors = build_google_executors();
-    // THEN the set is non-empty and every executor answers to its own op id
+    // WHEN the Google executors of a connected account are built
+    let executors = build_google_executors(&accounts());
+    // THEN the set is non-empty and every executor answers to the tool of
+    // its account
     assert!(
         !executors.is_empty(),
         "the runtime must provide the Google executors on its own"
     );
     let names: Vec<&str> = executors.iter().map(|e| e.name()).collect();
     for op in ["gmail.send", "gcal.list_events", "gdrive.workspace_write"] {
-        assert!(names.contains(&op), "`{op}` has no executor in the runtime");
+        let name = format!("conn:google:ada@example.com/{op}");
+        assert!(
+            names.contains(&name.as_str()),
+            "`{name}` has no executor in the runtime"
+        );
     }
 }
 
 #[test]
 fn every_google_descriptor_has_a_runtime_executor() {
-    // GIVEN the descriptors registered at supervisor boot, which is what an
+    // GIVEN the descriptors a connected account publishes, which is what an
     // installed agent sees in its tool catalogue
-    let descriptors = google_tool_descriptors();
+    let descriptors = connection_tools::account_descriptors(
+        apollia_auth::ConnectorProvider::Google,
+        "ada@example.com",
+    );
     // WHEN they are crossed with the executors the runtime builds
-    let executors = build_google_executors();
+    let executors = build_google_executors(&accounts());
     let names: Vec<&str> = executors.iter().map(|e| e.name()).collect();
     // THEN no descriptor is advertised without something able to run it: that
     // gap is what answered `UnknownTool` outside the desktop
@@ -124,20 +137,234 @@ fn every_google_descriptor_has_a_runtime_executor() {
 }
 
 #[test]
+fn every_microsoft_descriptor_has_a_runtime_executor() {
+    // GIVEN the descriptors a connected Microsoft account publishes
+    let descriptors = connection_tools::account_descriptors(
+        apollia_auth::ConnectorProvider::Microsoft,
+        "ada@example.com",
+    );
+    // WHEN they are crossed with the executors the runtime builds
+    let executors = build_microsoft_executors(&accounts());
+    let names: Vec<&str> = executors.iter().map(|e| e.name()).collect();
+    // THEN each descriptor has an executor, and nothing more is built
+    assert_eq!(names.len(), descriptors.len());
+    for d in &descriptors {
+        assert!(names.contains(&d.name.as_str()), "{}", d.name);
+    }
+}
+
+#[test]
 fn a_google_call_reaches_an_executor_with_no_desktop() {
     // GIVEN a dispatcher holding only what the runtime supplies, which is the
     // shape `apollia-os start` builds on a machine where no interface runs
-    let dispatcher = apollia_tools::executor::ToolDispatcher::new(build_google_executors());
+    let dispatcher =
+        apollia_tools::executor::ToolDispatcher::new(build_google_executors(&accounts()));
     // WHEN the tool surface is enumerated
     let names = dispatcher.tool_names();
     // THEN a Google op is a name the dispatcher resolves, so a call to it is
     // executed rather than refused as unknown
     assert!(
-        names.contains(&"gmail.send"),
+        names.contains(&"conn:google:ada@example.com/gmail.send"),
         "gmail.send must be dispatchable without the desktop"
     );
     assert!(
-        names.contains(&"gsheets.read_values"),
+        names.contains(&"conn:google:ada@example.com/gsheets.read_values"),
         "the runtime set is the full one, not the twelve ops the desktop carried"
     );
+}
+
+/// Every connector operation descriptor, Google, Microsoft and the mailbox.
+fn all_connector_descriptors() -> Vec<apollia_tools::ToolDescriptor> {
+    let mut all = google_tool_descriptors();
+    all.extend(microsoft_tool_descriptors());
+    all.extend(imap_tool_descriptors());
+    all
+}
+
+fn connector_descriptor(id: &str) -> apollia_tools::ToolDescriptor {
+    all_connector_descriptors()
+        .into_iter()
+        .find(|d| d.name == id)
+        .unwrap_or_else(|| panic!("no connector descriptor named {id}"))
+}
+
+fn connector_operation(id: &str) -> apollia_connectors::operation::OperationSpec {
+    google_operations()
+        .iter()
+        .chain(apollia_connectors::microsoft::operations().iter())
+        .find(|op| op.id == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("no connector operation named {id}"))
+}
+
+#[test]
+fn an_auto_approved_operation_reads_personal_data() {
+    // GIVEN an operation the connector auto-approves
+    let op = connector_operation("gcal.list_events");
+    assert_eq!(op.approval, ApprovalPolicy::AutoApprove);
+    // WHEN it is translated into a tool descriptor
+    let d = connector_descriptor(op.id);
+    // THEN it reads personal data, a classification fixed in Apollia's code
+    assert_eq!(d.family, ActionFamily::ReadPersonal);
+    assert_eq!(d.family_source, FamilySource::Builtin);
+}
+
+#[test]
+fn a_send_operation_sends_outside_whatever_its_approval() {
+    // GIVEN the two operations whose verb is `send`
+    for id in ["gmail.send", "outlook.send"] {
+        let op = connector_operation(id);
+        assert_eq!(op.action, "send");
+        // WHEN each is translated into a tool descriptor
+        let d = connector_descriptor(id);
+        // THEN it sends outside, even though its approval policy is a write's
+        assert_eq!(d.family, ActionFamily::SendExternal, "{id}");
+        assert_eq!(d.family_source, FamilySource::Builtin, "{id}");
+    }
+}
+
+#[test]
+fn an_operation_requiring_approval_writes_or_deletes() {
+    // GIVEN an operation that always requires approval and does not send
+    let op = connector_operation("gcal.create_event");
+    assert_eq!(op.approval, ApprovalPolicy::AlwaysRequireApproval);
+    assert_ne!(op.action, "send");
+    // WHEN it is translated into a tool descriptor
+    let d = connector_descriptor(op.id);
+    // THEN it writes or deletes
+    assert_eq!(d.family, ActionFamily::WriteOrDelete);
+    assert_eq!(d.family_source, FamilySource::Builtin);
+}
+
+#[test]
+fn an_operation_requiring_a_confirm_phrase_writes_or_deletes() {
+    // GIVEN an operation guarded by a confirmation phrase
+    let op = connector_operation("gcal.delete_event");
+    assert_eq!(op.approval, ApprovalPolicy::ConfirmPhrase);
+    // WHEN it is translated into a tool descriptor
+    let d = connector_descriptor(op.id);
+    // THEN it writes or deletes
+    assert_eq!(d.family, ActionFamily::WriteOrDelete);
+    assert_eq!(d.family_source, FamilySource::Builtin);
+}
+
+#[test]
+fn a_connector_operation_designates_a_recipient_or_a_file_name_only() {
+    // GIVEN the connector operations that act on something a reader can name,
+    // copied here by hand
+    let expected = [
+        ("gmail.send", "to"),
+        ("gmail.compose_draft", "to"),
+        ("outlook.send", "to"),
+        ("gdrive.workspace_share", "email"),
+        ("gdrive.workspace_write", "name"),
+        ("gdrive.write_to_folder", "name"),
+        ("imap.list_folders", "account"),
+        ("imap.search", "account"),
+        ("imap.read", "account"),
+    ];
+    // WHEN every connector descriptor is read
+    let mut actual: Vec<(String, String)> = all_connector_descriptors()
+        .into_iter()
+        .filter_map(|d| d.target_arg.clone().map(|arg| (d.name, arg)))
+        .collect();
+    actual.sort();
+    let mut wanted: Vec<(String, String)> = expected
+        .iter()
+        .map(|(name, arg)| ((*name).to_owned(), (*arg).to_owned()))
+        .collect();
+    wanted.sort();
+    // THEN those and no other designate a target argument, which their schema
+    // declares, and none designates a body
+    assert_eq!(actual, wanted);
+    for d in all_connector_descriptors() {
+        if let Some(arg) = d.target_arg.as_deref() {
+            assert!(
+                d.input_schema["properties"].get(arg).is_some(),
+                "{} designates `{arg}`, which its schema does not declare",
+                d.name
+            );
+            assert!(!matches!(arg, "body" | "content" | "text" | "comment"));
+        }
+    }
+}
+
+#[test]
+fn every_connector_descriptor_is_classified() {
+    // GIVEN every connector descriptor registered at boot
+    // WHEN their families are read
+    // THEN none is left unclassified nor exempt
+    for d in all_connector_descriptors() {
+        assert!(
+            !matches!(d.family, ActionFamily::Unclassified | ActionFamily::Exempt),
+            "{} has family {:?}",
+            d.name,
+            d.family
+        );
+    }
+}
+
+/// The decision governance takes on one call of the connector tool `id`, for
+/// an agent holding `consents`.
+fn decision_on(
+    id: &str,
+    consents: &[apollia_permissions::ConsentFamily],
+) -> crate::governance::AccessDecision {
+    let state = crate::governance::GovernanceState {
+        consents: consents
+            .iter()
+            .map(|family| ("clerk".to_owned(), *family))
+            .collect(),
+        ..crate::governance::GovernanceState::default()
+    };
+    crate::governance::decide(
+        &state,
+        &crate::governance::AccessCall {
+            agent_id: "clerk",
+            access_id: id,
+            argument: None,
+            family: connector_descriptor(id).family,
+            unattended: false,
+            granted_for_run: false,
+        },
+        0,
+    )
+}
+
+#[test]
+fn the_class_of_an_operation_classifies_and_governance_decides() {
+    // GIVEN an operation classed as auto-approved and one classed as always
+    // requiring an approval
+    let read = connector_operation("gcal.list_events");
+    let write = connector_operation("gcal.create_event");
+    assert_eq!(read.approval, ApprovalPolicy::AutoApprove);
+    assert_eq!(write.approval, ApprovalPolicy::AlwaysRequireApproval);
+
+    // WHEN governance decides a call of each, for an agent holding no consent,
+    // then for an agent holding the standing consent of the write family
+    let read_alone = decision_on(read.id, &[]);
+    let write_alone = decision_on(write.id, &[]);
+    let write_consented = decision_on(
+        write.id,
+        &[apollia_permissions::ConsentFamily::WriteOrDelete],
+    );
+
+    // THEN the class approves nothing and requires nothing: the auto-approved
+    // read asks like any read of personal data, and the write runs unasked
+    // once the agent holds the consent of its family
+    assert!(
+        matches!(
+            read_alone,
+            crate::governance::AccessDecision::AskUser { .. }
+        ),
+        "{read_alone:?}"
+    );
+    assert!(
+        matches!(
+            write_alone,
+            crate::governance::AccessDecision::AskUser { .. }
+        ),
+        "{write_alone:?}"
+    );
+    assert!(write_consented.is_allowed(), "{write_consented:?}");
 }

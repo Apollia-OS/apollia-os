@@ -115,6 +115,10 @@ NEVER_RUN = ("start", "stop", "serve", "chat", "shell", "update", "onboard")
 TYPED_PLACEHOLDERS = {
     "<SHELL>": "bash",  # completions <SHELL>
     "<TYPE>": "desktop",  # notify create --kind <TYPE>
+    "<PROVIDER>": "openai",  # llm backends create --provider <PROVIDER>
+    "<p>": "openai",  # the same flag, as the first-agent tutorial spells it
+    "<FORMAT>": "json",  # batch export --format <FORMAT>
+    "<ANSWER>": "refuse",  # approvals decide <ID> <ANSWER>
 }
 
 # The Python SDK installs its own `apollia` console script

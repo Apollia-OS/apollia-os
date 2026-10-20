@@ -7,8 +7,10 @@ use std::time::Instant;
 
 use apollia_core::events::{EventBusSender, RuntimeEvent};
 
+use crate::call_measure::CallMeasure;
 use crate::router::analyse_call_failure;
 use crate::router::config::ObservabilityConfig;
+use crate::router::observed_stream::{call_completed_event, observe_stream, ObservedCall};
 use crate::router::{FallbackPlan, LlmRouter};
 use crate::types::{CompletionRequest, CompletionResponse, LlmError};
 
@@ -16,10 +18,11 @@ impl LlmRouter {
     /// Call the backend and automatically emit [`RuntimeEvent::LlmCallCompleted`].
     ///
     /// Execution sequence:
-    /// 1. Log the prompt at `TRACE` level if `obs.debug_log_prompt` is enabled.
+    /// 1. Log the prompt at `TRACE` level if `debug_log_prompt` is enabled, by
+    ///    `obs` or by the router's own `[llm.observability]`.
     /// 2. Call `backend.complete(req)`.
     /// 3. Emit `LlmCallCompleted` fire-and-forget on the bus (when present).
-    /// 4. Log tokens/latency at `INFO` level per the `obs` flags.
+    /// 4. Log tokens and latency at `INFO` level.
     /// 5. Return `Ok(response)`.
     ///
     /// The `EventBusSender` is optional: `None` disables emission without
@@ -38,19 +41,31 @@ impl LlmRouter {
     ) -> Result<CompletionResponse, LlmError> {
         let backend_key = backend_name.unwrap_or(&self.default);
 
-        let backend =
-            self.backends
-                .get(backend_key)
-                .ok_or_else(|| LlmError::BackendUnavailable {
-                    backend: backend_key.to_owned(),
-                    reason: "not found in router".to_owned(),
-                })?;
+        let backend = self
+            .lookup(backend_key)
+            .ok_or_else(|| LlmError::BackendUnavailable {
+                backend: backend_key.to_owned(),
+                reason: "not found in router".to_owned(),
+            })?;
 
         // Log the prompt at TRACE only, never at INFO.
-        if obs.debug_log_prompt {
+        if obs.debug_log_prompt || self.observability.debug_log_prompt {
             tracing::trace!(prompt = ?req.messages, "llm.request.prompt");
         }
 
+        // A seed the backend cannot carry is dropped on the way out, and the
+        // caller then reads two different answers to the same seeded call as a
+        // non-deterministic model. Say so where it happens.
+        if req.seed.is_some() && !backend.carries_seed() {
+            tracing::warn!(
+                backend = %backend_key,
+                model = %backend.model_id(),
+                detail = "this backend has no seed field, so the call is not reproducible",
+                "llm.seed.dropped"
+            );
+        }
+
+        let context = req.call_context.clone();
         let started = Instant::now();
         let response = match backend.complete(req).await {
             Ok(response) => response,
@@ -79,35 +94,25 @@ impl LlmRouter {
 
         // Fire-and-forget emission: send() errors are silently ignored.
         if let Some(b) = bus {
-            let _ = b.send(RuntimeEvent::LlmCallCompleted {
-                backend: backend_key.to_owned(),
-                model: backend.model_id().to_owned(),
-                task_id: None,
-                step_id: None,
-                prompt_tokens: response.usage.prompt_tokens,
-                completion_tokens: response.usage.completion_tokens,
-                latency_ms,
-                cost_usd: response.usage.cost_usd,
-                run_id: None,
-            });
+            let _ = b.send(call_completed_event(
+                backend_key,
+                backend.model_id(),
+                context.as_ref(),
+                &CallMeasure::of_response(&response, latency_ms),
+            ));
         }
 
-        if obs.log_token_usage {
-            tracing::info!(
-                backend = backend_key,
-                prompt_tokens = response.usage.prompt_tokens,
-                completion_tokens = response.usage.completion_tokens,
-                "llm.usage.tokens"
-            );
-        }
-
-        if obs.log_latency {
-            tracing::info!(
-                backend = backend_key,
-                latency_ms = latency_ms,
-                "llm.request.latency"
-            );
-        }
+        tracing::info!(
+            backend = backend_key,
+            prompt_tokens = response.usage.prompt_tokens,
+            completion_tokens = response.usage.completion_tokens,
+            "llm.usage.tokens"
+        );
+        tracing::info!(
+            backend = backend_key,
+            latency_ms = latency_ms,
+            "llm.request.latency"
+        );
 
         Ok(response)
     }
@@ -140,7 +145,7 @@ impl LlmRouter {
 
         let mut last_err = primary_err;
         for &candidate in fallbacks {
-            if candidate == primary || !self.backends.contains_key(candidate) {
+            if candidate == primary || self.lookup(candidate).is_none() {
                 continue;
             }
             if let Some(b) = bus {
@@ -173,8 +178,10 @@ impl LlmRouter {
     /// Open a stream of [`StreamChunk`]s from the resolved backend.
     ///
     /// Resolves the backend (by name or default), calls `backend.stream(req)`,
-    /// and returns the raw stream. The caller is responsible for emitting the
-    /// `LlmCallCompleted` event once the stream is consumed.
+    /// and returns its stream wrapped so the call is measured as it is read:
+    /// time to first token, tokens, engine timings and finish reason. One
+    /// `LlmCallCompleted` goes on `bus` when the stream ends, or when the
+    /// reader drops it first, with the turn of `req.call_context`.
     ///
     /// # Errors
     ///
@@ -184,6 +191,7 @@ impl LlmRouter {
         &self,
         backend_name: Option<&str>,
         req: CompletionRequest,
+        bus: Option<&EventBusSender>,
         obs: &ObservabilityConfig,
     ) -> Result<
         std::pin::Pin<
@@ -193,19 +201,25 @@ impl LlmRouter {
     > {
         let backend_key = backend_name.unwrap_or(&self.default);
 
-        let backend =
-            self.backends
-                .get(backend_key)
-                .ok_or_else(|| LlmError::BackendUnavailable {
-                    backend: backend_key.to_owned(),
-                    reason: "not found in router".to_owned(),
-                })?;
+        let backend = self
+            .lookup(backend_key)
+            .ok_or_else(|| LlmError::BackendUnavailable {
+                backend: backend_key.to_owned(),
+                reason: "not found in router".to_owned(),
+            })?;
 
-        if obs.debug_log_prompt {
+        if obs.debug_log_prompt || self.observability.debug_log_prompt {
             tracing::trace!(prompt = ?req.messages, "llm.stream.prompt");
         }
 
+        let call = ObservedCall {
+            backend: backend_key.to_owned(),
+            model: backend.model_id().to_owned(),
+            context: req.call_context.clone(),
+            bus: bus.cloned(),
+            started: Instant::now(),
+        };
         let stream = backend.stream(req).await?;
-        Ok(stream)
+        Ok(observe_stream(stream, call))
     }
 }

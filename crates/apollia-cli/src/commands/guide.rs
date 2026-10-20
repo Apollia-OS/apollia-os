@@ -30,7 +30,7 @@ const TOPICS: &[(&str, &str)] = &[
     (
         "audit",
         "Inspect and verify what happened.\n\n\
-         apollia-os audit list           recent audited runs\n\
+         apollia-os audit journal        the journal, newest first\n\
          apollia-os audit verify <run>   check the signed hash chain\n\
          apollia-os trace <task_id>      event-sourced trace of a task\n\
          apollia-os digest --since 7d    activity + cost overview",
@@ -39,8 +39,8 @@ const TOPICS: &[(&str, &str)] = &[
         "agents",
         "Install, run, and manage agents.\n\n\
          apollia-os agent list           installed agents\n\
-         apollia-os agent create <name>  scaffold from a template\n\
-         apollia-os agent install <path> install an agent or bundle\n\
+         apollia-os package new <name>   start a package: an agent and a tool\n\
+         apollia-os package install <file.apo>  install a package\n\
          apollia-os agent show <id>      details for one agent\n\
          apollia-os run <agent> <input>  submit a task (add --stream)",
     ),

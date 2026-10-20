@@ -1,75 +1,136 @@
+<script lang="ts" module>
+  import type { Route } from "$lib/stores/navigation";
+  import {
+    MessageSquare, Bot, ShieldCheck, Plug, Code, Settings, KeyRound,
+    Repeat, Brain, Database, Activity, Mic, Library, ScrollText, Layers,
+  } from "lucide-svelte";
+
+  type Badge = "none" | "chat" | "approvals";
+
+  /** A primary entry of the sidebar; `developer` hides it with the mode off. */
+  export interface PrimaryNavEntry {
+    route: Route;
+    Icon: typeof MessageSquare;
+    labelKey: string;
+    badge: Badge;
+    developer?: boolean;
+  }
+
+  // Each entry's `labelKey` resolves through svelte-i18n at render time. Keeping
+  // labels out of the source array lets the bundle preserve a single
+  // translation map (`nav.sidebar.*`) shared by the column, the rail and the
+  // drawer.
+  //
+  // The first rank: what is used every day, in this order. The developer
+  // screen closes it, with the developer mode on only.
+  export const PRIMARY_NAV: readonly PrimaryNavEntry[] = [
+    { route: "chat"           as Route, Icon: MessageSquare,   labelKey: "nav.sidebar.chat",           badge: "chat"      },
+    { route: "agents"         as Route, Icon: Bot,             labelKey: "nav.sidebar.agents",         badge: "none"      },
+    { route: "integrations"   as Route, Icon: Plug,            labelKey: "nav.sidebar.integrations",   badge: "none"      },
+    { route: "llm"            as Route, Icon: Brain,           labelKey: "nav.sidebar.llm",            badge: "none"      },
+    { route: "inbox"          as Route, Icon: ShieldCheck,     labelKey: "nav.sidebar.inbox",          badge: "approvals" },
+    { route: "developer"      as Route, Icon: Code,            labelKey: "nav.sidebar.developer",      badge: "none", developer: true },
+  ];
+
+  /** The primary entries shown for a given developer mode. */
+  export function visiblePrimaryNav(developerMode: boolean): PrimaryNavEntry[] {
+    return PRIMARY_NAV.filter((entry) => developerMode || !entry.developer);
+  }
+
+  /** An entry of the second rank, or of the developer group below it. */
+  export interface NavEntry {
+    route: Route;
+    Icon: typeof MessageSquare;
+    labelKey: string;
+  }
+
+  /** An entry of the developer group, below the secondary entries. */
+  export type DeveloperNavEntry = NavEntry;
+
+  // The second rank: what is consulted now and then, drawn quieter than the
+  // first. It is the same with the developer mode off and on.
+  export const SECONDARY_NAV: readonly NavEntry[] = [
+    { route: "library"        as Route, Icon: Library,    labelKey: "nav.sidebar.library" },
+    { route: "automations"    as Route, Icon: Repeat,     labelKey: "nav.sidebar.automations" },
+    { route: "batches"        as Route, Icon: Layers,     labelKey: "nav.sidebar.batches" },
+    { route: "authorizations" as Route, Icon: KeyRound,   labelKey: "nav.sidebar.authorizations" },
+    { route: "journal"        as Route, Icon: ScrollText, labelKey: "nav.sidebar.journal" },
+    { route: "settings"       as Route, Icon: Settings,   labelKey: "nav.sidebar.settings" },
+  ];
+
+  // The technical screens, grouped apart from the everyday navigation. Their
+  // routes are the ones the router keeps out of reach with the mode off
+  // (`DEVELOPER_ROUTES`); a test holds the two lists equal.
+  export const DEVELOPER_NAV: readonly DeveloperNavEntry[] = [
+    { route: "transcriptions" as Route, Icon: Mic,      labelKey: "nav.sidebar.transcriptions" },
+    { route: "observability"  as Route, Icon: Activity, labelKey: "nav.sidebar.observability" },
+    { route: "memory"         as Route, Icon: Database, labelKey: "nav.sidebar.memory" },
+  ];
+
+  /** The developer group for a given developer mode: empty with the mode off. */
+  export function visibleDeveloperNav(developerMode: boolean): DeveloperNavEntry[] {
+    return developerMode ? [...DEVELOPER_NAV] : [];
+  }
+
+  /**
+   * Every route the sidebar lists for a given developer mode, in reading
+   * order: the first rank, the second, then the developer group.
+   */
+  export function visibleSidebarRoutes(developerMode: boolean): Route[] {
+    return [
+      ...visiblePrimaryNav(developerMode),
+      ...SECONDARY_NAV,
+      ...visibleDeveloperNav(developerMode),
+    ].map((entry) => entry.route);
+  }
+</script>
+
 <script lang="ts">
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { t } from "svelte-i18n";
-  import { currentRoute, navigateTo, type Route } from "$lib/stores/navigation";
+  import { currentRoute, navigateTo, sidebarRoute } from "$lib/stores/navigation";
   import { sidebarState, drawerOpen, layoutActions } from "$lib/stores/layout";
-  import { pendingCount } from "$lib/stores/hitl";
-  import {
-    activeChatCount,
-    pendingChatApprovalCount,
-    pendingUserInputCount,
-    openNewChatRequested,
-  } from "$lib/stores/chat";
-  import { runningTasks, tasksRunningCount } from "$lib/stores/tasks";
-  import { uiMode } from "$lib/stores/mode";
+  import { onMount } from "svelte";
+  import { activeChatCount, openNewChatRequested } from "$lib/stores/chat";
+  import { toReviewCount, watchPendingDecisions } from "$lib/stores/pendingDecisions";
+  import { developerMode } from "$lib/stores/developerMode";
+  import { navPosition } from "$lib/stores/chatAppearance";
+  import { navSide } from "$lib/layout/navSide";
+  import { resourceWidgetVisible } from "$lib/stores/developerSettings";
+  import { whileShown } from "$lib/settings/resourceMonitor";
+  import { openSettingsWindow } from "$lib/stores/settingsWindow";
+  import ResourceWidget from "./ResourceWidget.svelte";
+  import NavRow from "./NavRow.svelte";
   import { Button } from "$lib/components/ui/button";
-  import {
-    LayoutDashboard, MessageSquare, Bot, FolderKanban, ListChecks, ShieldCheck, Plug,
-    Settings, X, Plus, Repeat,
-    Brain, Database, Activity, Mic, Bell, User,
-  } from "lucide-svelte";
+  import { X, Plus } from "lucide-svelte";
 
-  // Each entry's `labelKey` resolves through svelte-i18n at render time. Keeping
-  // labels out of the source array lets the bundle preserve a single
-  // translation map (`nav.sidebar.*`) shared by drawer + rail.
-  const PRIMARY_NAV = [
-    { route: "dashboard"     as Route, Icon: LayoutDashboard, labelKey: "nav.sidebar.dashboard",     badge: "none"      },
-    { route: "chat"          as Route, Icon: MessageSquare,   labelKey: "nav.sidebar.chat",          badge: "chat"      },
-    { route: "agents"        as Route, Icon: Bot,             labelKey: "nav.sidebar.agents",        badge: "none"      },
-    { route: "projects"      as Route, Icon: FolderKanban,    labelKey: "nav.sidebar.projects",      badge: "none"      },
-    { route: "tasks"         as Route, Icon: ListChecks,      labelKey: "nav.sidebar.tasks",         badge: "tasks"     },
-    { route: "automations"   as Route, Icon: Repeat,          labelKey: "nav.sidebar.automations",   badge: "none"      },
-    { route: "inbox"         as Route, Icon: ShieldCheck,     labelKey: "nav.sidebar.inbox",         badge: "approvals" },
-    { route: "notifications" as Route, Icon: Bell,            labelKey: "nav.sidebar.notifications", badge: "none"      },
-    { route: "memory"        as Route, Icon: Database,        labelKey: "nav.sidebar.memory",        badge: "none"      },
-    { route: "observability" as Route, Icon: Activity,        labelKey: "nav.sidebar.observability", badge: "none"      },
-  ];
-
-  // Builder cluster - purely technical views (shown in Builder mode only).
-  const BUILDER_NAV = [
-    { route: "llm"            as Route, Icon: Brain, labelKey: "nav.sidebar.llm" },
-    { route: "transcriptions" as Route, Icon: Mic,   labelKey: "nav.sidebar.transcriptions" },
-  ];
-
-  const SECONDARY_NAV = [
-    { route: "integrations" as Route, Icon: Plug,     labelKey: "nav.sidebar.integrations" },
-    { route: "settings"     as Route, Icon: Settings, labelKey: "nav.sidebar.settings" },
-  ];
-
-  const isBuilder = $derived($uiMode === "builder");
-
+  const primaryNav = $derived(visiblePrimaryNav($developerMode));
+  const developerNav = $derived(visibleDeveloperNav($developerMode));
 
   const isDrawer = $derived($sidebarState === "drawer");
+  // A medium window keeps the icons alone; a wide one names every entry.
+  const isRail = $derived($sidebarState === "icon");
 
-  const approvalsCount = $derived(
-    $pendingCount + $pendingChatApprovalCount + $pendingUserInputCount,
-  );
-  const runningCount = $derived($runningTasks.length);
-  const inFlightCount = $derived($tasksRunningCount);
+  // The consumption widget reads the monitor of System > Hardware, and only
+  // while it is shown: hidden, the subscription is dropped and nothing is
+  // measured for it.
+  const widgetUsage = whileShown(resourceWidgetVisible);
 
-  let pulseKey = $state(0);
-  let lastInFlight = 0;
-  $effect(() => {
-    if (inFlightCount !== lastInFlight) {
-      lastInFlight = inFlightCount;
-      pulseKey += 1;
-      const n = pulseKey;
-      setTimeout(() => { if (n === pulseKey) pulseKey = 0; }, 400);
-    }
-  });
+  function openResourceMonitor() {
+    openSettingsWindow("hardware");
+    if (isDrawer) layoutActions.closeDrawer();
+  }
+
+  // The entry marked: the one the screen shown belongs to.
+  const shownEntry = $derived(sidebarRoute($currentRoute));
+
+  // What waits for the user is counted in one place, over the list the review
+  // screen shows.
+  onMount(() => watchPendingDecisions());
 
   let drawerRef: HTMLElement | null = $state(null);
+  const side = $derived(navSide($navPosition));
   let previouslyFocused: HTMLElement | null = null;
 
   $effect(() => {
@@ -113,11 +174,68 @@
 
   function getBadgeCount(badge: string): number {
     if (badge === "chat") return $activeChatCount;
-    if (badge === "approvals") return approvalsCount;
-    if (badge === "tasks") return inFlightCount;
+    if (badge === "approvals") return $toReviewCount;
     return 0;
   }
 </script>
+
+<!--
+  The two ranks and the developer group, as labelled rows: the body of the
+  column and of the drawer. `titleId` names the developer group for assistive
+  technology, and differs between the two so an id is never drawn twice.
+-->
+{#snippet ranks(titleId: string)}
+  <div class="flex flex-col gap-0.5 px-3 pb-3" data-testid="sidebar-primary-rank">
+    {#each primaryNav as item (item.route)}
+      <NavRow
+        route={item.route}
+        Icon={item.Icon}
+        label={$t(item.labelKey)}
+        rank="primary"
+        active={shownEntry === item.route}
+        count={getBadgeCount(item.badge)}
+        onselect={navigate}
+      />
+    {/each}
+  </div>
+
+  <div class="mx-3 flex flex-col gap-0.5 border-t border-border py-3" data-testid="sidebar-secondary-rank">
+    {#each SECONDARY_NAV as item (item.route)}
+      <NavRow
+        route={item.route}
+        Icon={item.Icon}
+        label={$t(item.labelKey)}
+        rank="secondary"
+        active={shownEntry === item.route}
+        onselect={navigate}
+      />
+    {/each}
+  </div>
+
+  {#if developerNav.length > 0}
+    <div
+      class="mx-3 flex flex-col gap-0.5 border-t border-border py-3"
+      role="group"
+      aria-labelledby={titleId}
+      data-testid="sidebar-developer-group"
+    >
+      <span
+        id={titleId}
+        class="px-3 pb-1 font-mono text-overline uppercase tracking-widest text-muted-foreground"
+      >{$t("nav.developer_group")}</span>
+      {#each developerNav as item (item.route)}
+        <NavRow
+          route={item.route}
+          Icon={item.Icon}
+          label={$t(item.labelKey)}
+          rank="developer"
+          active={shownEntry === item.route}
+          onselect={navigate}
+        />
+      {/each}
+    </div>
+  {/if}
+{/snippet}
 
 {#if isDrawer}
   {#if $drawerOpen}
@@ -133,20 +251,20 @@
     ></div>
     <div
       bind:this={drawerRef}
-      class="fixed inset-y-0 left-0 z-overlay flex w-64 max-w-[85vw] flex-col glass-panel border-r glass-border shadow-xl"
+      class="fixed inset-y-0 {side.drawerEdge} z-overlay flex w-64 max-w-[85vw] flex-col glass-panel glass-border shadow-xl"
       role="dialog"
       tabindex="-1"
       aria-modal="true"
       aria-label={$t("nav.sidebar_label")}
       onkeydown={handleKeydown}
-      transition:fly={{ x: -280, duration: 220, easing: cubicOut }}
+      transition:fly={{ x: side.drawerFlyX, duration: 220, easing: cubicOut }}
       data-testid="sidebar"
       data-state="drawer"
     >
       <!-- Drawer header -->
       <div class="flex items-center gap-2 px-4 py-4">
         <img src="/logo.svg" alt="Apollia" width="28" height="28" class="h-7 w-7 shrink-0" />
-        <span class="text-base font-semibold text-foreground">Apollia OS</span>
+        <span class="text-base font-semibold text-foreground">Apollia Desktop</span>
         <div class="ml-auto">
           <button
             class="inline-flex min-h-9 min-w-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
@@ -158,7 +276,7 @@
         </div>
       </div>
 
-      <div class="px-3 pb-2">
+      <div class="px-3 pb-3">
         <Button variant="ghost" size="sm"
           class="flex w-full items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground shadow-primary-sm hover:bg-primary/90"
           onclick={startNewChat}
@@ -168,226 +286,114 @@
         </Button>
       </div>
 
-      <nav class="flex flex-1 flex-col gap-0.5 overflow-y-auto p-3" aria-label={$t("nav.sidebar_label")}>
-        {#each PRIMARY_NAV as item (item.route)}
-          {@const isActive = $currentRoute === item.route}
-          {@const badgeCount = getBadgeCount(item.badge)}
-          {@const label = $t(item.labelKey)}
-          <button
-            type="button"
-            class="relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors {isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-primary/[0.04] hover:text-foreground'}"
-            onclick={() => navigate(item.route)}
-            aria-current={isActive ? "page" : undefined}
-          >
-            <item.Icon size={17} strokeWidth={1.5} class="shrink-0" />
-            <span class="truncate">{label}</span>
-            {#if badgeCount > 0}
-              <span class="ml-auto min-w-5 rounded-full bg-primary px-1.5 py-0.5 text-center text-overline font-semibold text-primary-foreground leading-none">{badgeCount}</span>
-            {:else if item.badge === "tasks" && runningCount > 0}
-              <span class="ml-auto flex h-2 w-2"><span class="absolute inline-flex h-2 w-2 animate-ping rounded-full bg-primary opacity-60"></span><span class="relative inline-flex h-2 w-2 rounded-full bg-primary"></span></span>
-            {/if}
-          </button>
-        {/each}
-
-        {#if isBuilder}
-          <div class="section-meta mt-3 mb-1 px-3" data-testid="sidebar-builder-cluster-label">
-            {$t("nav.builder_cluster")}
-          </div>
-          {#each BUILDER_NAV as item (item.route)}
-            {@const isActive = $currentRoute === item.route}
-            {@const label = $t(item.labelKey)}
-            <button
-              type="button"
-              class="relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors {isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-primary/[0.04] hover:text-foreground'}"
-              onclick={() => navigate(item.route)}
-              aria-current={isActive ? "page" : undefined}
-              data-testid="nav-{item.route}"
-            >
-              <item.Icon size={17} strokeWidth={1.5} class="shrink-0" />
-              <span class="truncate">{label}</span>
-            </button>
-          {/each}
-        {/if}
+      <nav class="flex flex-1 flex-col overflow-y-auto" aria-label={$t("nav.sidebar_label")}>
+        {@render ranks("sidebar-drawer-developer-title")}
       </nav>
 
-      <div class="border-t border-border/60 p-3 flex flex-col gap-0.5">
-        {#each SECONDARY_NAV as item (item.route)}
-          {@const isActive = $currentRoute === item.route}
-          {@const label = $t(item.labelKey)}
-          <button
-            type="button"
-            class="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors {isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
-            onclick={() => navigate(item.route)}
-            data-testid="nav-{item.route}"
-          >
-            <item.Icon size={17} strokeWidth={1.5} class="shrink-0" />
-            <span>{label}</span>
-          </button>
-        {/each}
-      </div>
+      {#if $resourceWidgetVisible}
+        <div class="border-t border-border/60 p-3">
+          <ResourceWidget usage={$widgetUsage} onopen={openResourceMonitor} />
+        </div>
+      {/if}
     </div>
   {/if}
-{:else}
-  <!-- V3 64px icon rail - permanent, no expand -->
+{:else if isRail}
+  <!-- Medium window: the same entries, icons alone, the name in a tooltip. -->
   <aside
-    class="rail v4-hair flex h-full w-16 flex-shrink-0 flex-col items-center border-r border-border bg-muted py-3 gap-1"
+    class="v4-hair flex h-full w-16 flex-shrink-0 flex-col items-center {side.railBorder} border-border bg-muted/30 py-3"
+    class:rail-right={side.nav === "right"}
     role="navigation"
     aria-label={$t("nav.sidebar_label")}
     data-testid="sidebar"
     data-state="rail"
+    data-nav-position={side.nav}
   >
-    <!-- Logo -->
-    <div class="mb-4 p-1.5">
-      <img src="/logo.svg" alt="Apollia" class="h-9 w-9 rounded-lg block" />
+    <div class="mb-2 p-1.5">
+      <img src="/logo.svg" alt="Apollia" class="block h-8 w-8 rounded-lg" />
     </div>
 
-    <!-- Primary nav -->
-    {#each PRIMARY_NAV as item (item.route)}
-      {@const isActive = $currentRoute === item.route}
-      {@const badgeCount = getBadgeCount(item.badge)}
-      {@const isPulse = item.badge === "tasks" && runningCount > 0}
-      {@const label = $t(item.labelKey)}
-      <div class="rail-item group relative mb-1">
-        <button
-          type="button"
-          class="relative flex h-10 w-10 items-center justify-center rounded-lg transition-all duration-fast {isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}"
-          onclick={() => navigate(item.route)}
-          aria-current={isActive ? "page" : undefined}
-          aria-label={label}
-          data-nav-item="true"
-          data-testid="nav-{item.route}"
-        >
-          {#if isActive}
-            <span class="active-bar"></span>
-          {/if}
-          <item.Icon size={17} strokeWidth={1.5} />
-          {#if badgeCount > 0}
-            <span class="absolute -right-0.5 -top-0.5 min-w-3.5 rounded-full bg-primary px-1 py-px text-center text-overline font-semibold text-primary-foreground leading-none">{badgeCount > 9 ? "9+" : badgeCount}</span>
-          {:else if isPulse}
-            <span class="absolute right-0.5 top-0.5 flex h-1.5 w-1.5">
-              <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-60"></span>
-              <span class="relative inline-flex h-1.5 w-1.5 rounded-full bg-primary"></span>
-            </span>
-          {/if}
-        </button>
-        <!--
-          Tooltip. The rail entries carry `aria-label` and no `title`: a native
-          `title` would draw a second label, in the system chrome and after the
-          system delay, over the one below.
-        -->
-        <span class="tooltip pointer-events-none absolute left-full top-1/2 z-overlay ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-foreground px-2 py-1 text-caption font-medium text-background opacity-0 shadow-elev-3 transition-opacity duration-fast group-hover:opacity-100">
-          {label}
-        </span>
-      </div>
-    {/each}
-
-    {#if isBuilder}
-      <!-- Builder cluster - Inspection -->
-      <div class="my-1 h-px w-8 bg-border/60" data-testid="sidebar-builder-separator"></div>
-      {#each BUILDER_NAV as item (item.route)}
-        {@const isActive = $currentRoute === item.route}
-        {@const label = $t(item.labelKey)}
-        <div class="rail-item group relative mb-1">
-          <button
-            type="button"
-            class="relative flex h-10 w-10 items-center justify-center rounded-lg transition-all duration-fast {isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}"
-            onclick={() => navigate(item.route)}
-            aria-current={isActive ? "page" : undefined}
-            aria-label={label}
-            data-nav-item="true"
-            data-testid="nav-{item.route}"
-          >
-            {#if isActive}
-              <span class="active-bar"></span>
-            {/if}
-            <item.Icon size={17} strokeWidth={1.5} />
-          </button>
-          <span class="tooltip pointer-events-none absolute left-full top-1/2 z-overlay ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-foreground px-2 py-1 text-caption font-medium text-background opacity-0 shadow-elev-3 transition-opacity duration-fast group-hover:opacity-100">
-            {label}
-          </span>
-        </div>
+    <div class="flex flex-col items-center gap-0.5" data-testid="sidebar-primary-rank">
+      {#each primaryNav as item (item.route)}
+        <NavRow
+          variant="rail"
+          tooltipClass={side.railTooltip}
+          route={item.route}
+          Icon={item.Icon}
+          label={$t(item.labelKey)}
+          rank="primary"
+          active={shownEntry === item.route}
+          count={getBadgeCount(item.badge)}
+          onselect={navigate}
+        />
       {/each}
+    </div>
+
+    <div class="mt-2 flex flex-col items-center gap-0.5 border-t border-border pt-2" data-testid="sidebar-secondary-rank">
+      {#each SECONDARY_NAV as item (item.route)}
+        <NavRow
+          variant="rail"
+          tooltipClass={side.railTooltip}
+          route={item.route}
+          Icon={item.Icon}
+          label={$t(item.labelKey)}
+          rank="secondary"
+          active={shownEntry === item.route}
+          onselect={navigate}
+        />
+      {/each}
+    </div>
+
+    {#if developerNav.length > 0}
+      <div
+        class="mt-2 flex flex-col items-center gap-0.5 border-t border-border pt-2"
+        role="group"
+        aria-label={$t("nav.developer_group")}
+        data-testid="sidebar-developer-group"
+      >
+        {#each developerNav as item (item.route)}
+          <NavRow
+            variant="rail"
+            tooltipClass={side.railTooltip}
+            route={item.route}
+            Icon={item.Icon}
+            label={$t(item.labelKey)}
+            rank="developer"
+            active={shownEntry === item.route}
+            onselect={navigate}
+          />
+        {/each}
+      </div>
     {/if}
 
-    <!-- Spacer -->
     <div class="flex-1"></div>
 
-    <!-- Secondary nav (Connections, Settings) -->
-    {#each SECONDARY_NAV as item (item.route)}
-      {@const isActive = $currentRoute === item.route}
-      {@const label = $t(item.labelKey)}
-      <div class="rail-item group relative mb-1">
-        <button
-          type="button"
-          class="relative flex h-10 w-10 items-center justify-center rounded-lg transition-all duration-fast {isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-2 hover:text-foreground'}"
-          onclick={() => navigate(item.route)}
-          aria-current={isActive ? "page" : undefined}
-          aria-label={label}
-          data-testid="nav-{item.route}"
-        >
-          {#if isActive}
-            <span class="active-bar"></span>
-          {/if}
-          <item.Icon size={17} strokeWidth={1.5} />
-        </button>
-        <span class="tooltip pointer-events-none absolute left-full top-1/2 z-overlay ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-foreground px-2 py-1 text-caption font-medium text-background opacity-0 shadow-elev-3 transition-opacity duration-fast group-hover:opacity-100">
-          {label}
-        </span>
-      </div>
-    {/each}
-
-    <!-- User avatar -->
-    <div class="mt-1">
-      <span
-        class="avatar-warm flex h-7 w-7 items-center justify-center rounded-lg text-primary-foreground shadow-elev-1"
-        title={$t("settings.profile.title")}
-      ><User size={14} /></span>
+    {#if $resourceWidgetVisible}
+      <ResourceWidget usage={$widgetUsage} compact onopen={openResourceMonitor} />
+    {/if}
+  </aside>
+{:else}
+  <!-- Wide window: the column, every entry named, in two ranks. -->
+  <aside
+    class="v4-hair flex h-full w-60 flex-shrink-0 flex-col {side.railBorder} border-border bg-muted/30"
+    role="navigation"
+    aria-label={$t("nav.sidebar_label")}
+    data-testid="sidebar"
+    data-state="column"
+    data-nav-position={side.nav}
+  >
+    <div class="flex items-center gap-2.5 px-6 pb-4 pt-5">
+      <img src="/logo.svg" alt="Apollia" width="28" height="28" class="h-7 w-7 shrink-0" />
+      <span class="text-base font-medium text-foreground">Apollia Desktop</span>
     </div>
+
+    <div class="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      {@render ranks("sidebar-developer-group-title")}
+    </div>
+
+    {#if $resourceWidgetVisible}
+      <div class="border-t border-border p-3">
+        <ResourceWidget usage={$widgetUsage} onopen={openResourceMonitor} />
+      </div>
+    {/if}
   </aside>
 {/if}
-
-<style>
-  .rail-item {
-    position: relative;
-  }
-
-  /* The 64px rail seats a 40px button, leaving a 12px gutter each side. The
-     active indicator anchors to the rail's left edge via that gutter, so the
-     offset lives in one place instead of a repeated inline `left: -14px`. */
-  .rail {
-    --rail-gutter: 0.75rem;
-  }
-
-  /* Active-route indicator: a 3px indigo->violet bar that grows in from the
-     rail edge. The gradient reuses the signature `--grad-a/--grad-b` stops, so
-     both themes resolve automatically. Under reduced motion the global rule in
-     app.css neutralizes the entry animation. */
-  .active-bar {
-    position: absolute;
-    left: calc(-1 * var(--rail-gutter));
-    top: 0.625rem;
-    bottom: 0.625rem;
-    width: 3px;
-    border-radius: 0 3px 3px 0;
-    background: linear-gradient(180deg, hsl(var(--grad-a)), hsl(var(--grad-b)));
-    transform-origin: center;
-    animation: active-bar-in var(--motion-base) var(--ease-apple);
-  }
-
-  @keyframes active-bar-in {
-    from {
-      transform: scaleY(0);
-      opacity: 0;
-    }
-    to {
-      transform: scaleY(1);
-      opacity: 1;
-    }
-  }
-
-  /* Terracotta "current user" avatar chip. The gradient token keeps its
-     hand-tuned tone independent of the brand palette. */
-  .avatar-warm {
-    background: var(--avatar-gradient-warm);
-  }
-</style>

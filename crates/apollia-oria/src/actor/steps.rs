@@ -5,11 +5,21 @@
 
 use std::sync::Arc;
 
-use apollia_core::events::RuntimeEvent;
-use apollia_core::PendingApprovals;
 use apollia_llm::{
     router::ObservabilityConfig as LlmObsConfig, ChatMessage, CompletionRequest, LlmRouter,
+    StreamChunk,
 };
+use futures::StreamExt;
+
+/// The most one model step of a plan may generate. An intermediate step
+/// extracts, compares or drafts: a few hundred tokens. With no limit, a model
+/// that looped generated for over an hour, holding the engine, and the batch
+/// waited behind it with nothing on the screen.
+const STEP_MAX_TOKENS: u32 = 4_096;
+
+/// The temperature of an intermediate step: it extracts and compares facts,
+/// wanted the same from one item to the next.
+const STEP_TEMPERATURE: f32 = 0.2;
 
 use crate::actor::{ToolProxyTrait, STEP_MEMORY_IMPORTANCE};
 use crate::context_manager::message_char_len;
@@ -69,7 +79,7 @@ impl ActorLoop {
 
         // Path B: just-in-time extraction against the tool schema.
         if let Some(s) = schema.as_ref() {
-            if let Some(model) = llm_router.get(step.model_hint.as_deref()) {
+            if let Some(model) = llm_router.get(self.agent_backend(llm_router)) {
                 match crate::arg_resolver::resolve_tool_args(
                     &model,
                     tool_name,
@@ -96,20 +106,16 @@ impl ActorLoop {
     }
     /// Execute a single step, tool or LLM depending on `tool_hint`.
     ///
-    /// Before the actual execution, checks whether the step's tool is in
-    /// `manifest.tools_requiring_approval`. If so and `pending_approvals` is
-    /// configured, calls [`suspend_for_approval`] and waits for the human decision.
+    /// A step asks nobody before it runs: the tool proxy decides each call
+    /// where it is made, and a call it refuses comes back as a failed step.
     ///
-    /// - `tool_hint = Some("llm")` or `None`: LLM call, routed via `model_hint`
-    ///   when present, otherwise the default backend. Previous outputs are
-    ///   injected into the system message.
-    /// - `tool_hint = Some(tool_name)`: call via `ToolProxyTrait::invoke`
-    ///   (`model_hint` ignored for tool steps).
+    /// - `tool_hint = Some("llm")` or `None`: LLM call on the agent's model
+    ///   (see [`ActorLoop::agent_backend`]). Previous outputs are injected into
+    ///   the system message.
+    /// - `tool_hint = Some(tool_name)`: call via `ToolProxyTrait::invoke`.
     ///
     /// Previous step outputs are interpolated into the step description via
     /// [`interpolate_outputs`] before being passed to the tool or the LLM.
-    ///
-    /// [`suspend_for_approval`]: ActorLoop::suspend_for_approval
     // REASON: cohesive execution dependencies (proxy, router, resilience) plus
     // the step context. A future consolidation may move the resilience layer
     // into the StepDeps bundle once the batch path needs it too.
@@ -123,42 +129,16 @@ impl ActorLoop {
         llm_router: &LlmRouter,
         resilience: &ResilienceLayer,
     ) -> Result<String, StepError> {
-        // Check whether the step's tool requires human approval.
-        let tool_needs_approval = step
-            .tool_hint
-            .as_deref()
-            .map(|t| {
-                self.manifest
-                    .tools_requiring_approval
-                    .iter()
-                    .any(|a| a == t)
-            })
-            .unwrap_or(false);
-
-        if tool_needs_approval {
-            if let Some(pending) = self.pending_approvals.as_ref() {
-                self.suspend_for_approval(step, pending).await?;
-            } else {
-                tracing::warn!(
-                    step_id = %step.step_id,
-                    tool = ?step.tool_hint,
-                    detail = "the sensitive step runs without approval",
-                    "step.approval.unconfigured"
-                );
-            }
-        }
-
-        // Normal step execution after approval (or for a non-sensitive tool).
         let input = interpolate_outputs(&step.description, &step_ctx.previous_outputs);
 
         match step.tool_hint.as_deref() {
-            // LLM step: routed to the backend specified by model_hint.
-            // previous outputs injected into the system message.
+            // LLM step: on the agent's model, previous outputs injected into
+            // the system message.
             Some("llm") | None => {
                 self.execute_llm_step(step, input, llm_router, step_ctx)
                     .await
             }
-            // Tool step: model_hint ignored. The invocation is wrapped by the
+            // Tool step. The invocation is wrapped by the
             // ResilienceLayer so a flaky tool trips its circuit breaker and
             // transient failures are retried with backoff before bubbling up.
             Some(tool_name) => {
@@ -208,13 +188,30 @@ impl ActorLoop {
             ErrorClass::Transient
         }
     }
-    /// Execute an LLM call for a step, honoring `model_hint`.
+    /// The backend every model call of a step goes to: the model of the agent
+    /// (the one its run was given) when the router holds it, the router's
+    /// default otherwise.
     ///
-    /// - If `model_hint = Some(hint)` and the backend exists in the `LlmRouter`,
-    ///   the call is routed to that backend.
-    /// - If `model_hint = Some(hint)` but the backend does not exist, a `tracing::warn!`
-    ///   is emitted and the default backend is used as fallback.
-    /// - If `model_hint = None`, the default backend is used.
+    /// A step never picks its own model. A plan may still carry a
+    /// `model_hint`, written by an earlier planner or by the model on its own;
+    /// it is not read, so a run stays on the one model its agent was given.
+    pub(super) fn agent_backend<'a>(&'a self, llm_router: &LlmRouter) -> Option<&'a str> {
+        let backend = self.model_backend.as_deref()?;
+        if llm_router.get(Some(backend)).is_some() {
+            Some(backend)
+        } else {
+            tracing::event!(
+                tracing::Level::WARN,
+                backend = %backend,
+                detail = "falling back to the default backend",
+                "step.agent_backend.unknown"
+            );
+            None
+        }
+    }
+    /// Execute an LLM call for a step, on the agent's model.
+    ///
+    /// - The call goes to [`ActorLoop::agent_backend`].
     /// - if previous steps completed, their outputs are formatted into a system
     ///   message `"Previous step results:\n- s1: ..."`.
     pub(super) async fn execute_llm_step(
@@ -264,100 +261,62 @@ impl ActorLoop {
                 });
         }
 
+        // An intermediate step does its one job without reasoning first: the
+        // plan already says what to do, and reasoning on every step tripled
+        // the time of a batch item. The written answer still reasons.
         let request = CompletionRequest {
             messages,
+            max_tokens: Some(STEP_MAX_TOKENS),
+            thinking: Some(false),
+            temperature: Some(STEP_TEMPERATURE),
+            // Recorded under the task and the step, so the time of each
+            // step of a batch item is measured.
+            call_context: Some(apollia_llm::CallContext {
+                session_id: self.plan.task_id.clone(),
+                turn_id: format!("step:{}", step.step_id),
+            }),
             ..Default::default()
         };
 
-        let backend_name = match &step.model_hint {
-            Some(hint) => {
-                if llm_router.get(Some(hint)).is_some() {
-                    Some(hint.as_str())
-                } else {
-                    tracing::warn!(
-                        step_id = %step.step_id,
-                        model_hint = %hint,
-                        detail = "falling back to the default backend",
-                        "step.model_hint.unknown"
-                    );
-                    None
-                }
-            }
-            None => None,
-        };
+        let backend_name = self.agent_backend(llm_router);
 
         let obs = LlmObsConfig::default();
-        let response = llm_router
-            .complete_with_observability(backend_name, request, Some(&self.event_bus), &obs)
+        // Streamed, so what the step writes is seen as it is written, under
+        // the task, as the conversation sees a turn.
+        let written = match llm_router
+            .stream_with_observability(backend_name, request.clone(), Some(&self.event_bus), &obs)
             .await
-            .map_err(|e| StepError::LlmCallFailed(e.to_string()))?;
+        {
+            Ok(mut stream) => {
+                let mut text = String::new();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(StreamChunk::Text(token)) => {
+                            let _ = self.event_bus.send(apollia_core::RuntimeEvent::ChatToken {
+                                session_id: self.plan.task_id.clone(),
+                                message_id: format!("{}:{}", self.plan.plan_id, step.step_id),
+                                token: token.clone(),
+                            });
+                            text.push_str(&token);
+                        }
+                        Ok(_) => {}
+                        Err(e) => return Err(StepError::LlmCallFailed(e.to_string())),
+                    }
+                }
+                text
+            }
+            Err(_) => {
+                llm_router
+                    .complete_with_observability(backend_name, request, Some(&self.event_bus), &obs)
+                    .await
+                    .map_err(|e| StepError::LlmCallFailed(e.to_string()))?
+                    .content
+            }
+        };
 
-        Ok(response.content)
-    }
-    /// Suspend step execution and wait for the human decision (HITL Orchestrated mode).
-    ///
-    /// ## Sequence
-    ///
-    /// 1. Register a oneshot channel in `pending_approvals`, receiver `rx`.
-    /// 2. Emit [`RuntimeEvent::TaskInputRequired`] with `step_id: Some(step.step_id)`
-    ///    on the `EventBus` to notify the user.
-    /// 3. Await `rx.await`: the `ResumeHandler` sends on the sender.
-    /// 4. If `approved=true`: `Ok(())`, the step's tool runs normally.
-    /// 5. If `approved=false`: `Err(StepError::RejectedByUser { reason })`.
-    /// 6. If the channel is closed (runtime shutdown): `Err(StepError::ApprovalChannelClosed)`.
-    ///
-    /// **StepBudget paused during suspension**: the wait is a pure `await`,
-    /// the step counter does not advance during the human suspension.
-    pub(super) async fn suspend_for_approval(
-        &self,
-        step: &PlanStep,
-        pending_approvals: &PendingApprovals,
-    ) -> Result<(), StepError> {
-        // Registration key: task_id + step_id to identify the suspension precisely.
-        let approval_key = format!("{}::{}", self.plan.task_id, step.step_id);
-
-        // 1. Register in PendingApprovals, get rx
-        let rx = pending_approvals.register(&approval_key);
-
-        // 2. Emit TaskInputRequired with step_id set (distinguishes Direct / Orchestrated mode)
-        let prompt = format!(
-            "Approval required before running '{}' (step: {})",
-            step.tool_hint.as_deref().unwrap_or("llm"),
-            step.step_id
-        );
-        let _ = self.event_bus.send(RuntimeEvent::TaskInputRequired {
-            task_id: self.plan.task_id.clone().into(),
-            prompt,
-            step_id: Some(step.step_id.clone()),
-        });
-
-        tracing::info!(
-            task_id = %self.plan.task_id,
-            step_id = %step.step_id,
-            tool = ?step.tool_hint,
-            "step.approval.suspended"
-        );
-
-        // 3. Wait for the human decision (pure await: StepBudget does not advance)
-        let response = rx.await.map_err(|_| StepError::ApprovalChannelClosed)?;
-
-        tracing::info!(
-            task_id = %self.plan.task_id,
-            step_id = %step.step_id,
-            approved = response.approved,
-            "step.approval.decided"
-        );
-
-        // 4/5. Return based on the decision
-        if response.approved {
-            Ok(())
-        } else {
-            Err(StepError::RejectedByUser {
-                reason: response
-                    .reason
-                    .unwrap_or_else(|| "Rejected by the user".into()),
-            })
-        }
+        Ok(apollia_llm::reasoning_markers::strip_reasoning(&written)
+            .trim()
+            .to_string())
     }
     /// Records an episodic memory entry for a completed step.
     ///

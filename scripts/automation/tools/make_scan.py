@@ -17,7 +17,7 @@ is an inert key, and awaitTurn's timeout bounds a whole agent turn rather
 than a lookup, so capping it would abort legitimate turns.
 
 The output is data only: no runner change, picked up at runtime by
-`just desktop-dev-automation-seeded scripts/automation/master-det-scan.json`.
+`just automation-seeded scripts/automation/master-det-scan.json`.
 Feed the resulting report.json to tools/analyze_report.py to group failures by
 section, then fix testids diff-first and rerun.
 
@@ -31,7 +31,7 @@ import json
 SCRIPTS = "scripts/automation"
 
 # step kinds whose timeoutMs the runner reads to locate an element
-WAIT_KINDS = {"waitFor", "waitGone", "click", "fill", "selectOption", "press"}
+WAIT_KINDS = {"waitFor", "waitGone", "click", "fill", "selectOption", "press", "drag"}
 
 
 def main():

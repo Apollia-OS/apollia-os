@@ -4,18 +4,16 @@ This module exposes the ``Ctx`` Protocol - the unique surface an agent
 sees at runtime - plus the multi-modal content types and the
 small set of helpers used to build vision messages.
 
-Legacy ``AIPResult`` is kept here for backward compatibility with the
-agents under :mod:`apollia.agents`.  New
-agents should not depend on it directly: handlers return plain values
-and the dispatch boundary builds the canonical AIPResult dict.
+Legacy ``AIPResult`` is kept here. A tool or a workflow returns a plain
+value and never builds one.
 """
 
 import base64
 import mimetypes
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
+from typing import Annotated, Any, Final, Literal, Protocol, TypedDict, runtime_checkable
 
-from apollia.context.a2a import A2AInterface
+from apollia.context.agents import AgentsInterface
 from apollia.context.budget import BudgetView
 from apollia.context.datasources import DatasourcesInterface
 from apollia.context.events import EventsInterface
@@ -29,6 +27,8 @@ from apollia.context.secrets import SecretsInterface
 from apollia.context.stt import SttInterface
 from apollia.context.templates import TemplatesInterface
 from apollia.context.tools import ToolProxy
+from apollia.context.user import UserInterface
+from apollia.context.workflows import WorkflowsInterface
 from apollia.context.workspace import WorkspaceContext
 from apollia.hitl import ApprovalPayload, InputResponse, QuestionPayload
 
@@ -168,22 +168,60 @@ def image_from_url(url: str) -> ImageContent:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Workflow input types
+# ──────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class InputFormat:
+    """What a text input of a workflow holds, beyond being text.
+
+    Carried as ``Annotated`` metadata by :data:`LongText` and
+    :data:`FileInput`, and written as the JSON Schema ``format`` of the input,
+    so the launch form picks its field and the runtime checks the value before
+    the run. A date needs no marker: annotate the input ``datetime.date``.
+
+    Attributes:
+        format: ``long-text`` or ``file-path``.
+    """
+
+    format: str
+
+
+#: JSON Schema ``format`` of a date input, ``datetime.date``: ``YYYY-MM-DD``.
+DATE_FORMAT: Final = "date"
+#: JSON Schema ``format`` of a long text input, :data:`LongText`.
+LONG_TEXT_FORMAT: Final = "long-text"
+#: JSON Schema ``format`` of a file input, :data:`FileInput`.
+FILE_PATH_FORMAT: Final = "file-path"
+
+#: A text input written over several lines (a brief, a note); the form shows a
+#: text area. The workflow receives a ``str``.
+LongText = Annotated[str, InputFormat(LONG_TEXT_FORMAT)]
+
+#: A file the user picks; the form shows a file chooser. The workflow receives
+#: the absolute path of the file as a ``str``, and the runtime refuses a launch
+#: whose file does not exist.
+FileInput = Annotated[str, InputFormat(FILE_PATH_FORMAT)]
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Ctx Protocol - the unique surface the agent sees
 # ──────────────────────────────────────────────────────────────────────
 
 
 @runtime_checkable
 class Ctx(Protocol):
-    """Runtime context passed to every agent handler.
+    """Runtime context passed to every tool and every workflow.
 
-    The attributes below are the whole surface an agent sees, and their reach
+    The attributes below are the whole surface the code sees, and their reach
     is not uniform: ``ctx.workspace``, ``ctx.notify`` and ``ctx.stt`` are
     ``None`` on every binary this project ships, and ``ctx.mail`` raises
     outside the desktop application. Each service page states its own reach.
     Use type hints to get IDE autocomplete::
 
-        @skill("foo.bar")
-        async def bar(self, name: str, ctx: Ctx) -> dict:
+        @tool("greet", "Greet a known user.", action="read_personal")
+        async def greet(ctx: Ctx, name: str) -> dict:
             user = await ctx.memory.recall(f"user.{name}")
             ...
     """
@@ -191,13 +229,25 @@ class Ctx(Protocol):
     llm: LlmProxy
     memory: MemoryInterface
     tools: ToolProxy
-    a2a: A2AInterface
+    #: Run an installed agent with a message. Bound in a workflow run.
+    agents: AgentsInterface
+    #: Run an installed workflow with typed inputs. Bound in a workflow run.
+    workflows: WorkflowsInterface
+    #: Ask the user a question and wait for the answer. Bound in a workflow run.
+    user: UserInterface
     mail: MailInterface
     datasources: DatasourcesInterface
     templates: TemplatesInterface
     secrets: SecretsInterface
     events: EventsInterface
     logger: Logger
+    #: The user profile resolved for this execution: the profile designated
+    #: for the agent, else the default one. ``None`` unless the profile source
+    #: is checked for the agent (package ``sources`` default, replaced by the
+    #: user's override); each read is recorded in the execution trace. Five
+    #: fields (``name``, ``role``, ``function``, ``tools``, ``preferences``)
+    #: and a free text (``free_text``); see
+    #: :class:`apollia.context.profile.ProfileInterface`.
     profile: ProfileInterface | None
     workspace: WorkspaceContext
     stt: SttInterface
@@ -208,11 +258,6 @@ class Ctx(Protocol):
     #: The operator's response to the pause being resumed, ``None`` on a first
     #: run. See :mod:`apollia.hitl`.
     input_response: InputResponse | None
-
-    # NOTE: ReAct lives as a free function `apollia.react(ctx, ...)`,
-    # not on the Ctx protocol. Keeping it off the Ctx surface avoids a
-    # PyO3 injection layer and lets users compose alternative reasoning
-    # loops without subclassing the runtime context.
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -298,22 +343,28 @@ class AIPResult:
 
 # Re-exports utiles
 __all__ = [
-    "A2AInterface",
+    "DATE_FORMAT",
+    "FILE_PATH_FORMAT",
+    "LONG_TEXT_FORMAT",
     # Legacy
     "AIPResult",
+    "AgentsInterface",
     "BudgetView",
     # Ctx surface
     "Ctx",
     "DatasourcesInterface",
     "EventsInterface",
+    "FileInput",
     "ImageContent",
     "ImageSourceBase64",
     "ImageSourceUrl",
+    "InputFormat",
     "LlmMessage",
     # Re-exports of the ctx Protocol classes (handy for type hints)
     "LlmProxy",
     "LlmResponse",
     "Logger",
+    "LongText",
     "MailInterface",
     "MailMessage",
     "MemoryInterface",
@@ -327,6 +378,8 @@ __all__ = [
     "TemplatesInterface",
     "TextContent",
     "ToolProxy",
+    "UserInterface",
+    "WorkflowsInterface",
     "WorkspaceContext",
     "image_from_bytes",
     "image_from_path",

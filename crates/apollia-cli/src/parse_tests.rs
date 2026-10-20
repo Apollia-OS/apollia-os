@@ -12,16 +12,19 @@ use clap::Parser;
 
 use crate::commands::a2a::A2aCommand;
 use crate::commands::agent::{AgentCommand, PackageCommand};
+use crate::commands::approvals::ApprovalsCommand;
 use crate::commands::audit::AuditCommand;
-use crate::commands::chat::ChatHygieneCommand;
+use crate::commands::chat::{ChatHygieneCommand, ChatNotesCommand, ChatSettingsCommand};
 use crate::commands::chat_config::ChatConfigCommand;
 use crate::commands::config::ConfigCommand;
 use crate::commands::digest::DigestWindow;
 use crate::commands::llm::{LlmBackendsCommand, LlmCommand};
 use crate::commands::mcp::McpCommand;
 use crate::commands::memory::{MemoryCommand, MemoryType};
+use crate::commands::package::{PackageCommand as ApoPackageCommand, TrustCommand};
 use crate::commands::permissions::PermissionsCommand;
-use crate::commands::project::{ProjectAgentsCommand, ProjectCommand, ProjectTemplatesCommand};
+use crate::commands::policy::PolicyCommand;
+use crate::commands::service::ServiceCommand;
 use crate::commands::task::TaskCommand;
 use crate::commands::tools::{
     ToolsApprovalsCmd, ToolsCommand, ToolsConfigCmd, ToolsCredentialsCmd,
@@ -34,6 +37,148 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 // ─── agent ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_parses_agent_set_with_list_values() {
+    // GIVEN "apollia-os agent set invoices access file_read web_fetch"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "agent",
+        "set",
+        "invoices",
+        "access",
+        "file_read",
+        "web_fetch",
+    ]);
+    // THEN the agent, the field and every value are carried through
+    let Commands::Agent {
+        command:
+            AgentCommand::Set {
+                agent_id,
+                field,
+                values,
+            },
+    } = cli.command
+    else {
+        panic!("expected agent set");
+    };
+    assert_eq!(agent_id, "invoices");
+    assert_eq!(field, "access");
+    assert_eq!(values, vec!["file_read", "web_fetch"]);
+}
+
+#[test]
+fn test_cli_parses_agent_set_with_no_value() {
+    // GIVEN "apollia-os agent set invoices sources" (an empty list)
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "agent", "set", "invoices", "sources"]);
+    // THEN the values are empty
+    let Commands::Agent {
+        command: AgentCommand::Set { values, .. },
+    } = cli.command
+    else {
+        panic!("expected agent set");
+    };
+    assert!(values.is_empty());
+}
+
+#[test]
+fn test_cli_parses_agent_reset() {
+    // GIVEN "apollia-os agent reset invoices --field mission --confirm"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "agent",
+        "reset",
+        "invoices",
+        "--field",
+        "mission",
+        "--confirm",
+    ]);
+    // THEN the field and the confirmation are carried through
+    let Commands::Agent {
+        command:
+            AgentCommand::Reset {
+                agent_id,
+                field,
+                confirm,
+            },
+    } = cli.command
+    else {
+        panic!("expected agent reset");
+    };
+    assert_eq!(agent_id, "invoices");
+    assert_eq!(field.as_deref(), Some("mission"));
+    assert!(confirm);
+}
+
+#[test]
+fn test_cli_parses_agent_export() {
+    // GIVEN "apollia-os agent export veille --sign --publisher Ada -o out.apo"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "agent",
+        "export",
+        "veille",
+        "--sign",
+        "--publisher",
+        "Ada",
+        "-o",
+        "out.apo",
+    ]);
+    // THEN the agent, the signature, the publisher and the file are carried
+    let Commands::Agent {
+        command:
+            AgentCommand::Export {
+                agent_id,
+                sign,
+                publisher,
+                output,
+            },
+    } = cli.command
+    else {
+        panic!("expected agent export");
+    };
+    assert_eq!(agent_id, "veille");
+    assert!(sign);
+    assert_eq!(publisher.as_deref(), Some("Ada"));
+    assert_eq!(output, Some(std::path::PathBuf::from("out.apo")));
+}
+
+#[test]
+fn test_cli_parses_agent_export_unsigned_by_default() {
+    // GIVEN "apollia-os agent export veille"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "agent", "export", "veille"]);
+    // THEN nothing is signed and the setting names the publisher
+    let Commands::Agent {
+        command: AgentCommand::Export {
+            sign, publisher, ..
+        },
+    } = cli.command
+    else {
+        panic!("expected agent export");
+    };
+    assert!(!sign);
+    assert_eq!(publisher, None);
+}
+
+#[test]
+fn test_cli_parses_agent_list_definitions() {
+    // GIVEN "apollia-os agent list --definitions"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "agent", "list", "--definitions"]);
+    // THEN the stored agents are asked for
+    let Commands::Agent {
+        command: AgentCommand::List { definitions, .. },
+    } = cli.command
+    else {
+        panic!("expected agent list");
+    };
+    assert!(definitions);
+}
 
 #[test]
 fn test_cli_parses_agent_package_list() {
@@ -87,26 +232,127 @@ fn test_cli_parses_agent_package_uninstall_with_confirm() {
     else {
         panic!("expected agent package");
     };
-    let PackageCommand::Uninstall { name, confirm } = cmd else {
+    let PackageCommand::Uninstall {
+        name,
+        confirm,
+        clear_memory,
+        clear_history,
+    } = cmd
+    else {
         panic!("expected package uninstall");
     };
     assert_eq!(name, "invoice-reader");
     assert!(confirm);
+    // AND the memory and the history are kept unless asked
+    assert!(!clear_memory && !clear_history);
 }
 
 #[test]
-fn test_cli_parses_agent_repair() {
-    // GIVEN "apollia-os agent repair invoice-reader"
+fn test_cli_parses_agent_package_uninstall_erasing_memory_and_history() {
+    // GIVEN "apollia-os agent package uninstall invoice-reader --clear-memory
+    // --clear-history --confirm"
     // WHEN the top-level parser reads it
-    let cli = parse(&["apollia-os", "agent", "repair", "invoice-reader"]);
-    // THEN AgentCommand::Repair carries the agent name
+    let cli = parse(&[
+        "apollia-os",
+        "agent",
+        "package",
+        "uninstall",
+        "invoice-reader",
+        "--clear-memory",
+        "--clear-history",
+        "--confirm",
+    ]);
+    // THEN both erasures are carried
     let Commands::Agent {
-        command: AgentCommand::Repair { name },
+        command: AgentCommand::Package { cmd },
     } = cli.command
     else {
-        panic!("expected agent repair");
+        panic!("expected agent package");
     };
-    assert_eq!(name, "invoice-reader");
+    let PackageCommand::Uninstall {
+        clear_memory,
+        clear_history,
+        ..
+    } = cmd
+    else {
+        panic!("expected package uninstall");
+    };
+    assert!(clear_memory && clear_history);
+}
+
+#[test]
+fn test_cli_parses_agent_uninstall_erasing_memory_only() {
+    // GIVEN "apollia-os agent uninstall notes --clear-memory --confirm"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "agent",
+        "uninstall",
+        "notes",
+        "--clear-memory",
+        "--confirm",
+    ]);
+    // THEN the memory is erased and the history kept
+    let Commands::Agent {
+        command:
+            AgentCommand::Uninstall {
+                name,
+                clear_memory,
+                clear_history,
+                ..
+            },
+    } = cli.command
+    else {
+        panic!("expected agent uninstall");
+    };
+    assert_eq!(name, "notes");
+    assert!(clear_memory);
+    assert!(!clear_history);
+}
+
+#[test]
+fn test_cli_parses_package_new() {
+    // GIVEN "apollia-os package new invoice-sorter --output-dir /tmp/work"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "package",
+        "new",
+        "invoice-sorter",
+        "--output-dir",
+        "/tmp/work",
+    ]);
+    // THEN PackageCommand::New carries the name and the folder
+    let Commands::Package {
+        command: ApoPackageCommand::New { name, output_dir },
+    } = cli.command
+    else {
+        panic!("expected package new");
+    };
+    assert_eq!(name, "invoice-sorter");
+    assert_eq!(output_dir, Some(std::path::PathBuf::from("/tmp/work")));
+}
+
+#[test]
+fn test_cli_no_longer_parses_the_verbs_of_the_former_agent_contract() {
+    // GIVEN the verbs that installed, checked, scaffolded or repaired an
+    // agent written as a Python class, and the command that inspected one
+    let retired: [&[&str]; 6] = [
+        &["apollia-os", "agent", "install", "./agent.py"],
+        &["apollia-os", "agent", "update", "notes", "./agent.py"],
+        &["apollia-os", "agent", "create", "notes"],
+        &["apollia-os", "agent", "validate", "./agent.py"],
+        &["apollia-os", "agent", "repair", "notes"],
+        &["apollia-os", "inspect", "./agent.py"],
+    ];
+
+    for args in retired {
+        // WHEN the top-level parser reads one
+        let parsed = Cli::try_parse_from(args);
+
+        // THEN it is refused: there is one way to write an agent, a package
+        assert!(parsed.is_err(), "{args:?} still parses");
+    }
 }
 
 // ─── a2a ─────────────────────────────────────────────────────────────────────
@@ -396,34 +642,6 @@ fn test_cli_parses_tools_approvals_pending() {
     assert!(matches!(command, ToolsApprovalsCmd::Pending));
 }
 
-#[test]
-fn test_cli_parses_tools_approvals_resolved_with_window() {
-    // GIVEN "apollia-os tools approvals resolved --days 3 --limit 5"
-    // WHEN the top-level parser reads it
-    let cli = parse(&[
-        "apollia-os",
-        "tools",
-        "approvals",
-        "resolved",
-        "--days",
-        "3",
-        "--limit",
-        "5",
-    ]);
-    // THEN the window overrides the defaults of 7 days and 50 entries
-    let Commands::Tools {
-        command: ToolsCommand::Approvals { command },
-    } = cli.command
-    else {
-        panic!("expected tools approvals");
-    };
-    let ToolsApprovalsCmd::Resolved { days, limit } = command else {
-        panic!("expected tools approvals resolved");
-    };
-    assert_eq!(days, 3);
-    assert_eq!(limit, 5);
-}
-
 // ─── audit ───────────────────────────────────────────────────────────────────
 
 #[test]
@@ -446,6 +664,11 @@ fn test_cli_parses_audit_journal_with_page() {
                 limit,
                 offset,
                 agents,
+                families,
+                natures,
+                results,
+                since,
+                until,
             },
     } = cli.command
     else {
@@ -453,7 +676,53 @@ fn test_cli_parses_audit_journal_with_page() {
     };
     assert_eq!(limit, 5);
     assert_eq!(offset, 10);
-    assert!(agents.is_empty());
+    // AND no filter is set
+    assert!(agents.is_empty() && families.is_empty() && natures.is_empty());
+    assert!(results.is_empty() && since.is_none() && until.is_none());
+}
+
+#[test]
+fn test_cli_parses_audit_journal_with_every_filter() {
+    // GIVEN "apollia-os audit journal" with a family twice, a nature, a
+    // result and a period
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "audit",
+        "journal",
+        "--family",
+        "read",
+        "--family",
+        "send_external",
+        "--nature",
+        "action",
+        "--result",
+        "refused",
+        "--since",
+        "2026-10-01",
+        "--until",
+        "2026-10-04",
+    ]);
+    // THEN each filter is carried as given, the repeated one in order
+    let Commands::Audit {
+        command:
+            AuditCommand::Journal {
+                families,
+                natures,
+                results,
+                since,
+                until,
+                ..
+            },
+    } = cli.command
+    else {
+        panic!("expected audit journal");
+    };
+    assert_eq!(families, vec!["read", "send_external"]);
+    assert_eq!(natures, vec!["action"]);
+    assert_eq!(results, vec!["refused"]);
+    assert_eq!(since.as_deref(), Some("2026-10-01"));
+    assert_eq!(until.as_deref(), Some("2026-10-04"));
 }
 
 #[test]
@@ -766,30 +1035,6 @@ fn test_cli_parses_permissions_revoke_one_with_yes() {
     assert!(yes);
 }
 
-#[test]
-fn test_cli_parses_permissions_audit_filtered() {
-    // GIVEN "apollia-os permissions audit --tool bash --limit 5"
-    // WHEN the top-level parser reads it
-    let cli = parse(&[
-        "apollia-os",
-        "permissions",
-        "audit",
-        "--tool",
-        "bash",
-        "--limit",
-        "5",
-    ]);
-    // THEN the tool filter is carried and the limit overrides its default of 50
-    let Commands::Permissions {
-        command: PermissionsCommand::Audit { tool, limit },
-    } = cli.command
-    else {
-        panic!("expected permissions audit");
-    };
-    assert_eq!(tool.as_deref(), Some("bash"));
-    assert_eq!(limit, 5);
-}
-
 // ─── chat config ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -818,6 +1063,145 @@ fn test_cli_parses_chat_config_reset_with_confirm() {
     assert!(db.is_none());
 }
 
+#[test]
+fn test_cli_parses_chat_template_with_its_session() {
+    // GIVEN "apollia-os chat template s-1"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "chat", "template", "s-1"]);
+    // THEN the chat sub-command carries the session whose template is read
+    let Commands::Chat { command, .. } = cli.command else {
+        panic!("expected chat");
+    };
+    let Some(ChatHygieneCommand::Template { session_id }) = command else {
+        panic!("expected chat template");
+    };
+    assert_eq!(session_id, "s-1");
+}
+
+#[test]
+fn test_cli_refuses_chat_template_without_a_session() {
+    // GIVEN "apollia-os chat template" with no session id
+    // WHEN the top-level parser reads it
+    let parsed = Cli::try_parse_from(["apollia-os", "chat", "template"]);
+    // THEN it is refused: the session is required
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn test_cli_parses_chat_capabilities_with_its_session() {
+    // GIVEN "apollia-os chat capabilities s-1"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "chat", "capabilities", "s-1"]);
+    // THEN the chat sub-command carries the session whose model is described
+    let Commands::Chat { command, .. } = cli.command else {
+        panic!("expected chat");
+    };
+    let Some(ChatHygieneCommand::Capabilities { session_id }) = command else {
+        panic!("expected chat capabilities");
+    };
+    assert_eq!(session_id, "s-1");
+}
+
+#[test]
+fn test_cli_refuses_chat_capabilities_without_a_session() {
+    // GIVEN "apollia-os chat capabilities" with no session id
+    // WHEN the top-level parser reads it
+    let parsed = Cli::try_parse_from(["apollia-os", "chat", "capabilities"]);
+    // THEN it is refused: the session is required
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn test_cli_parses_chat_settings_get_and_set() {
+    // GIVEN "apollia-os chat settings get s-1" and the matching set
+    // WHEN the top-level parser reads each
+    let get = parse(&["apollia-os", "chat", "settings", "get", "s-1"]);
+    let set = parse(&[
+        "apollia-os",
+        "chat",
+        "settings",
+        "set",
+        "s-1",
+        r#"{"max_tokens":256}"#,
+    ]);
+    // THEN each carries its session, and the set its document
+    let Commands::Chat {
+        command: Some(ChatHygieneCommand::Settings { command }),
+        ..
+    } = get.command
+    else {
+        panic!("expected chat settings");
+    };
+    let ChatSettingsCommand::Get { session_id } = command else {
+        panic!("expected chat settings get");
+    };
+    assert_eq!(session_id, "s-1");
+    let Commands::Chat {
+        command: Some(ChatHygieneCommand::Settings { command }),
+        ..
+    } = set.command
+    else {
+        panic!("expected chat settings");
+    };
+    let ChatSettingsCommand::Set {
+        session_id,
+        settings,
+    } = command
+    else {
+        panic!("expected chat settings set");
+    };
+    assert_eq!(session_id, "s-1");
+    assert_eq!(settings, r#"{"max_tokens":256}"#);
+}
+
+#[test]
+fn test_cli_refuses_chat_settings_set_without_a_document() {
+    // GIVEN "apollia-os chat settings set s-1" with no settings
+    // WHEN the top-level parser reads it
+    let parsed = Cli::try_parse_from(["apollia-os", "chat", "settings", "set", "s-1"]);
+    // THEN it is refused: the document is required
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn test_cli_parses_chat_notes_get_and_set() {
+    // GIVEN "apollia-os chat notes get s-1" and the matching set
+    // WHEN the top-level parser reads each
+    let get = parse(&["apollia-os", "chat", "notes", "get", "s-1"]);
+    let set = parse(&[
+        "apollia-os",
+        "chat",
+        "notes",
+        "set",
+        "s-1",
+        "ask about March",
+    ]);
+    // THEN each carries its session, and the set its text
+    let Commands::Chat {
+        command: Some(ChatHygieneCommand::Notes { command }),
+        ..
+    } = get.command
+    else {
+        panic!("expected chat notes");
+    };
+    let ChatNotesCommand::Get { session_id } = command else {
+        panic!("expected chat notes get");
+    };
+    assert_eq!(session_id, "s-1");
+    let Commands::Chat {
+        command: Some(ChatHygieneCommand::Notes { command }),
+        ..
+    } = set.command
+    else {
+        panic!("expected chat notes");
+    };
+    let ChatNotesCommand::Set { session_id, notes } = command else {
+        panic!("expected chat notes set");
+    };
+    assert_eq!(session_id, "s-1");
+    assert_eq!(notes, "ask about March");
+}
+
 // ─── mcp ─────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -843,103 +1227,28 @@ fn test_cli_parses_mcp_list_with_discovery() {
 }
 
 #[test]
-fn test_cli_parses_mcp_set_approval_with_ttl() {
-    // GIVEN "apollia-os mcp set-approval files read_file --ttl-hours 1"
+fn test_cli_parses_mcp_server() {
+    // GIVEN "apollia-os mcp server"
     // WHEN the top-level parser reads it
-    let cli = parse(&[
-        "apollia-os",
-        "mcp",
-        "set-approval",
-        "files",
-        "read_file",
-        "--ttl-hours",
-        "1",
-    ]);
-    // THEN the server and tool are positional and the TTL overrides its default
+    let cli = parse(&["apollia-os", "mcp", "server"]);
+    // THEN it is the bridge, which takes no tool flag
     let Commands::Mcp {
-        command:
-            McpCommand::SetApproval {
-                server,
-                tool,
-                db,
-                ttl_hours,
-                json,
-            },
-    } = cli.command
-    else {
-        panic!("expected mcp set-approval");
-    };
-    assert_eq!(server, "files");
-    assert_eq!(tool, "read_file");
-    assert!(db.is_none());
-    assert_eq!(ttl_hours, 1);
-    assert!(!json);
-}
-
-#[test]
-fn test_cli_parses_mcp_list_pending() {
-    // GIVEN "apollia-os mcp list-pending --json"
-    // WHEN the top-level parser reads it
-    let cli = parse(&["apollia-os", "mcp", "list-pending", "--json"]);
-    // THEN the leaf-level json flag is set and the database stays default
-    let Commands::Mcp {
-        command: McpCommand::ListPending { db, json },
-    } = cli.command
-    else {
-        panic!("expected mcp list-pending");
-    };
-    assert!(db.is_none());
-    assert!(json);
-}
-
-#[test]
-fn test_cli_parses_mcp_revoke_approval() {
-    // GIVEN "apollia-os mcp revoke-approval files read_file"
-    // WHEN the top-level parser reads it
-    let cli = parse(&["apollia-os", "mcp", "revoke-approval", "files", "read_file"]);
-    // THEN the server and tool are carried
-    let Commands::Mcp {
-        command:
-            McpCommand::RevokeApproval {
-                server,
-                tool,
-                db,
-                json,
-            },
-    } = cli.command
-    else {
-        panic!("expected mcp revoke-approval");
-    };
-    assert_eq!(server, "files");
-    assert_eq!(tool, "read_file");
-    assert!(db.is_none());
-    assert!(!json);
-}
-
-#[test]
-fn test_cli_parses_mcp_server_with_runtime() {
-    // GIVEN "apollia-os mcp server --with-runtime --sandbox-root /tmp/box"
-    // WHEN the top-level parser reads it
-    let cli = parse(&[
-        "apollia-os",
-        "mcp",
-        "server",
-        "--with-runtime",
-        "--sandbox-root",
-        "/tmp/box",
-    ]);
-    // THEN the server arguments are carried in their flattened struct
-    let Commands::Mcp {
-        command: McpCommand::Server(args),
+        command: McpCommand::Server,
     } = cli.command
     else {
         panic!("expected mcp server");
     };
-    assert!(args.with_runtime);
-    assert_eq!(
-        args.sandbox_root,
-        Some(std::path::PathBuf::from("/tmp/box"))
-    );
+}
+
+#[test]
+fn test_cli_refuses_the_retired_mcp_server_flags() {
+    // GIVEN the flags the native-tool server used to take
+    for flag in ["--with-runtime", "--sandbox-root"] {
+        // WHEN the parser reads them
+        let parsed = Cli::try_parse_from(["apollia-os", "mcp", "server", flag]);
+        // THEN they are refused
+        assert!(parsed.is_err(), "{flag} must be refused");
+    }
 }
 
 // ─── config ──────────────────────────────────────────────────────────────────
@@ -987,6 +1296,21 @@ fn test_cli_parses_config_show() {
         panic!("expected config show");
     };
     assert!(file.is_none());
+}
+
+#[test]
+fn test_cli_parses_config_keys() {
+    // GIVEN "apollia-os config keys --json"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "config", "keys", "--json"]);
+    // THEN ConfigCommand::Keys, with the global JSON switch on
+    assert!(cli.json);
+    assert!(matches!(
+        cli.command,
+        Commands::Config {
+            command: ConfigCommand::Keys
+        }
+    ));
 }
 
 // ─── profile ─────────────────────────────────────────────────────────────────
@@ -1073,148 +1397,19 @@ fn test_cli_parses_profile_import_overwriting() {
     assert!(db.is_none());
 }
 
-// ─── project ─────────────────────────────────────────────────────────────────
+// ─── project (retired) ───────────────────────────────────────────────────────
 
 #[test]
-fn test_cli_parses_project_update_renaming() {
-    // GIVEN "apollia-os project update p-1 --name Facturation"
-    // WHEN the top-level parser reads it
-    let cli = parse(&[
-        "apollia-os",
-        "project",
-        "update",
-        "p-1",
-        "--name",
-        "Facturation",
-    ]);
-    // THEN only the field given on the command line is Some
-    let Commands::Project {
-        command:
-            ProjectCommand::Update {
-                id,
-                name,
-                description,
-                instructions,
-                workspace,
-                db,
-            },
-    } = cli.command
-    else {
-        panic!("expected project update");
-    };
-    assert_eq!(id, "p-1");
-    assert_eq!(name.as_deref(), Some("Facturation"));
-    assert!(description.is_none());
-    assert!(instructions.is_none());
-    assert!(workspace.is_none());
-    assert!(db.is_none());
-}
-
-#[test]
-fn test_cli_parses_project_delete_with_confirm() {
-    // GIVEN "apollia-os project delete p-1 --confirm"
-    // WHEN the top-level parser reads it
-    let cli = parse(&["apollia-os", "project", "delete", "p-1", "--confirm"]);
-    // THEN the identifier is carried and the destruction flag is set
-    let Commands::Project {
-        command: ProjectCommand::Delete { id, confirm, db },
-    } = cli.command
-    else {
-        panic!("expected project delete");
-    };
-    assert_eq!(id, "p-1");
-    assert!(confirm);
-    assert!(db.is_none());
-}
-
-#[test]
-fn test_cli_parses_project_agents_list() {
-    // GIVEN "apollia-os project agents list p-1"
-    // WHEN the top-level parser reads it
-    let cli = parse(&["apollia-os", "project", "agents", "list", "p-1"]);
-    // THEN the nested agents sub-command carries the project
-    let Commands::Project {
-        command: ProjectCommand::Agents { command },
-    } = cli.command
-    else {
-        panic!("expected project agents");
-    };
-    let ProjectAgentsCommand::List { project, db } = command else {
-        panic!("expected project agents list");
-    };
-    assert_eq!(project, "p-1");
-    assert!(db.is_none());
-}
-
-#[test]
-fn test_cli_parses_project_agents_remove_with_confirm() {
-    // GIVEN "apollia-os project agents remove p-1 invoice-reader --confirm"
-    // WHEN the top-level parser reads it
-    let cli = parse(&[
-        "apollia-os",
-        "project",
-        "agents",
-        "remove",
-        "p-1",
-        "invoice-reader",
-        "--confirm",
-    ]);
-    // THEN the pair is positional and the destruction flag is set
-    let Commands::Project {
-        command: ProjectCommand::Agents { command },
-    } = cli.command
-    else {
-        panic!("expected project agents");
-    };
-    let ProjectAgentsCommand::Remove {
-        project,
-        agent,
-        confirm,
-        db,
-    } = command
-    else {
-        panic!("expected project agents remove");
-    };
-    assert_eq!(project, "p-1");
-    assert_eq!(agent, "invoice-reader");
-    assert!(confirm);
-    assert!(db.is_none());
-}
-
-#[test]
-fn test_cli_parses_project_templates_list() {
-    // GIVEN "apollia-os project templates list"
-    // WHEN the top-level parser reads it
-    let cli = parse(&["apollia-os", "project", "templates", "list"]);
-    // THEN the nested templates sub-command is List
-    let Commands::Project {
-        command: ProjectCommand::Templates { command },
-    } = cli.command
-    else {
-        panic!("expected project templates");
-    };
-    let ProjectTemplatesCommand::List { db } = command else {
-        panic!("expected project templates list");
-    };
-    assert!(db.is_none());
-}
-
-#[test]
-fn test_cli_parses_project_templates_seed_builtins() {
-    // GIVEN "apollia-os project templates seed-builtins"
-    // WHEN the top-level parser reads it
-    let cli = parse(&["apollia-os", "project", "templates", "seed-builtins"]);
-    // THEN the kebab-case leaf resolves to SeedBuiltins
-    let Commands::Project {
-        command: ProjectCommand::Templates { command },
-    } = cli.command
-    else {
-        panic!("expected project templates");
-    };
-    let ProjectTemplatesCommand::SeedBuiltins { db } = command else {
-        panic!("expected project templates seed-builtins");
-    };
-    assert!(db.is_none());
+fn test_cli_refuses_the_retired_project_noun() {
+    // GIVEN the projects, which became sources
+    // WHEN `project list` and `project link` are parsed
+    let list = Cli::try_parse_from(["apollia-os", "project", "list"]);
+    let link = Cli::try_parse_from(["apollia-os", "project", "link", "p-1", "--session", "s-1"]);
+    // THEN clap refuses both as an unknown subcommand
+    for parsed in [list, link] {
+        let kind = parsed.err().map(|err| err.kind());
+        assert_eq!(kind, Some(clap::error::ErrorKind::InvalidSubcommand));
+    }
 }
 
 // ─── bare verbs ──────────────────────────────────────────────────────────────
@@ -1337,4 +1532,370 @@ fn test_cli_parses_explain() {
         panic!("expected explain");
     };
     assert_eq!(text, "what is a StepBudget");
+}
+
+// ─── package ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_parses_package_build() {
+    // GIVEN "apollia-os package build ./pkg --sign"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "package", "build", "./pkg", "--sign"]);
+    // THEN the folder and the signing request are carried, with the default key
+    let Commands::Package {
+        command: ApoPackageCommand::Build { dir, sign, key, .. },
+    } = cli.command
+    else {
+        panic!("expected package build");
+    };
+    assert_eq!(dir, std::path::PathBuf::from("./pkg"));
+    assert!(sign);
+    assert_eq!(key, "default");
+}
+
+#[test]
+fn test_cli_parses_package_inspect() {
+    // GIVEN "apollia-os package inspect lone.apo --json"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "package", "inspect", "lone.apo", "--json"]);
+    // THEN the archive path is carried and --json is global
+    assert!(cli.json);
+    let Commands::Package {
+        command: ApoPackageCommand::Inspect { file },
+    } = cli.command
+    else {
+        panic!("expected package inspect");
+    };
+    assert_eq!(file, std::path::PathBuf::from("lone.apo"));
+}
+
+#[test]
+fn test_cli_parses_package_preview() {
+    // GIVEN "apollia-os package preview crm.apo"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "package", "preview", "crm.apo"]);
+    // THEN the archive path is carried
+    let Commands::Package {
+        command: ApoPackageCommand::Preview { file },
+    } = cli.command
+    else {
+        panic!("expected package preview");
+    };
+    assert_eq!(file, std::path::PathBuf::from("crm.apo"));
+}
+
+#[test]
+fn test_cli_parses_package_install_with_every_confirmation() {
+    // GIVEN an install with every confirmation flag
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "package",
+        "install",
+        "crm.apo",
+        "--confirm-deps",
+        "--confirm-changes",
+        "--allow-downgrade",
+    ]);
+    // THEN each flag is carried
+    let Commands::Package {
+        command:
+            ApoPackageCommand::Install {
+                file,
+                confirm_deps,
+                confirm_changes,
+                allow_downgrade,
+            },
+    } = cli.command
+    else {
+        panic!("expected package install");
+    };
+    assert_eq!(file, std::path::PathBuf::from("crm.apo"));
+    assert!(confirm_deps && confirm_changes && allow_downgrade);
+}
+
+#[test]
+fn test_cli_parses_package_trust_import() {
+    // GIVEN "apollia-os package trust import <key> --label Acme"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "package",
+        "trust",
+        "import",
+        "acme.pub",
+        "--label",
+        "Acme",
+    ]);
+    // THEN the key and the label are carried
+    let Commands::Package {
+        command:
+            ApoPackageCommand::Trust {
+                command: TrustCommand::Import { key, label },
+            },
+    } = cli.command
+    else {
+        panic!("expected package trust import");
+    };
+    assert_eq!(key, "acme.pub");
+    assert_eq!(label, "Acme");
+}
+
+#[test]
+fn test_cli_refuses_package_trust_import_without_label() {
+    // GIVEN an import without its label
+    // WHEN the top-level parser reads it
+    let parsed = Cli::try_parse_from(["apollia-os", "package", "trust", "import", "acme.pub"]);
+    // THEN clap refuses it
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn test_cli_parses_package_trust_list() {
+    // GIVEN "apollia-os package trust list --json"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "package", "trust", "list", "--json"]);
+    // THEN the list verb is selected and --json is global
+    assert!(cli.json);
+    assert!(matches!(
+        cli.command,
+        Commands::Package {
+            command: ApoPackageCommand::Trust {
+                command: TrustCommand::List
+            }
+        }
+    ));
+}
+
+#[test]
+fn test_cli_parses_package_trust_remove() {
+    // GIVEN "apollia-os package trust remove <fingerprint> --confirm"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "package",
+        "trust",
+        "remove",
+        "ff00",
+        "--confirm",
+    ]);
+    // THEN the fingerprint and the confirmation are carried
+    let Commands::Package {
+        command:
+            ApoPackageCommand::Trust {
+                command:
+                    TrustCommand::Remove {
+                        fingerprint,
+                        confirm,
+                    },
+            },
+    } = cli.command
+    else {
+        panic!("expected package trust remove");
+    };
+    assert_eq!(fingerprint, "ff00");
+    assert!(confirm);
+}
+
+// ─── policy ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_parses_policy_keygen() {
+    // GIVEN "apollia-os policy keygen --out ./keys"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "policy", "keygen", "--out", "./keys"]);
+    // THEN the output folder is carried
+    let Commands::Policy {
+        command: PolicyCommand::Keygen { out },
+    } = cli.command
+    else {
+        panic!("expected policy keygen");
+    };
+    assert_eq!(out, std::path::PathBuf::from("./keys"));
+}
+
+#[test]
+fn test_cli_parses_policy_init() {
+    // GIVEN "apollia-os policy init ./policy"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "policy", "init", "./policy"]);
+    // THEN the folder is carried
+    let Commands::Policy {
+        command: PolicyCommand::Init { dir },
+    } = cli.command
+    else {
+        panic!("expected policy init");
+    };
+    assert_eq!(dir, std::path::PathBuf::from("./policy"));
+}
+
+#[test]
+fn test_cli_parses_policy_sign() {
+    // GIVEN "apollia-os policy sign --key ./keys/org.key ./policy"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "policy",
+        "sign",
+        "--key",
+        "./keys/org.key",
+        "./policy",
+    ]);
+    // THEN the key, the folder and the default publisher are carried
+    let Commands::Policy {
+        command:
+            PolicyCommand::Sign {
+                key,
+                publisher,
+                dir,
+            },
+    } = cli.command
+    else {
+        panic!("expected policy sign");
+    };
+    assert_eq!(key, std::path::PathBuf::from("./keys/org.key"));
+    assert_eq!(dir, std::path::PathBuf::from("./policy"));
+    assert_eq!(publisher, crate::commands::policy::DEFAULT_PUBLISHER);
+}
+
+#[test]
+fn test_cli_parses_policy_verify() {
+    // GIVEN "apollia-os policy verify ./policy --json"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "policy", "verify", "./policy", "--json"]);
+    // THEN the folder is carried and --json is global
+    assert!(cli.json);
+    let Commands::Policy {
+        command: PolicyCommand::Verify { dir },
+    } = cli.command
+    else {
+        panic!("expected policy verify");
+    };
+    assert_eq!(dir, std::path::PathBuf::from("./policy"));
+}
+
+#[test]
+fn test_cli_parses_policy_show() {
+    // GIVEN "apollia-os policy show"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "policy", "show"]);
+    // THEN the show leaf is selected
+    assert!(matches!(
+        cli.command,
+        Commands::Policy {
+            command: PolicyCommand::Show
+        }
+    ));
+}
+
+#[test]
+fn test_cli_policy_sign_requires_a_key() {
+    // GIVEN "apollia-os policy sign ./policy" without --key
+    // WHEN the top-level parser reads it
+    let result = Cli::try_parse_from(["apollia-os", "policy", "sign", "./policy"]);
+    // THEN it is a usage error
+    assert!(result.is_err());
+}
+
+// ─── service ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_parses_service_install_with_no_load() {
+    // GIVEN "apollia-os service install --no-load"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "service", "install", "--no-load"]);
+    // THEN the install verb carries the write-only flag
+    let Commands::Service { command } = cli.command else {
+        panic!("expected service");
+    };
+    assert!(matches!(command, ServiceCommand::Install { no_load: true }));
+}
+
+#[test]
+fn test_cli_parses_service_install_loads_by_default() {
+    // GIVEN "apollia-os service install"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "service", "install"]);
+    // THEN the service is handed to the manager unless asked otherwise
+    let Commands::Service { command } = cli.command else {
+        panic!("expected service");
+    };
+    assert!(matches!(
+        command,
+        ServiceCommand::Install { no_load: false }
+    ));
+}
+
+#[test]
+fn test_cli_parses_service_uninstall_with_confirm() {
+    // GIVEN "apollia-os service uninstall --confirm"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "service", "uninstall", "--confirm"]);
+    // THEN the destruction is confirmed
+    let Commands::Service { command } = cli.command else {
+        panic!("expected service");
+    };
+    assert!(matches!(
+        command,
+        ServiceCommand::Uninstall { confirm: true }
+    ));
+}
+
+#[test]
+fn test_cli_parses_service_status() {
+    // GIVEN "apollia-os service status"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "service", "status"]);
+    // THEN the status verb is selected
+    let Commands::Service { command } = cli.command else {
+        panic!("expected service");
+    };
+    assert!(matches!(command, ServiceCommand::Status));
+}
+
+// ─── approvals ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_parses_approvals_pending() {
+    // GIVEN "apollia-os approvals pending --json"
+    // WHEN the top-level parser reads it
+    let cli = parse(&["apollia-os", "approvals", "pending", "--json"]);
+    // THEN the pending verb of the approvals noun is selected, in JSON
+    assert!(cli.json);
+    let Commands::Approvals(args) = cli.command else {
+        panic!("expected approvals");
+    };
+    assert!(matches!(args.command, ApprovalsCommand::Pending));
+}
+
+#[test]
+fn test_cli_parses_approvals_decide() {
+    // GIVEN "apollia-os approvals decide <id> answer --value 180.50"
+    // WHEN the top-level parser reads it
+    let cli = parse(&[
+        "apollia-os",
+        "approvals",
+        "decide",
+        "workflow-question:r-1",
+        "answer",
+        "--value",
+        "180.50",
+    ]);
+    // THEN the decide verb carries the item, the answer and its value
+    let Commands::Approvals(args) = cli.command else {
+        panic!("expected approvals");
+    };
+    let ApprovalsCommand::Decide {
+        id,
+        answer,
+        value,
+        reason,
+    } = args.command
+    else {
+        panic!("expected decide");
+    };
+    assert_eq!(id, "workflow-question:r-1");
+    assert_eq!(answer, crate::commands::approvals::DecideAnswer::Answer);
+    assert_eq!(value.as_deref(), Some("180.50"));
+    assert!(reason.is_none());
 }

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{validate_bounds, ConfigError};
 
@@ -11,7 +11,8 @@ use super::{validate_bounds, ConfigError};
 /// Controls the capacity of the internal communication infrastructure: the
 /// EventBus broadcast channel and the actor mailboxes. Every field has a sane
 /// default via [`Default`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     /// EventBus broadcast channel capacity.
     ///
@@ -84,6 +85,22 @@ pub struct RuntimeConfig {
     /// ```
     #[serde(default = "default_startup_timeout_secs")]
     pub startup_timeout_secs: u64,
+
+    /// How long an installed agent stays loaded after its last call, in
+    /// seconds.
+    ///
+    /// An agent is loaded on its first call, never at startup. Once no call
+    /// has started for this long, what it loaded is released; the next call
+    /// loads it again.
+    /// Default: 600 (ten minutes). Bounds: [10, 86400].
+    ///
+    /// `apollia.toml` example:
+    /// ```toml
+    /// [runtime]
+    /// agent_idle_unload_secs = 1800
+    /// ```
+    #[serde(default = "default_agent_idle_unload_secs")]
+    pub agent_idle_unload_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -97,6 +114,7 @@ impl Default for RuntimeConfig {
             mailbox_max_payload_bytes: default_mailbox_max_payload_bytes(),
             mailbox_audit_full_payload: false,
             startup_timeout_secs: default_startup_timeout_secs(),
+            agent_idle_unload_secs: default_agent_idle_unload_secs(),
         }
     }
 }
@@ -138,12 +156,22 @@ impl RuntimeConfig {
             1024,
             16_777_216,
         )?;
+        validate_bounds(
+            "runtime.agent_idle_unload_secs",
+            self.agent_idle_unload_secs as usize,
+            10,
+            86_400,
+        )?;
         Ok(())
     }
 }
 
 fn default_startup_timeout_secs() -> u64 {
     300
+}
+
+fn default_agent_idle_unload_secs() -> u64 {
+    600
 }
 
 fn default_mailbox_visibility_timeout_secs() -> u64 {

@@ -1,66 +1,81 @@
-# Apollia OS, tutorials
+# Apollia Desktop, tutorials
 
-## Write the smallest agent
+## Create an agent without code
 
-An agent is a decorated Python class. `@on_message` handles a chat turn and
-returns the reply string.
+On the Agents screen, choose "Create an agent" and describe what you want it
+to do, in your own words: who it works for, what it reads, what it produces.
+Apollia drafts its sheet (mission, examples, accesses). Read it, correct what
+is wrong, and create it. You can then talk to it at once, and adjust it later
+from its sheet.
 
-```python
-from apollia import agent, on_message
-from apollia.types import Ctx
+## Talk with an agent
 
+Open the Chat screen, pick the agent, and write your request in your own
+words. When the agent wants to do something sensitive, such as sending an
+email or changing a file, Apollia asks you first; the question also appears on
+the To review screen.
 
-@agent(name="hello", version="0.1.0", description="Echoes back whatever you send.")
-class Hello:
-    @on_message
-    async def handle(self, message: str, history: list, ctx: Ctx) -> str:
-        return f"You said: {message}"
-```
+## Get a model
 
-## Install and run an agent from the CLI
+Open the AI screen and choose "Discover models". Pick what you want to do;
+the models that fit this computer come first, and each card says the memory
+it asks. Download one, then load it: the load window says whether it fits.
+An agent without a model of its own uses the default model.
+
+## Connect a tool or an account
+
+Open the Connections screen and add a connection from the selection: a
+mailbox, a folder, an MCP server, a Google or Microsoft account. Then open the
+sheet of an agent and grant it the connection, family of action by family of
+action.
+
+## Install a package someone sent you
+
+On the Agents screen, install the `.apo` file. Read the preview: the agents
+and workflows it contains, what each one asks to use, and who published it.
+Install only if that matches what you expect. From the command line, with the
+runtime started:
 
 ```bash
-# Install an agent package from a directory
-apollia-os agent install ./agents/examples/hello
-
-# List installed agents
-apollia-os agent list
-
-# Start an agent, then submit a task
-apollia-os agent start hello
-apollia-os run hello '{"message": "hi"}'
+apollia-os package preview /path/to/package.apo
+apollia-os package install /path/to/package.apo
 ```
 
-## Use memory
+## Adjust an agent
 
-Memory is read and written at the agent's initiative through `ctx.memory`. The
-runtime never injects it into your agent's prompt.
+Open its sheet on the Agents screen and choose "Adjust". You can change its
+mission, its examples, its model, the accesses it is granted and the sources
+it reads. Going back to the package defaults removes your adjustments. From
+the command line:
 
-```python
-# Store a value (source and confidence are optional)
-await ctx.memory.remember("user.city", "Lyon")
-
-# Recall it later, in this or a future session
-city = await ctx.memory.recall("user.city")   # -> "Lyon" or None
+```bash
+apollia-os agent show <agent>
+apollia-os agent reset <agent>
 ```
 
-## Expose a callable skill
+## Run an agent on a file
 
-```python
-from apollia import agent, skill
-from apollia.types import Ctx
+Open the sheet of the agent and choose "Process a batch". Pick a workbook, a
+CSV file or a folder, check the sheet and the header row Apollia proposes, and
+launch. You can pause, stop and retry the batch, and export its results.
 
+## Run a workflow
 
-@agent(name="notes", version="0.1.0", description="Keeps short notes.")
-class Notes:
-    @skill("notes.add", description="Append a note.")
-    async def add(self, text: str, ctx: Ctx) -> dict:
-        await ctx.memory.record("note", text)
-        return {"stored": text}
+On the Agents screen, launch the workflow and fill in the inputs it asks for.
+From the command line:
+
+```bash
+apollia-os workflow run <package>/<workflow> --input key=value
 ```
 
-## Delegate to another agent (A2A)
+## Automate an agent
 
-```python
-result = await ctx.a2a.invoke("notes.add", {"text": "buy milk"})
-```
+Open the sheet of the agent and choose "Automate", or open the Automations
+screen, and choose when it should run: on a schedule, at an interval, when a
+file changes, or when a webhook is called.
+
+## See what happened
+
+The sheet of an agent lists what the agent did, with the result of each run,
+and what changed on it. The Journal screen shows every decision and every run
+in one signed journal, which you can verify and export.

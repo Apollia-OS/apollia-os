@@ -8,6 +8,18 @@
 //! - `POST   /api/v1/sessions/:id/messages`   , send message
 //! - `POST   /api/v1/sessions/:id/authorize`  , resolve approval
 //! - `GET    /api/v1/sessions/:id/stream`     , SSE stream
+//! - `POST   /api/v1/sessions/:id/pause`      , pause the turn in flight
+//! - `GET    /api/v1/sessions/:id/metrics`    , the metrics panel
+//! - `GET    /api/v1/sessions/:id/workspace`  , the working directory
+//! - `POST   /api/v1/sessions/:id/messages/:message_id/regenerate`, run a turn again
+//! - `POST   /api/v1/sessions/:id/messages/:message_id/resend`, edit and resend
+//! - `GET    /api/v1/sessions/:id/continuation`, whether the last answer continues
+//! - `POST   /api/v1/sessions/:id/messages/:message_id/continue`, continue it
+//! - `PUT    /api/v1/sessions/:id/messages/:message_id`, rewrite an answer
+//! - `DELETE /api/v1/sessions/:id/messages/:message_id`, remove a message
+//! - `GET    /api/v1/sessions/approval-history`, decisions on chat tool calls
+//!
+//! The plan mode of a session lives in [`plan`].
 
 use std::convert::Infallible;
 
@@ -27,7 +39,20 @@ use crate::api::server::AppState;
 use crate::chat::types::{ChatMode, SessionStatus, ToolDecision};
 use crate::coordinator::ExecutionBackend;
 
+pub mod answers;
+pub mod approval_history;
+pub mod conversations;
+pub mod folders;
+pub mod pause;
+pub mod plan;
+pub mod prompt_template;
+pub mod session_reads;
+mod session_route;
+pub mod settings;
 mod sse;
+pub mod trash;
+pub mod turns;
+pub mod user_inputs;
 
 use sse::chat_event_to_sse;
 
@@ -38,13 +63,24 @@ pub struct CreateSessionRequest {
     pub mode: String,
     /// Agent name (required when `mode == "agent"`).
     pub agent_name: Option<String>,
-    /// Custom system prompt.
+    /// Instructions of the conversation, added to the mission of its agent and
+    /// never in its place: 4000 characters at most. Read back as
+    /// `settings.instructions`.
     pub system_prompt: Option<String>,
     /// List of tool names available in this session.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Project to link this session to.
-    pub project_id: Option<String>,
+    /// Limit the conversation to `tools`: of the accesses of its agent only
+    /// they are offered, and those the agent does not hold are proposed,
+    /// each of their calls asking for consent. Read back as
+    /// `settings.only_accesses`. Refused when `tools` is empty.
+    #[serde(default)]
+    pub limited_to_tools: bool,
+    /// The model of the session: the identifier of a language model of the
+    /// model index, `<server>/<model>` for a model of a declared server, or
+    /// the name of a backend. Absent keeps the model of the agent.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Request body for `POST /api/v1/sessions/:id/messages`.
@@ -52,6 +88,15 @@ pub struct CreateSessionRequest {
 pub struct SendMessageRequest {
     /// Text content of the user message.
     pub content: String,
+    /// Images sent after the text, for a model that reads images; at most
+    /// eight, each at most 10 MiB once decoded.
+    #[serde(default)]
+    pub images: Vec<crate::chat::images::ImageAttachment>,
+    /// Documents sent with the message (PDF, Word, PowerPoint, workbook, CSV):
+    /// the runtime extracts their text on reception. At most four, each at
+    /// most 20 MiB once decoded.
+    #[serde(default)]
+    pub documents: Vec<crate::chat::documents::DocumentAttachment>,
 }
 
 /// Response body for `POST /api/v1/sessions/:id/messages`.
@@ -82,11 +127,6 @@ pub struct AuthorizeToolRequest {
     /// `decision == "refuse"`.
     #[serde(default)]
     pub reason: Option<String>,
-    /// Always-accept scope. Only honoured when `decision == "always_accept"`.
-    /// Defaults to [`crate::chat::AlwaysAcceptScope::ThisSession`].
-    #[serde(default)]
-    #[schema(value_type = Option<String>)]
-    pub scope: Option<crate::chat::AlwaysAcceptScope>,
 }
 
 /// Standard error response body.
@@ -160,16 +200,23 @@ pub async fn create_session<B: ExecutionBackend + Clone>(
         }
     };
 
-    match manager
-        .create_session(crate::chat::manager::CreateSessionParams {
-            mode,
-            agent_name: body.agent_name,
-            system_prompt: body.system_prompt,
-            tools: body.tools,
-            project_id: body.project_id,
-        })
-        .await
-    {
+    let model = match body.model.filter(|m| !m.trim().is_empty()) {
+        Some(model) => Some(session_route::session_route(&state, model).await),
+        None => None,
+    };
+    let params = crate::chat::manager::CreateSessionParams {
+        mode,
+        agent_name: body.agent_name,
+        system_prompt: body.system_prompt,
+        tools: body.tools,
+        model,
+    };
+    let created = if body.limited_to_tools {
+        manager.create_limited_session(params).await
+    } else {
+        manager.create_session(params).await
+    };
+    match created {
         Ok(info) => (StatusCode::CREATED, Json(info)).into_response(),
         Err(e) => chat_error_to_response(e).into_response(),
     }
@@ -368,8 +415,10 @@ pub async fn close_session<B: ExecutionBackend + Clone>(
     request_body = SendMessageRequest,
     responses(
         (status = 202, description = "Message accepted", body = SendMessageResponse),
+        (status = 400, description = "An image or a document is refused: too many, too large, not decodable, or a document its reader cannot read", body = crate::api::openapi::ApiErrorBody),
         (status = 404, description = "Session not found", body = crate::api::openapi::ApiErrorBody),
         (status = 409, description = "Session closed or busy", body = crate::api::openapi::ApiErrorBody),
+        (status = 422, description = "The model of the session does not read images", body = crate::api::openapi::ApiErrorBody),
         (status = 503, description = "Chat subsystem unavailable", body = crate::api::openapi::ApiErrorBody),
     )
 )]
@@ -391,7 +440,18 @@ pub async fn send_message<B: ExecutionBackend + Clone>(
         }
     };
 
-    match manager.send_message(id, body.content).await {
+    let images = match crate::chat::images::decode_attachments(&body.images) {
+        Ok(images) => images,
+        Err(e) => return chat_error_to_response(e).into_response(),
+    };
+    let documents = match crate::chat::documents::decode_attachments(&body.documents) {
+        Ok(documents) => documents,
+        Err(e) => return chat_error_to_response(e).into_response(),
+    };
+    match manager
+        .send_message_with_attachments(id, body.content, images, documents)
+        .await
+    {
         Ok(message_id) => (
             StatusCode::ACCEPTED,
             Json(SendMessageResponse {
@@ -441,11 +501,7 @@ pub async fn authorize_tool<B: ExecutionBackend + Clone>(
         "refuse" => ToolDecision::Refuse {
             reason: body.reason.clone(),
         },
-        "always_accept" => ToolDecision::AlwaysAccept {
-            scope: body
-                .scope
-                .unwrap_or_else(crate::chat::AlwaysAcceptScope::safe_default),
-        },
+        "always_accept" => ToolDecision::AlwaysAccept,
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -704,9 +760,20 @@ fn chat_error_to_response(err: crate::chat::types::ChatError) -> (StatusCode, Js
         ChatError::NoLlmConfigured => (StatusCode::BAD_REQUEST, err.to_string()),
         ChatError::BudgetExhausted => (StatusCode::TOO_MANY_REQUESTS, err.to_string()),
         ChatError::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-        ChatError::ProjectNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
+        ChatError::FolderNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
+        ChatError::InvalidFolderName(_) => (StatusCode::BAD_REQUEST, err.to_string()),
+        ChatError::MessageNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
+        ChatError::MessageRefused(_) => (StatusCode::BAD_REQUEST, err.to_string()),
+        ChatError::ContinuationRefused(_) => (StatusCode::UNPROCESSABLE_ENTITY, err.to_string()),
         ChatError::NotAwaitingApproval { .. } => (StatusCode::CONFLICT, err.to_string()),
         ChatError::CostCeilingExceeded { .. } => (StatusCode::PAYMENT_REQUIRED, err.to_string()),
+        ChatError::ImagesNotSupported { .. } => (StatusCode::UNPROCESSABLE_ENTITY, err.to_string()),
+        ChatError::ImageRejected(_) => (StatusCode::BAD_REQUEST, err.to_string()),
+        ChatError::DocumentRejected(_) => (StatusCode::BAD_REQUEST, err.to_string()),
+        ChatError::InvalidSettings(_) => (StatusCode::BAD_REQUEST, err.to_string()),
+        ChatError::ContextLimitReached { .. } => {
+            (StatusCode::UNPROCESSABLE_ENTITY, err.to_string())
+        }
     };
     (status, Json(ErrorResponse { error: msg }))
 }
@@ -719,19 +786,18 @@ mod tests {
     use crate::eventbus::EventBus;
     use crate::registry::AgentRegistry;
     use crate::router::TaskRouterHandle;
-    use apollia_core::{AIPResult, AIPTask, AgentManifest, StepBudgetConfig, TaskStatus};
+    use apollia_core::{AIPResult, AIPTask, StepBudgetConfig, TaskStatus};
     use apollia_llm::LlmRouter;
     use apollia_tools::ToolRegistryHandle;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use std::future::Future;
-    use std::path::Path;
     use std::pin::Pin;
     use std::sync::Arc;
     use tower::ServiceExt;
 
     #[derive(Clone)]
-    struct MockBackend;
+    pub(super) struct MockBackend;
 
     impl From<DynBackend> for MockBackend {
         fn from(_: DynBackend) -> Self {
@@ -757,49 +823,30 @@ mod tests {
         }
     }
 
-    struct AlwaysOkLoader;
-    impl crate::api::routes_agents::AgentLoader for AlwaysOkLoader {
-        fn load_and_validate(&self, _path: &Path) -> Result<AgentManifest, String> {
-            Ok(AgentManifest {
-                format_version: 1,
-                name: "test-agent".into(),
-                version: "0.1.0".into(),
-                description: "test".into(),
-                tools_required: vec![],
-                tools_optional: vec![],
-                supports_streaming: false,
-                supports_a2a: false,
-                memory_namespace: None,
-                shared_memory_namespaces: vec![],
-                max_concurrent_tasks: 1,
-                step_budget: None,
-                network_allowlist: None,
-                dangerous_tools_allowed: false,
-                tags: vec![],
-                skills: vec![],
-                execution_mode: "auto".into(),
-                supports_mailbox: false,
-                mailbox_allowlist: None,
-                system_prompt: None,
-                tools_requiring_approval: vec![],
-                llm_backend: None,
-                packages: vec![],
-                memory_config: None,
-                agent_type: None,
-                examples: vec![],
-                limitations: vec![],
-                setup_notes: None,
-                agent_class: None,
-                user_memory_write: false,
-                datasources: vec![],
-                templates: vec![],
-                secrets: vec![],
-                check_commands: vec![],
-            })
-        }
+    fn test_router_with_chat(dir: &tempfile::TempDir) -> axum::Router {
+        test_router_with_chat_plan_default(dir, false)
     }
 
-    fn test_router_with_chat(dir: &tempfile::TempDir) -> axum::Router {
+    /// A router over a chat manager whose sessions start in plan mode when
+    /// `plan_mode_default` is set, its database `chat.db` under `dir`.
+    pub(super) fn test_router_with_chat_plan_default(
+        dir: &tempfile::TempDir,
+        plan_mode_default: bool,
+    ) -> axum::Router {
+        APIServer::build_router_for_test(chat_state_plan_default(dir, plan_mode_default))
+    }
+
+    /// The state of a runtime whose chat subsystem is up, with no model.
+    pub(super) fn chat_state(dir: &tempfile::TempDir) -> AppState<MockBackend> {
+        chat_state_plan_default(dir, false)
+    }
+
+    /// The state of a runtime whose chat subsystem is up, with no model, its
+    /// sessions starting in plan mode when `plan_mode_default` is set.
+    fn chat_state_plan_default(
+        dir: &tempfile::TempDir,
+        plan_mode_default: bool,
+    ) -> AppState<MockBackend> {
         let (event_tx, _) = EventBus::new();
         let registry_handle = AgentRegistry::spawn(event_tx.clone());
         let router_handle: TaskRouterHandle<MockBackend> =
@@ -811,7 +858,6 @@ mod tests {
             &db_path,
             Some(Arc::new(LlmRouter::empty())),
             tool_registry.clone(),
-            Arc::new(AlwaysOkLoader),
             None,
             event_tx.clone(),
             StepBudgetConfig::default(),
@@ -820,20 +866,17 @@ mod tests {
             None,
             None,
             None,
-            None,
-            None,
             apollia_mcp::session::LoadingMode::Eager,
             20,
-            None,  // no hooks in tests
-            false, // plan-mode default off in tests
+            None, // no hooks in tests
+            plan_mode_default,
         )
         .expect("spawn chat manager");
 
-        let state: AppState<MockBackend> = AppState {
+        AppState {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: Arc::new(AlwaysOkLoader),
             backend: MockBackend,
             llm_router: crate::api::server::shared_llm_router_from(Some(Arc::new(
                 LlmRouter::empty(),
@@ -844,11 +887,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: Some(tool_registry),
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -868,9 +913,13 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
-        };
-
-        APIServer::build_router_for_test(state)
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
+        }
     }
 
     #[tokio::test]
@@ -1134,5 +1183,40 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["session_id"], session_id);
         assert_eq!(json["items"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_user_inputs_are_listed_and_an_unknown_one_is_refused() {
+        // GIVEN a router whose chat manager holds no pending question
+        let dir = tempfile::tempdir().expect("tempdir");
+        let router = test_router_with_chat(&dir);
+
+        // WHEN the questions are listed, then an unknown one is answered
+        let list = Request::builder()
+            .uri("/api/v1/user-inputs")
+            .body(Body::empty())
+            .unwrap();
+        let listed = router.clone().oneshot(list).await.unwrap();
+        let body = serde_json::json!({ "answers": [{ "id": "q1", "value": "oui" }] });
+        let answer = Request::builder()
+            .method("POST")
+            .uri("/api/v1/user-inputs/ghost/answer")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let answered = router.oneshot(answer).await.unwrap();
+
+        // THEN the list is empty, and the answer names the missing request
+        assert_eq!(listed.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(listed.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), b"[]");
+        assert_eq!(answered.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let bytes = axum::body::to_bytes(answered.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("ghost"), "{json}");
     }
 }

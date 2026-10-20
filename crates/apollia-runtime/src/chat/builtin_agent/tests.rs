@@ -400,7 +400,6 @@ async fn test_simple_text_response() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -456,7 +455,6 @@ async fn test_turn_temperature_tracks_tool_exposure() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
@@ -487,7 +485,6 @@ async fn test_turn_temperature_defaults_when_unset() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
@@ -547,10 +544,10 @@ async fn test_no_hybrid_config_leaves_ceiling_flag_false() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
-    });
+    })
+    .with_governance(Some(super::governed_test_support::code_runs()));
 
     let budget = make_budget(20);
     let approvals = PendingChatApprovals::new();
@@ -632,10 +629,10 @@ async fn run_ceiling_exchange(
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
-    });
+    })
+    .with_governance(Some(super::governed_test_support::code_runs()));
     let budget = make_budget(20);
     let approvals = PendingChatApprovals::new();
     let mut authorized = HashSet::new();
@@ -649,7 +646,7 @@ async fn run_ceiling_exchange(
             "go",
             &[],
             "",
-            &[],
+            &["bash_executor".to_string()],
             &authorized,
             &approvals,
             &budget,
@@ -796,10 +793,10 @@ async fn test_tool_call_authorized() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
-    });
+    })
+    .with_governance(Some(super::governed_test_support::code_runs()));
 
     let budget = make_budget(10);
     let approvals = PendingChatApprovals::new();
@@ -863,7 +860,6 @@ async fn test_tool_call_hitl_accept() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -941,7 +937,6 @@ async fn test_tool_call_hitl_refuse() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -1021,7 +1016,6 @@ async fn test_tool_call_hitl_always_accept() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -1035,7 +1029,7 @@ async fn test_tool_call_hitl_always_accept() {
         let approvals = approvals.clone();
         async move {
             poll_until(std::time::Duration::from_secs(5), || {
-                approvals.resolve(&key, ToolDecision::always_accept_default())
+                approvals.resolve(&key, ToolDecision::AlwaysAccept)
             })
             .await;
         }
@@ -1064,11 +1058,12 @@ async fn test_tool_call_hitl_always_accept() {
         )
         .await;
 
-    // THEN tool executed AND newly_authorized contains "file_read"
+    // THEN the tool executed AND, nothing classifying it, "always" held for
+    // this call only: no grant by name leaves the loop
     let resp = result.expect("should succeed");
     assert_eq!(resp.tool_calls.len(), 1);
     assert_eq!(resp.tool_calls[0].status, ToolCallStatus::Executed);
-    assert_eq!(resp.newly_authorized, vec!["file_read".to_string()]);
+    assert!(resp.newly_authorized.is_empty());
 
     tool_registry.shutdown().await;
 }
@@ -1088,10 +1083,10 @@ async fn test_budget_exhausted() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
-    });
+    })
+    .with_governance(Some(super::governed_test_support::code_runs()));
 
     let budget = make_budget(1);
     let mut authorized = HashSet::new();
@@ -1174,6 +1169,8 @@ fn test_build_llm_messages() {
         "Final question",
         None,
         DEFAULT_CONTEXT_WINDOW_SIZE,
+        &crate::chat::images::TurnImages::default(),
+        false,
     );
 
     // THEN 5 messages in order: system, h1 (user), h2 (assistant), h3 (user), current user
@@ -1183,6 +1180,83 @@ fn test_build_llm_messages() {
     assert_eq!(messages[2].role, apollia_llm::types::Role::Assistant);
     assert_eq!(messages[3].role, apollia_llm::types::Role::User);
     assert_eq!(messages[4].role, apollia_llm::types::Role::User);
+}
+
+#[tokio::test]
+async fn test_every_streamed_call_of_a_turn_is_published_with_the_turn() {
+    // GIVEN a model that streams one tool call then text, and an agent running
+    // the turn whose answer is "answer-1"
+    let model = Arc::new(MockReActModel {
+        calls: vec![LlmToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+        }],
+        final_tokens: split_tokens("Done"),
+        iteration: AtomicU32::new(0),
+    });
+    let tool_registry = ToolRegistryHandle::start();
+    super::governed_test_support::register_writing(&tool_registry, "bash").await;
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
+    let agent = BuiltInChatAgent::new(BuiltInChatAgentDeps {
+        llm_router: make_router(model),
+        tool_registry,
+        tool_invoker: Arc::new(MockToolInvoker::new("output")),
+        event_bus: event_tx,
+        user_memory: None,
+        todo: None,
+        plan: None,
+    })
+    .with_governance(Some(super::governed_test_support::code_runs()))
+    .with_turn_id(Some("answer-1".into()));
+    let authorized: HashSet<String> = HashSet::from(["bash".to_string()]);
+
+    // WHEN the turn runs to its answer
+    let response = agent
+        .execute(
+            "s1",
+            "m1",
+            &RunId::new(),
+            "Go",
+            &[],
+            "prompt",
+            &["bash".to_string()],
+            &authorized,
+            &PendingChatApprovals::new(),
+            &make_budget(10),
+            None,
+            DEFAULT_CONTEXT_WINDOW_SIZE,
+            None,
+            None,
+            None,
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed");
+
+    // THEN each of its two calls is published with the session and the turn,
+    // and the response carries their two measures, the last one a stop
+    let mut turns = Vec::new();
+    while let Ok(evt) = event_rx.try_recv() {
+        if let RuntimeEvent::LlmCallCompleted {
+            session_id,
+            turn_id,
+            finish_reason,
+            ..
+        } = evt
+        {
+            turns.push((session_id, turn_id, finish_reason));
+        }
+    }
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    for (session_id, turn_id, _) in &turns {
+        assert_eq!(session_id.as_deref(), Some("s1"));
+        assert_eq!(turn_id.as_deref(), Some("answer-1"));
+    }
+    assert_eq!(response.llm_calls.len(), 2);
+    assert_eq!(response.llm_calls[0].end, apollia_llm::CallEnd::ToolCalls);
+    assert_eq!(response.llm_calls[1].end, apollia_llm::CallEnd::Stop);
 }
 
 /// Events emitted in correct order (including ChatToken).
@@ -1200,6 +1274,7 @@ async fn test_events_emitted_in_order() {
     });
     let router = make_router(model);
     let tool_registry = ToolRegistryHandle::start();
+    super::governed_test_support::register_writing(&tool_registry, "bash").await;
     let invoker: Arc<dyn ToolInvoker> = Arc::new(MockToolInvoker::new("output"));
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
     let agent = BuiltInChatAgent::new(BuiltInChatAgentDeps {
@@ -1208,10 +1283,10 @@ async fn test_events_emitted_in_order() {
         tool_invoker: invoker,
         event_bus: event_tx,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
-    });
+    })
+    .with_governance(Some(super::governed_test_support::code_runs()));
 
     let budget = make_budget(10);
     let mut authorized = HashSet::new();
@@ -1242,9 +1317,9 @@ async fn test_events_emitted_in_order() {
         .await
         .expect("should succeed");
 
-    // THEN events are: ResponseStarted (tool iteration), ToolCallStarted,
-    // ToolCallCompleted, ResponseStarted (text iteration), Token("Done"),
-    // ResponseCompleted
+    // THEN events are: ResponseStarted (tool iteration), ToolCallStarted and
+    // its journal twin, ToolCallCompleted and its journal twin, ResponseStarted
+    // (text iteration), Token("Done"), ResponseCompleted
     let mut event_names = Vec::new();
     while let Ok(evt) = event_rx.try_recv() {
         let name = match evt {
@@ -1252,6 +1327,8 @@ async fn test_events_emitted_in_order() {
             RuntimeEvent::ChatToken { .. } => "Token",
             RuntimeEvent::ChatToolCallStarted { .. } => "ToolCallStarted",
             RuntimeEvent::ChatToolCallCompleted { .. } => "ToolCallCompleted",
+            RuntimeEvent::ToolCallStarted { .. } => "JournalCallStarted",
+            RuntimeEvent::ToolCallCompleted { .. } => "JournalCallCompleted",
             RuntimeEvent::ChatResponseCompleted { .. } => "ResponseCompleted",
             RuntimeEvent::LlmCallCompleted { .. } => continue,
             RuntimeEvent::LlmResponseCaptured { .. } => continue,
@@ -1266,7 +1343,9 @@ async fn test_events_emitted_in_order() {
         vec![
             "ResponseStarted",
             "ToolCallStarted",
+            "JournalCallStarted",
             "ToolCallCompleted",
+            "JournalCallCompleted",
             "ResponseStarted",
             "Token",
             "ResponseCompleted"
@@ -1301,7 +1380,15 @@ fn test_truncate_preview_long() {
 fn test_default_system_prompt_used_when_empty() {
     // GIVEN empty system_prompt
     // WHEN the LLM messages are built
-    let messages = build_llm_messages("", &[], "Hello", None, DEFAULT_CONTEXT_WINDOW_SIZE);
+    let messages = build_llm_messages(
+        "",
+        &[],
+        "Hello",
+        None,
+        DEFAULT_CONTEXT_WINDOW_SIZE,
+        &crate::chat::images::TurnImages::default(),
+        false,
+    );
 
     // THEN first message is the empty string we passed (caller decides default)
     assert_eq!(messages.len(), 2);
@@ -1326,7 +1413,6 @@ async fn test_stream_tokens_emitted() {
         tool_invoker: invoker,
         event_bus: event_tx,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -1389,7 +1475,6 @@ async fn test_stream_accumulation() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -1486,7 +1571,6 @@ async fn test_stream_interrupted() {
         tool_invoker: invoker,
         event_bus: event_tx,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -1602,6 +1686,7 @@ async fn test_stream_with_tool_call() {
     });
     let router = make_router(model);
     let tool_registry = ToolRegistryHandle::start();
+    super::governed_test_support::register_writing(&tool_registry, "file_read").await;
     let invoker: Arc<dyn ToolInvoker> = Arc::new(MockToolInvoker::new("file content"));
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
     let agent = BuiltInChatAgent::new(BuiltInChatAgentDeps {
@@ -1610,7 +1695,6 @@ async fn test_stream_with_tool_call() {
         tool_invoker: invoker,
         event_bus: event_tx,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -1702,13 +1786,12 @@ async fn test_build_system_prompt_with_non_empty_user_memory() {
         tool_invoker: invoker,
         event_bus,
         user_memory: Some(repo),
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
 
     // WHEN building the system prompt
-    let prompt = agent.build_system_prompt(Some("Base prompt."), AutonomyLevel::Assisted, true);
+    let prompt = agent.build_system_prompt(Some("Base prompt."), AutonomyLevel::Assisted);
 
     // THEN the prompt opens with the authoritative environment block
     // (temporal context now leads the prompt) and still carries the
@@ -1721,38 +1804,39 @@ async fn test_build_system_prompt_with_non_empty_user_memory() {
     assert!(prompt.contains("apollia"));
 }
 
-// with a populated repo, a tier whose `inject_memory` is
-// false must NOT inject the persona block, while a tier with it true must.
+// The profile block follows the profile store the agent was handed, not the
+// tier: present at every tier with a store, absent at every tier without.
 #[tokio::test]
-async fn test_inject_memory_flag_gates_persona_block() {
-    // GIVEN an agent with a non-empty user memory repository
-    let repo = make_user_memory_repo(&[("preferences", "langue", "francais")]);
-    let router = make_router(Arc::new(MockStopModel::with_content("ok")));
-    let tool_registry = ToolRegistryHandle::start();
-    let invoker: Arc<dyn ToolInvoker> = Arc::new(MockToolInvoker::new("ok"));
-    let event_bus = make_event_bus();
-    let agent = BuiltInChatAgent::new(BuiltInChatAgentDeps {
-        llm_router: router,
-        tool_registry,
-        tool_invoker: invoker,
-        event_bus,
-        user_memory: Some(repo),
-        a2a_invoker: None,
-        todo: None,
-        plan: None,
-    });
+async fn test_the_profile_block_follows_the_store_not_the_tier() {
+    // GIVEN an agent handed a non-empty profile store, and one handed none
+    let agent_with = |store: Option<Arc<std::sync::Mutex<UserMemoryRepository>>>| {
+        BuiltInChatAgent::new(BuiltInChatAgentDeps {
+            llm_router: make_router(Arc::new(MockStopModel::with_content("ok"))),
+            tool_registry: ToolRegistryHandle::start(),
+            tool_invoker: Arc::new(MockToolInvoker::new("ok")),
+            event_bus: make_event_bus(),
+            user_memory: store,
+            todo: None,
+            plan: None,
+        })
+    };
+    let handed = agent_with(Some(make_user_memory_repo(&[(
+        "preferences",
+        "langue",
+        "francais",
+    )])));
+    let bare = agent_with(None);
 
-    // WHEN inject_memory is false (e.g. supervised tier)
-    let without = agent.build_system_prompt(None, AutonomyLevel::Supervised, false);
-    // THEN the persona block is absent despite the populated repo
-    assert!(!without.contains("## User Persona"));
-    assert!(!without.contains("francais"));
+    // WHEN the prompt is built at the lowest and at the highest tier
+    for level in [AutonomyLevel::Assisted, AutonomyLevel::LongAutonomous] {
+        let with = handed.build_system_prompt(None, level);
+        let without = bare.build_system_prompt(None, level);
 
-    // WHEN inject_memory is true (e.g. long autonomous tier)
-    let with = agent.build_system_prompt(None, AutonomyLevel::LongAutonomous, true);
-    // THEN the persona block is injected
-    assert!(with.contains("## User Persona"));
-    assert!(with.contains("francais"));
+        // THEN the block is present with the store and absent without it
+        assert!(with.contains("## User Persona"), "{with}");
+        assert!(with.contains("francais"), "{with}");
+        assert!(!without.contains("## User Persona"), "{without}");
+    }
 }
 
 // the effective budget is the tier budget capped by the
@@ -1797,13 +1881,12 @@ async fn test_build_system_prompt_with_empty_user_memory() {
         tool_invoker: invoker,
         event_bus,
         user_memory: Some(repo),
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
 
     // WHEN building the system prompt
-    let prompt = agent.build_system_prompt(Some("Base prompt."), AutonomyLevel::Assisted, true);
+    let prompt = agent.build_system_prompt(Some("Base prompt."), AutonomyLevel::Assisted);
 
     // THEN the prompt does NOT contain the user persona block
     assert!(!prompt.contains("User Persona"));
@@ -1822,13 +1905,12 @@ async fn test_build_system_prompt_without_repository() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
 
     // WHEN building the system prompt
-    let prompt = agent.build_system_prompt(Some("Base prompt."), AutonomyLevel::Assisted, true);
+    let prompt = agent.build_system_prompt(Some("Base prompt."), AutonomyLevel::Assisted);
 
     // THEN the prompt does NOT contain the user persona block
     assert!(!prompt.contains("User Persona"));
@@ -1849,7 +1931,6 @@ fn make_agent_no_memory() -> BuiltInChatAgent {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
@@ -1861,7 +1942,7 @@ async fn test_assisted_uses_default_prompt() {
     let agent = make_agent_no_memory();
 
     // WHEN building the prompt for the assisted tier
-    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted, false);
+    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted);
 
     // THEN it carries the reactive default marker, not the perseverance one
     assert!(prompt.contains("Act first"));
@@ -1874,7 +1955,7 @@ async fn test_bounded_autonomous_uses_perseverance_prompt() {
     let agent = make_agent_no_memory();
 
     // WHEN building the prompt for a bounded-autonomous tier
-    let prompt = agent.build_system_prompt(None, AutonomyLevel::BoundedAutonomous, false);
+    let prompt = agent.build_system_prompt(None, AutonomyLevel::BoundedAutonomous);
 
     // THEN it carries the perseverance marker, not the reactive default
     assert!(prompt.contains("Persevere to the objective"));
@@ -1887,7 +1968,7 @@ async fn test_long_autonomous_uses_perseverance_prompt() {
     let agent = make_agent_no_memory();
 
     // WHEN building the prompt for the long-autonomous tier
-    let prompt = agent.build_system_prompt(None, AutonomyLevel::LongAutonomous, false);
+    let prompt = agent.build_system_prompt(None, AutonomyLevel::LongAutonomous);
 
     // THEN it carries the perseverance marker
     assert!(prompt.contains("Persevere to the objective"));
@@ -1900,7 +1981,7 @@ async fn test_custom_prompt_preserved_for_assisted() {
     let custom = "Mon prompt personnalise";
 
     // WHEN building the prompt with the custom base
-    let prompt = agent.build_system_prompt(Some(custom), AutonomyLevel::Assisted, false);
+    let prompt = agent.build_system_prompt(Some(custom), AutonomyLevel::Assisted);
 
     // THEN the custom prompt is used verbatim
     assert!(prompt.contains("Mon prompt personnalise"));
@@ -1913,7 +1994,7 @@ async fn test_all_autonomy_levels_no_panic() {
 
     // WHEN / THEN every tier yields a prompt, and none of them is empty
     for level in AutonomyLevel::ALL {
-        let prompt = agent.build_system_prompt(None, level, false);
+        let prompt = agent.build_system_prompt(None, level);
         assert!(
             !prompt.is_empty(),
             "tier {level:?} produced an empty prompt"
@@ -1927,8 +2008,8 @@ async fn test_temporal_context_always_prepended() {
     let agent = make_agent_no_memory();
 
     // WHEN building both the assisted and an autonomous prompt
-    let p_assisted = agent.build_system_prompt(None, AutonomyLevel::Assisted, false);
-    let p_auto = agent.build_system_prompt(None, AutonomyLevel::LongAutonomous, false);
+    let p_assisted = agent.build_system_prompt(None, AutonomyLevel::Assisted);
+    let p_auto = agent.build_system_prompt(None, AutonomyLevel::LongAutonomous);
 
     // THEN both are longer than the bare constant (temporal block prepended)
     assert!(p_assisted.len() > DEFAULT_SYSTEM_PROMPT.len());
@@ -1965,12 +2046,61 @@ fn text_of(msg: &apollia_llm::types::ChatMessage) -> &str {
 }
 
 #[test]
+fn test_history_user_messages_are_rebuilt_with_their_images() {
+    // GIVEN a history whose first user message carried two images, and a
+    // follow-up that carries none
+    let history = make_history(4);
+    let images = vec![
+        apollia_llm::message_image::MessageImage::new("image/png", vec![1u8]),
+        apollia_llm::message_image::MessageImage::new("image/png", vec![2u8]),
+    ];
+    let mut turn = crate::chat::images::TurnImages::default();
+    turn.history.insert(history[0].id.clone(), images.clone());
+
+    // WHEN the messages of the follow-up turn are built
+    let messages = build_llm_messages(
+        "system",
+        &history,
+        "and the second?",
+        None,
+        20,
+        &turn,
+        false,
+    );
+
+    // THEN the first user message carries its images after its text, and the
+    // follow-up stays text alone
+    match &messages[1].content {
+        apollia_llm::types::MessageContent::TextWithImages {
+            text,
+            images: found,
+        } => {
+            assert_eq!(text, &history[0].content);
+            assert_eq!(found, &images);
+        }
+        other => panic!("expected the images, got {other:?}"),
+    }
+    assert_eq!(
+        text_of(messages.last().expect("follow-up")),
+        "and the second?"
+    );
+}
+
+#[test]
 fn test_context_window_short_conversation_includes_all() {
     // GIVEN a conversation shorter than window_size (10 messages, window=20)
     let history = make_history(10);
 
     // WHEN building context without summary
-    let messages = build_llm_messages("system", &history, "new msg", None, 20);
+    let messages = build_llm_messages(
+        "system",
+        &history,
+        "new msg",
+        None,
+        20,
+        &crate::chat::images::TurnImages::default(),
+        false,
+    );
 
     // THEN all 10 history messages are included (+ system + user = 12)
     assert_eq!(messages.len(), 12);
@@ -1985,7 +2115,15 @@ fn test_context_window_long_conversation_with_summary() {
     let summary = "The user discussed project setup and deployment.";
 
     // WHEN building context with summary
-    let messages = build_llm_messages("system", &history, "new msg", Some(summary), 20);
+    let messages = build_llm_messages(
+        "system",
+        &history,
+        "new msg",
+        Some(summary),
+        20,
+        &crate::chat::images::TurnImages::default(),
+        false,
+    );
 
     // THEN: system + summary + 20 windowed messages + user = 23
     assert_eq!(messages.len(), 23);
@@ -2009,7 +2147,15 @@ fn test_context_window_long_conversation_without_summary() {
     let history = make_history(40);
 
     // WHEN building context without summary
-    let messages = build_llm_messages("system", &history, "new msg", None, 20);
+    let messages = build_llm_messages(
+        "system",
+        &history,
+        "new msg",
+        None,
+        20,
+        &crate::chat::images::TurnImages::default(),
+        false,
+    );
 
     // THEN: system + 20 windowed messages + user = 22 (no summary message)
     assert_eq!(messages.len(), 22);
@@ -2083,7 +2229,9 @@ fn mcp_descriptor(full_name: &str) -> apollia_tools::descriptor::ToolDescriptor 
         output_schema: None,
         sandbox_profile: apollia_core::SandboxProfile::NetworkRestricted,
         tags: vec!["mcp".to_string()],
-        dangerous: false,
+        family: apollia_tools::ActionFamily::WriteOrDelete,
+        family_source: apollia_tools::FamilySource::Unsourced,
+        target_arg: None,
         is_read_only: false,
         risk_score: 3,
         approval_risk_level: None,
@@ -2112,6 +2260,7 @@ fn snapshot(server: &str, tool: &str) -> ToolIndexSnapshot {
 fn ro_descriptor(name: &str) -> apollia_tools::descriptor::ToolDescriptor {
     let mut d = mcp_descriptor(name);
     d.is_read_only = true;
+    d.family = apollia_tools::ActionFamily::Read;
     d
 }
 
@@ -2190,7 +2339,6 @@ fn agent_with(registry: ToolRegistryHandle, invoker: Arc<dyn ToolInvoker>) -> Bu
         tool_invoker: invoker,
         event_bus: make_event_bus(),
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
@@ -2214,8 +2362,8 @@ async fn run_turn(
 ) -> Vec<String> {
     let mut acc = ReactAccumulators {
         all_tool_calls: vec![],
-        newly_authorized: vec![],
         authorized: calls.iter().map(|c| c.name.clone()).collect(),
+        llm_calls: Vec::new(),
     };
     let valid_tool_names: HashSet<String> = calls.iter().map(|c| c.name.clone()).collect();
     let budget = make_budget(100);
@@ -2285,12 +2433,13 @@ async fn test_readonly_calls_run_in_parallel_preserving_order() {
 /// read-only authorized tools run concurrently, results merge in input order.
 #[tokio::test]
 async fn test_mixed_calls_preserve_global_order() {
-    // GIVEN a registered write tool, two read-only tools, and one unknown tool
+    // GIVEN two registered write tools and two read-only tools, every call
+    // granted for the run (a tool nothing describes would ask instead)
     let registry = ToolRegistryHandle::start();
     registry.register(mcp_descriptor("w_x")).await.unwrap(); // is_read_only = false
     registry.register(ro_descriptor("ro_a")).await.unwrap();
     registry.register(ro_descriptor("ro_b")).await.unwrap();
-    // "w_y" is intentionally not registered: unknown status is treated as write.
+    registry.register(mcp_descriptor("w_y")).await.unwrap();
     let invoker = Arc::new(ConcurrencyInvoker::new());
     let agent = agent_with(registry.clone(), invoker.clone());
     let calls = vec![
@@ -2363,8 +2512,8 @@ async fn run_turn_full(
 ) -> (Vec<ToolCallRecord>, u32) {
     let mut acc = ReactAccumulators {
         all_tool_calls: vec![],
-        newly_authorized: vec![],
         authorized: calls.iter().map(|c| c.name.clone()).collect(),
+        llm_calls: Vec::new(),
     };
     let valid_tool_names: HashSet<String> = calls.iter().map(|c| c.name.clone()).collect();
     let approvals = PendingChatApprovals::new();
@@ -2408,8 +2557,8 @@ async fn test_unknown_tool_name_refused_with_suggestion() {
     let calls = vec![tool_call(0, "web_serch")];
     let mut acc = ReactAccumulators {
         all_tool_calls: vec![],
-        newly_authorized: vec![],
         authorized: HashSet::new(),
+        llm_calls: Vec::new(),
     };
     let budget = make_budget(10);
     let approvals = PendingChatApprovals::new();
@@ -2810,6 +2959,70 @@ async fn test_build_tool_specs_deferred_index_above_limit_stays_search_only() {
     );
 }
 
+fn search_record(output: &str, status: ToolCallStatus) -> ToolCallRecord {
+    ToolCallRecord {
+        tool_name: "tool_search".to_string(),
+        input: serde_json::json!({"query": "notion"}),
+        output: Some(output.to_string()),
+        status,
+        rationale: None,
+        retry_attempts: Vec::new(),
+    }
+}
+
+#[test]
+fn test_promote_discovered_tools_declares_what_tool_search_found() {
+    // GIVEN a turn where only tool_search is declared and a search found a tool
+    let mut specs = vec![ToolSpec {
+        name: "tool_search".to_string(),
+        description: String::new(),
+        parameters: serde_json::json!({"type": "object"}),
+    }];
+    let found = r#"{"matches":[{"full_name":"mcp:notion/notion-fetch","tool_name":"notion-fetch","server_name":"notion","description":"Fetch a page","input_schema":{"type":"object","properties":{"id":{"type":"string"}}}}],"total":1}"#;
+    // WHEN the discovered tools are promoted
+    promote_discovered_tools(
+        &mut specs,
+        &[search_record(found, ToolCallStatus::Executed)],
+    );
+    // THEN the found tool is declared with the schema the search carried
+    let fetch = specs
+        .iter()
+        .find(|s| s.name == "mcp:notion/notion-fetch")
+        .expect("promoted spec");
+    assert_eq!(fetch.description, "Fetch a page");
+    assert_eq!(fetch.parameters["properties"]["id"]["type"], "string");
+}
+
+#[test]
+fn test_promote_discovered_tools_is_idempotent() {
+    // GIVEN the same search result seen on two iterations
+    let mut specs = Vec::new();
+    let found = r#"{"matches":[{"full_name":"mcp:notion/notion-fetch","tool_name":"notion-fetch","server_name":"notion","description":null,"input_schema":null}],"total":1}"#;
+    let records = [search_record(found, ToolCallStatus::Executed)];
+    // WHEN promoting twice
+    promote_discovered_tools(&mut specs, &records);
+    promote_discovered_tools(&mut specs, &records);
+    // THEN the tool is declared once, with a permissive schema when none came
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].parameters["type"], "object");
+}
+
+#[test]
+fn test_promote_discovered_tools_ignores_failed_and_foreign_calls() {
+    // GIVEN a failed search, and an unrelated tool whose output looks alike
+    let mut specs = Vec::new();
+    let found = r#"{"matches":[{"full_name":"mcp:notion/notion-fetch"}],"total":1}"#;
+    let mut other = search_record(found, ToolCallStatus::Executed);
+    other.tool_name = "web_read".to_string();
+    // WHEN promoting
+    promote_discovered_tools(
+        &mut specs,
+        &[search_record(found, ToolCallStatus::Failed), other],
+    );
+    // THEN nothing is declared
+    assert!(specs.is_empty());
+}
+
 #[tokio::test]
 async fn test_build_tool_specs_deferred_index_without_schema_is_still_callable() {
     // GIVEN an indexed tool whose server sent no usable schema
@@ -2923,13 +3136,21 @@ fn write_hook_script(dir: &std::path::Path, name: &str, decision_json: &str) -> 
 }
 
 /// Builds a hook executor with a single PreToolUse command handler.
+///
+/// The handler is `/bin/sh <script>`, never the script itself. A file written
+/// a moment earlier and executed for the first time is assessed by macOS
+/// before it runs, and those assessments queue: forty first executions
+/// launched together took up to 4.8 s, the same forty run again 0.04 s, and
+/// handed to `/bin/sh` as an argument 0.03 s on the first run. Under a parallel
+/// test run that queue pushed the handler past its 5 s timeout, and the deny
+/// or rewrite it would have answered was read as the permissive default.
 fn pre_tool_use_executor(script: String) -> Arc<HookExecutor> {
     let registry = crate::hooks::HookRegistry::from_config(&apollia_core::HooksConfig {
         handlers: vec![apollia_core::HookHandlerConfig {
             format_version: 1,
             events: vec![apollia_core::HookEventKind::PreToolUse],
             kind: apollia_core::HookHandlerKind::Command {
-                command: vec![script],
+                command: vec!["/bin/sh".to_string(), script],
             },
             timeout_ms: 5_000,
         }],
@@ -2977,10 +3198,10 @@ async fn test_pretooluse_deny_blocks_invocation() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
+    .with_governance(Some(super::governed_test_support::code_runs()))
     .with_hook_executor(Some(pre_tool_use_executor(script)));
 
     let budget = make_budget(10);
@@ -3058,7 +3279,6 @@ async fn test_pretooluse_rewrite_requires_an_approval() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
@@ -3147,10 +3367,10 @@ async fn test_pretooluse_allow_lets_tool_run() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
+    .with_governance(Some(super::governed_test_support::code_runs()))
     .with_hook_executor(Some(pre_tool_use_executor(script)));
 
     let budget = make_budget(10);
@@ -3167,7 +3387,7 @@ async fn test_pretooluse_allow_lets_tool_run() {
             "go",
             &[],
             "",
-            &[],
+            &["bash_executor".to_string()],
             &authorized,
             &approvals,
             &budget,
@@ -3221,10 +3441,10 @@ async fn test_pretooluse_decision_emits_hook_event() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
+    .with_governance(Some(super::governed_test_support::code_runs()))
     .with_hook_executor(Some(pre_tool_use_executor(script)));
 
     let budget = make_budget(10);
@@ -3379,10 +3599,10 @@ async fn test_posttooluse_injection_reaches_next_turn() {
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
+    .with_governance(Some(super::governed_test_support::code_runs()))
     .with_hook_executor(Some(executor));
 
     let budget = make_budget(10);
@@ -3464,7 +3684,6 @@ fn plan_agent(
         tool_invoker: invoker,
         event_bus: make_event_bus(),
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan,
     })
@@ -3497,7 +3716,7 @@ async fn test_prompt_contains_block_when_plan_mode_on() {
     let agent = plan_agent(Some(plan_handle_for_test()), true);
 
     // WHEN the system prompt is assembled
-    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted, false);
+    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted);
 
     // THEN it contains the plan-mode block and its key instructions
     assert!(prompt.contains("operating in plan mode"));
@@ -3513,7 +3732,7 @@ async fn test_prompt_omits_block_when_plan_mode_off() {
     let agent = plan_agent(Some(plan_handle_for_test()), false);
 
     // WHEN the system prompt is assembled
-    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted, false);
+    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted);
 
     // THEN the plan-mode block is absent
     assert!(!prompt.contains("operating in plan mode"));
@@ -3557,7 +3776,6 @@ fn plan_agent_with_bus(bus: EventBusSender, plan_mode: bool) -> BuiltInChatAgent
         tool_invoker: invoker,
         event_bus: bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: Some(plan_handle_for_test()),
     })
@@ -3847,6 +4065,7 @@ async fn test_consume_stream_cancel_folds_late_usage() {
                 message_id: "msg-1",
                 cancel: &cancel,
                 dispatched_at: std::time::Instant::now(),
+                meter: &mut apollia_llm::CallMeter::new(std::time::Instant::now()),
             },
             &mut accumulated,
             &mut usage,
@@ -3858,6 +4077,106 @@ async fn test_consume_stream_cancel_folds_late_usage() {
     assert!(result.expect("consume ok").is_empty());
     assert_eq!(usage.prompt_tokens, 100);
     assert_eq!(usage.completion_tokens, 7);
+    assert!(accumulated.is_empty());
+}
+
+#[tokio::test]
+async fn test_consume_stream_reports_an_engine_that_closes_without_answering() {
+    // GIVEN the stream of an engine too busy to take the request, which ends
+    // at once with nothing in it, and the stream of a model that answers
+    // nothing and says it stopped
+    let agent = plan_agent(None, false);
+    type Chunks = std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<StreamChunk, apollia_llm::LlmError>> + Send>,
+    >;
+    let refused: Chunks = Box::pin(futures::stream::empty());
+    let silent: Chunks = Box::pin(futures::stream::iter(vec![Ok(StreamChunk::Finish(
+        apollia_llm::FinishReason::Stop,
+    ))]));
+    let cancel = CancellationToken::new();
+
+    // WHEN each is consumed
+    let mut outcomes = Vec::new();
+    for stream in [refused, silent] {
+        let mut accumulated = String::new();
+        let mut usage = TokenUsage::default();
+        outcomes.push(
+            agent
+                .consume_stream(
+                    stream,
+                    StreamConsumeParams {
+                        session_id: "sess-1",
+                        message_id: "msg-1",
+                        cancel: &cancel,
+                        dispatched_at: std::time::Instant::now(),
+                        meter: &mut apollia_llm::CallMeter::new(std::time::Instant::now()),
+                    },
+                    &mut accumulated,
+                    &mut usage,
+                )
+                .await,
+        );
+    }
+
+    // THEN the first is a failure that says so, never an answer, and the
+    // second is an empty answer
+    let refusal = outcomes[0]
+        .as_ref()
+        .expect_err("no answer is not an answer");
+    assert!(refusal.contains("before generating anything"), "{refusal}");
+    assert!(matches!(&outcomes[1], Ok(calls) if calls.is_empty()));
+}
+
+#[tokio::test]
+async fn test_consume_stream_cancel_returns_while_the_model_keeps_generating() {
+    // GIVEN a stream that is always ready with one more content chunk, as a
+    // model that keeps generating is, far longer than any drain should read,
+    // and a stop token already fired. No clock is armed here: the stream
+    // counts what is pulled from it, and it does end, so a Stop that waited
+    // for its end would fail the count below instead of hanging the suite.
+    const CHUNKS: usize = 50_000_000;
+    let agent = plan_agent(None, false);
+    let pulled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&pulled);
+    let stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<StreamChunk, apollia_llm::LlmError>> + Send>,
+    > = Box::pin(futures::stream::unfold(0usize, move |sent| {
+        let counter = Arc::clone(&counter);
+        async move {
+            if sent == CHUNKS {
+                return None;
+            }
+            tokio::task::yield_now().await;
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some((Ok(StreamChunk::Text("more".into())), sent + 1))
+        }
+    }));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let mut accumulated = String::new();
+    let mut usage = TokenUsage::default();
+
+    // WHEN the stream is consumed under cancellation
+    let _stopped = agent
+        .consume_stream(
+            stream,
+            StreamConsumeParams {
+                session_id: "sess-1",
+                message_id: "msg-1",
+                cancel: &cancel,
+                dispatched_at: std::time::Instant::now(),
+                meter: &mut apollia_llm::CallMeter::new(std::time::Instant::now()),
+            },
+            &mut accumulated,
+            &mut usage,
+        )
+        .await;
+
+    // THEN the Stop is honoured within the drain budget: the stream was left
+    // long before its end, and nothing it yielded was kept
+    let read = pulled.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(read < CHUNKS, "the Stop read the stream to its end");
     assert!(accumulated.is_empty());
 }
 
@@ -3878,7 +4197,6 @@ async fn test_react_loop_merges_stream_usage_into_response() {
         tool_invoker: invoker,
         event_bus: make_event_bus(),
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     });
@@ -3980,7 +4298,7 @@ async fn test_prompt_selects_execute_block_when_executing() {
         plan_agent(Some(plan_handle_for_test()), true).with_plan_phase_start(PlanPhase::Executing);
 
     // WHEN the system prompt is assembled
-    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted, false);
+    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted);
 
     // THEN it carries the execute block, not the preparation block
     assert!(prompt.contains("approved and you are now executing it"));
@@ -3994,7 +4312,7 @@ async fn test_prompt_selects_plan_mode_block_when_drafting() {
         plan_agent(Some(plan_handle_for_test()), true).with_plan_phase_start(PlanPhase::Drafting);
 
     // WHEN the system prompt is assembled
-    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted, false);
+    let prompt = agent.build_system_prompt(None, AutonomyLevel::Assisted);
 
     // THEN it carries the preparation block, not the execute block
     assert!(prompt.contains("operating in plan mode"));
@@ -4022,7 +4340,6 @@ async fn test_executing_phase_refuses_plan_propose_with_phase_message() {
         tool_invoker: invoker,
         event_bus: make_event_bus(),
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: Some(plan.clone()),
     })
@@ -4100,8 +4417,8 @@ async fn test_handle_plan_tool_propose_persists_and_records() {
     let mut messages: Vec<LlmChatMessage> = Vec::new();
     let mut acc = ReactAccumulators {
         all_tool_calls: Vec::new(),
-        newly_authorized: Vec::new(),
         authorized: HashSet::new(),
+        llm_calls: Vec::new(),
     };
     let c = plan_call(
         PLAN_PROPOSE_TOOL_NAME,
@@ -4133,8 +4450,8 @@ async fn test_handle_plan_tool_modify_without_reason_is_failure() {
     let mut messages: Vec<LlmChatMessage> = Vec::new();
     let mut acc = ReactAccumulators {
         all_tool_calls: Vec::new(),
-        newly_authorized: Vec::new(),
         authorized: HashSet::new(),
+        llm_calls: Vec::new(),
     };
     let c = plan_call(
         PLAN_MODIFY_STEP_TOOL_NAME,
@@ -4154,28 +4471,29 @@ async fn test_handle_plan_tool_modify_without_reason_is_failure() {
     assert!(body.contains("reason is required"));
 }
 
-// ── Per-invocation prefix-rule checker ───────────────────────────────
+// ── Fine rules, through governance ───────────────────────────────────
 //
-// The checker mirrors `build_prefix_checker` in the chat manager but points
-// at a temporary governance database, so these tests exercise the real
-// matching semantics (`check_with_scope`, longest prefix, executor guard)
+// Governance runs over a temporary governance database, so these tests
+// exercise the real decision (rule matching, executor guard, developer mode)
 // through the ReAct loop rather than a stub.
 
-fn make_test_prefix_checker(
-    db_path: std::path::PathBuf,
-) -> Arc<crate::chat::builtin_agent::PrefixChecker> {
-    use apollia_permissions::{PermissionScope, ScopeContext};
-    let scope_ctx = ScopeContext {
-        scope: PermissionScope::Global,
-        project_path: None,
-        agent_id: Some("apollia:chat".to_string()),
-    };
-    Arc::new(move |tool, first_arg| {
-        let engine = apollia_permissions::PrefixRuleEngine::new(&db_path).ok()?;
-        engine
-            .check_with_scope(tool, first_arg, &scope_ctx, &[])
-            .ok()
-            .flatten()
+fn make_test_governance(
+    dir: &tempfile::TempDir,
+    developer_mode: bool,
+) -> crate::governance::GovernanceHandle {
+    let config = dir.path().join("apollia.toml");
+    std::fs::write(
+        &config,
+        format!("[desktop]\ndeveloper_mode = {developer_mode}\n"),
+    )
+    .expect("write config");
+    crate::governance::GovernanceHandle::spawn(crate::governance::GovernanceSources {
+        governance_db: Some(dir.path().join("governance.db")),
+        config_path: Some(config),
+        policy: Arc::new(apollia_permissions::PolicyVerdict::Absent),
+        journal: None,
+        events: None,
+        forbidden_connections: Default::default(),
     })
 }
 
@@ -4213,15 +4531,17 @@ fn spawn_refusing_resolver(approvals: &PendingChatApprovals) {
     });
 }
 
-struct PrefixCheckerRun {
+struct GovernedRun {
     tool: &'static str,
     arguments: serde_json::Value,
-    checker: Option<Arc<crate::chat::builtin_agent::PrefixChecker>>,
-    /// Tool names seeded into the name-only authorization set for the turn.
+    governance: Option<crate::governance::GovernanceHandle>,
+    /// Family the tool is registered under; unregistered when `None`.
+    family: Option<apollia_tools::ActionFamily>,
+    /// Tool names the run's caller granted for the run.
     authorized: &'static [&'static str],
 }
 
-async fn run_prefix_checker_turn(params: PrefixCheckerRun) -> ChatAgentResponse {
+async fn run_governed_turn(params: GovernedRun) -> ChatAgentResponse {
     let model = Arc::new(MockReActModel {
         calls: vec![LlmToolCall {
             id: "c1".into(),
@@ -4233,6 +4553,14 @@ async fn run_prefix_checker_turn(params: PrefixCheckerRun) -> ChatAgentResponse 
     });
     let router = make_router(model);
     let tool_registry = ToolRegistryHandle::start();
+    if let Some(family) = params.family {
+        let mut descriptor = crate::connectors_bridge::google_tool_descriptors()[0].clone();
+        descriptor.name = params.tool.to_owned();
+        descriptor.family = family;
+        descriptor.is_read_only = false;
+        descriptor.input_schema = serde_json::json!({ "type": "object" });
+        tool_registry.register(descriptor).await.expect("register");
+    }
     let invoker: Arc<dyn ToolInvoker> = Arc::new(MockToolInvoker::new("tool output"));
     let event_bus = make_event_bus();
     let agent = BuiltInChatAgent::new(BuiltInChatAgentDeps {
@@ -4241,11 +4569,10 @@ async fn run_prefix_checker_turn(params: PrefixCheckerRun) -> ChatAgentResponse 
         tool_invoker: invoker,
         event_bus,
         user_memory: None,
-        a2a_invoker: None,
         todo: None,
         plan: None,
     })
-    .with_prefix_checker(params.checker);
+    .with_governance(params.governance);
 
     let budget = make_budget(10);
     let approvals = PendingChatApprovals::new();
@@ -4278,24 +4605,24 @@ async fn run_prefix_checker_turn(params: PrefixCheckerRun) -> ChatAgentResponse 
     result.expect("turn should complete")
 }
 
-/// A targeted allow rule auto-approves a single simple command.
+/// In developer mode, a targeted allow rule lets a single simple command run.
 #[tokio::test]
-async fn test_prefix_rule_allows_simple_executor_command_without_hitl() {
-    // GIVEN a global allow rule bash_executor + prefix "ls"
+async fn test_prefix_rule_allows_simple_executor_command_in_developer_mode() {
+    // GIVEN developer mode and a global allow rule bash_executor + prefix "ls"
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("governance.db");
     seed_prefix_rule(
-        &db,
+        &dir.path().join("governance.db"),
         "bash_executor",
         Some("ls"),
         apollia_permissions::RuleAction::Allow,
     );
 
     // WHEN the model invokes bash_executor with a simple matching command
-    let resp = run_prefix_checker_turn(PrefixCheckerRun {
+    let resp = run_governed_turn(GovernedRun {
         tool: "bash_executor",
         arguments: serde_json::json!({"command": "ls -la", "timeout_secs": 5}),
-        checker: Some(make_test_prefix_checker(db)),
+        governance: Some(make_test_governance(&dir, true)),
+        family: None,
         authorized: &[],
     })
     .await;
@@ -4304,30 +4631,56 @@ async fn test_prefix_rule_allows_simple_executor_command_without_hitl() {
     // resolver never fires, so an Executed status proves the rule decided)
     assert_eq!(resp.tool_calls.len(), 1);
     assert_eq!(resp.tool_calls[0].status, ToolCallStatus::Executed);
-    assert!(
-        resp.newly_authorized.is_empty(),
-        "a per-invocation grant must not widen the authorized set"
+}
+
+/// Outside developer mode the same rule decides nothing: the call asks.
+#[tokio::test]
+async fn test_prefix_rule_on_executor_asks_outside_developer_mode() {
+    // GIVEN the same allow rule, developer mode off
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_prefix_rule(
+        &dir.path().join("governance.db"),
+        "bash_executor",
+        Some("ls"),
+        apollia_permissions::RuleAction::Allow,
+    );
+
+    // WHEN the model invokes bash_executor with a simple matching command
+    let resp = run_governed_turn(GovernedRun {
+        tool: "bash_executor",
+        arguments: serde_json::json!({"command": "ls -la", "timeout_secs": 5}),
+        governance: Some(make_test_governance(&dir, false)),
+        family: None,
+        authorized: &[],
+    })
+    .await;
+
+    // THEN the approval is raised (the resolver refuses it)
+    assert_eq!(resp.tool_calls[0].status, ToolCallStatus::Refused);
+    assert_eq!(
+        resp.tool_calls[0].output.as_deref(),
+        Some("Tool refused by the operator")
     );
 }
 
 /// The same rule does not cover a chained command: HITL is still raised.
 #[tokio::test]
 async fn test_prefix_rule_ignores_chained_command_hitl_still_raised() {
-    // GIVEN the same global allow rule bash_executor + prefix "ls"
+    // GIVEN developer mode and the global allow rule bash_executor + "ls"
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("governance.db");
     seed_prefix_rule(
-        &db,
+        &dir.path().join("governance.db"),
         "bash_executor",
         Some("ls"),
         apollia_permissions::RuleAction::Allow,
     );
 
     // WHEN the invoked command chains a second command behind the prefix
-    let resp = run_prefix_checker_turn(PrefixCheckerRun {
+    let resp = run_governed_turn(GovernedRun {
         tool: "bash_executor",
         arguments: serde_json::json!({"command": "ls; rm -rf /tmp/x", "timeout_secs": 5}),
-        checker: Some(make_test_prefix_checker(db)),
+        governance: Some(make_test_governance(&dir, true)),
+        family: None,
         authorized: &[],
     })
     .await;
@@ -4342,9 +4695,9 @@ async fn test_prefix_rule_ignores_chained_command_hitl_still_raised() {
     );
 }
 
-/// A longer deny prefix wins over a shorter allow, without raising HITL.
+/// A matching deny rule refuses, even beside a matching allow, without HITL.
 #[tokio::test]
-async fn test_prefix_rule_deny_wins_longest_prefix_without_hitl() {
+async fn test_prefix_rule_deny_wins_without_hitl() {
     // GIVEN allow bash_executor + "ls" AND deny bash_executor + "ls -la"
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("governance.db");
@@ -4361,16 +4714,17 @@ async fn test_prefix_rule_deny_wins_longest_prefix_without_hitl() {
         apollia_permissions::RuleAction::Deny,
     );
 
-    // WHEN the invoked command matches both prefixes
-    let resp = run_prefix_checker_turn(PrefixCheckerRun {
+    // WHEN the invoked command matches both prefixes, in developer mode
+    let resp = run_governed_turn(GovernedRun {
         tool: "bash_executor",
         arguments: serde_json::json!({"command": "ls -la /etc", "timeout_secs": 5}),
-        checker: Some(make_test_prefix_checker(db)),
+        governance: Some(make_test_governance(&dir, true)),
+        family: None,
         authorized: &[],
     })
     .await;
 
-    // THEN the longest prefix decides: refused by rule, not by the user
+    // THEN the deny rule decides: refused by rule, not by the user
     assert_eq!(resp.tool_calls.len(), 1);
     assert_eq!(resp.tool_calls[0].status, ToolCallStatus::Refused);
     assert_eq!(
@@ -4382,21 +4736,21 @@ async fn test_prefix_rule_deny_wins_longest_prefix_without_hitl() {
 /// A blanket (no-prefix) allow row for an executor never auto-approves.
 #[tokio::test]
 async fn test_blanket_executor_rule_never_auto_approves() {
-    // GIVEN a persisted allow rule for bash_executor with no prefix
+    // GIVEN developer mode and an allow rule for bash_executor with no prefix
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("governance.db");
     seed_prefix_rule(
-        &db,
+        &dir.path().join("governance.db"),
         "bash_executor",
         None,
         apollia_permissions::RuleAction::Allow,
     );
 
     // WHEN any command is invoked
-    let resp = run_prefix_checker_turn(PrefixCheckerRun {
+    let resp = run_governed_turn(GovernedRun {
         tool: "bash_executor",
         arguments: serde_json::json!({"command": "ls", "timeout_secs": 5}),
-        checker: Some(make_test_prefix_checker(db)),
+        governance: Some(make_test_governance(&dir, true)),
+        family: None,
         authorized: &[],
     })
     .await;
@@ -4410,71 +4764,30 @@ async fn test_blanket_executor_rule_never_auto_approves() {
     );
 }
 
-/// An ordinary tool's prefix rule matches its argument (here: a path).
+/// Outside the code family an allow rule decides nothing: a sensitive call
+/// is consented to, not ruled.
 #[tokio::test]
-async fn test_prefix_rule_scopes_ordinary_tool_argument() {
-    // GIVEN a global allow rule file_read + prefix "/tmp/safe"
+async fn test_allow_rule_on_writing_tool_still_asks() {
+    // GIVEN developer mode and an allow rule file_write + prefix "/tmp/safe"
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("governance.db");
     seed_prefix_rule(
-        &db,
-        "file_read",
+        &dir.path().join("governance.db"),
+        "file_write",
         Some("/tmp/safe"),
         apollia_permissions::RuleAction::Allow,
     );
-    let checker = make_test_prefix_checker(db);
 
-    // WHEN reading inside the prefix
-    let inside = run_prefix_checker_turn(PrefixCheckerRun {
-        tool: "file_read",
+    // WHEN writing inside the prefix
+    let resp = run_governed_turn(GovernedRun {
+        tool: "file_write",
         arguments: serde_json::json!({"path": "/tmp/safe/notes.txt"}),
-        checker: Some(checker.clone()),
-        authorized: &[],
-    })
-    .await;
-    // THEN the call is auto-approved
-    assert_eq!(inside.tool_calls[0].status, ToolCallStatus::Executed);
-
-    // WHEN reading outside the prefix
-    let outside = run_prefix_checker_turn(PrefixCheckerRun {
-        tool: "file_read",
-        arguments: serde_json::json!({"path": "/etc/passwd"}),
-        checker: Some(checker),
-        authorized: &[],
-    })
-    .await;
-    // THEN HITL still decides (refusing resolver fires)
-    assert_eq!(outside.tool_calls[0].status, ToolCallStatus::Refused);
-    assert_eq!(
-        outside.tool_calls[0].output.as_deref(),
-        Some("Tool refused by the operator")
-    );
-}
-
-/// Without a checker (Companion sessions), behavior is unchanged.
-#[tokio::test]
-async fn test_no_checker_keeps_hitl_behavior() {
-    // GIVEN a matching allow rule exists in the store but no checker is
-    // attached (the manager only builds one for Libre sessions)
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("governance.db");
-    seed_prefix_rule(
-        &db,
-        "file_read",
-        Some("/tmp"),
-        apollia_permissions::RuleAction::Allow,
-    );
-
-    // WHEN the tool is invoked with a matching argument
-    let resp = run_prefix_checker_turn(PrefixCheckerRun {
-        tool: "file_read",
-        arguments: serde_json::json!({"path": "/tmp/notes.txt"}),
-        checker: None,
+        governance: Some(make_test_governance(&dir, true)),
+        family: Some(apollia_tools::ActionFamily::WriteOrDelete),
         authorized: &[],
     })
     .await;
 
-    // THEN the rule is not consulted and HITL decides as before
+    // THEN the approval is raised
     assert_eq!(resp.tool_calls[0].status, ToolCallStatus::Refused);
     assert_eq!(
         resp.tool_calls[0].output.as_deref(),
@@ -4482,30 +4795,48 @@ async fn test_no_checker_keeps_hitl_behavior() {
     );
 }
 
-/// A persisted deny rule wins over a name-authorized tool.
+/// Reading runs without asking, whatever governance holds.
 #[tokio::test]
-async fn test_deny_rule_wins_over_name_authorized_tool() {
-    // GIVEN file_read authorized by name AND a global deny rule on /etc
+async fn test_reading_tool_runs_without_hitl() {
+    // GIVEN no governance attached (the empty state) and a reading tool
+    // WHEN the tool is invoked
+    let resp = run_governed_turn(GovernedRun {
+        tool: "file_read",
+        arguments: serde_json::json!({"path": "/tmp/notes.txt"}),
+        governance: None,
+        family: Some(apollia_tools::ActionFamily::Read),
+        authorized: &[],
+    })
+    .await;
+
+    // THEN it runs with no prompt
+    assert_eq!(resp.tool_calls[0].status, ToolCallStatus::Executed);
+}
+
+/// A deny rule wins over a grant of the run.
+#[tokio::test]
+async fn test_deny_rule_wins_over_run_grant() {
+    // GIVEN file_write granted for the run AND a global deny rule on /etc
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("governance.db");
     seed_prefix_rule(
-        &db,
-        "file_read",
+        &dir.path().join("governance.db"),
+        "file_write",
         Some("/etc"),
         apollia_permissions::RuleAction::Deny,
     );
 
     // WHEN the call's argument matches the deny prefix
-    let resp = run_prefix_checker_turn(PrefixCheckerRun {
-        tool: "file_read",
+    let resp = run_governed_turn(GovernedRun {
+        tool: "file_write",
         arguments: serde_json::json!({"path": "/etc/passwd"}),
-        checker: Some(make_test_prefix_checker(db)),
-        authorized: &["file_read"],
+        governance: Some(make_test_governance(&dir, false)),
+        family: Some(apollia_tools::ActionFamily::WriteOrDelete),
+        authorized: &["file_write"],
     })
     .await;
 
-    // THEN the standing refusal wins over the blanket authorization, with no
-    // human prompt (rule wording, not the user-refusal wording)
+    // THEN the standing refusal wins over the grant, with no human prompt
+    // (rule wording, not the user-refusal wording)
     assert_eq!(resp.tool_calls.len(), 1);
     assert_eq!(resp.tool_calls[0].status, ToolCallStatus::Refused);
     assert_eq!(
@@ -4514,29 +4845,29 @@ async fn test_deny_rule_wins_over_name_authorized_tool() {
     );
 }
 
-/// The name-authorized fast path stays intact outside a deny match.
+/// A grant of the run lets a classified call run outside a deny match.
 #[tokio::test]
-async fn test_name_authorized_tool_still_runs_outside_deny_prefix() {
-    // GIVEN the same deny rule on /etc and file_read authorized by name
+async fn test_run_grant_still_runs_outside_deny_prefix() {
+    // GIVEN the same deny rule on /etc and file_write granted for the run
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = dir.path().join("governance.db");
     seed_prefix_rule(
-        &db,
-        "file_read",
+        &dir.path().join("governance.db"),
+        "file_write",
         Some("/etc"),
         apollia_permissions::RuleAction::Deny,
     );
 
     // WHEN the call's argument does not match the deny prefix
-    let resp = run_prefix_checker_turn(PrefixCheckerRun {
-        tool: "file_read",
+    let resp = run_governed_turn(GovernedRun {
+        tool: "file_write",
         arguments: serde_json::json!({"path": "/tmp/notes.txt"}),
-        checker: Some(make_test_prefix_checker(db)),
-        authorized: &["file_read"],
+        governance: Some(make_test_governance(&dir, false)),
+        family: Some(apollia_tools::ActionFamily::WriteOrDelete),
+        authorized: &["file_write"],
     })
     .await;
 
-    // THEN the name authorization executes the call as before
+    // THEN the grant of the run executes the call
     assert_eq!(resp.tool_calls.len(), 1);
     assert_eq!(resp.tool_calls[0].status, ToolCallStatus::Executed);
 }

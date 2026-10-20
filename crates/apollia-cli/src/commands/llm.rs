@@ -38,28 +38,7 @@ pub enum LlmCommand {
         backend: Option<String>,
     },
     /// Display aggregated usage and costs (tokens and estimated cost per backend).
-    ///
-    /// Without flags, prints the cost table. Use `--get-threshold` to print
-    /// `[llm] cost_alert_threshold_usd` from `apollia.toml`, or
-    /// `--threshold N` to set it.
-    Costs {
-        /// Read the cost alert threshold from `apollia.toml` instead of the
-        /// cost table.
-        #[arg(long, conflicts_with = "threshold")]
-        get_threshold: bool,
-        /// Set the cost alert threshold (USD). Writes
-        /// `[llm] cost_alert_threshold_usd = N` to `apollia.toml`. Pass `0`
-        /// or a negative value to clear the threshold.
-        #[arg(long, value_name = "USD")]
-        threshold: Option<f64>,
-        /// Optional `apollia.toml` path override. Without it, the same file
-        /// the runtime loads at startup: `./apollia.toml` when the working
-        /// directory holds one, otherwise
-        /// `$XDG_CONFIG_HOME/apollia/apollia.toml` (default
-        /// `~/.config/apollia/apollia.toml`).
-        #[arg(long, value_name = "PATH")]
-        config: Option<PathBuf>,
-    },
+    Costs,
     /// Manage configured LLM backends (list, create, update, delete, set-default).
     Backends {
         /// Backends subcommand.
@@ -81,8 +60,8 @@ pub enum LlmCommand {
     /// `is_default=true` in `system.db`. The runtime picks the new default
     /// on the next `llm reload` (or daemon restart).
     Setup {
-        /// Use the local llama-cpp backend (required for v0.1.0; a cloud
-        /// provider is declared with `llm backends create --api-key`).
+        /// Use the local llama-cpp backend (required: a server elsewhere is
+        /// declared with `llm backends create --base-url`).
         #[arg(long)]
         local: bool,
         /// Path to the `.gguf` model file.
@@ -103,7 +82,8 @@ pub enum LlmCommand {
         /// Override the system database path (default: `~/.apollia/system.db`).
         #[arg(long, value_name = "PATH")]
         system_db: Option<PathBuf>,
-        /// Override the models directory (default: `~/.apollia/models/`).
+        /// Override the models directory. Without it, `[models] dir` of
+        /// `apollia.toml`, else `~/.apollia/models/`.
         #[arg(long, value_name = "DIR")]
         models_dir: Option<PathBuf>,
     },
@@ -123,28 +103,29 @@ pub enum LlmBackendsCommand {
     ///
     /// `--provider` drives the shape of the `config_json` sent to the
     /// runtime. For `llama-cpp` (local GGUF models), `--model` must be the
-    /// absolute path to the .gguf file. For cloud providers, `--model` is
-    /// the identifier (e.g. `claude-sonnet-4-6`, `gpt-4o`).
+    /// absolute path to the .gguf file. For an OpenAI-compatible server or
+    /// Ollama, `--model` is the identifier the server knows (e.g. `qwen3-32b`).
     Create {
         /// Unique backend name (snake_case or kebab-case).
         name: String,
-        /// Provider: `llama-cpp` (local GGUF), `anthropic`, `openai`,
-        /// `mistral`, `ollama`. `--kind` is accepted as an alias for
-        /// backward compatibility.
-        #[arg(long, alias = "kind", value_name = "PROVIDER")]
+        /// Provider: `llama-cpp` (local GGUF), `openai` (any OpenAI-compatible
+        /// server, designated by `--base-url`), `ollama`. Any other value is
+        /// refused. `--kind` is accepted as an alias for backward
+        /// compatibility.
+        #[arg(long, alias = "kind", value_name = "PROVIDER", value_parser = backends::parse_provider)]
         provider: String,
         /// Model identifier or path (absolute path for `llama-cpp`).
         #[arg(long)]
         model: String,
-        /// API key (cloud providers only). Stored as-is in
-        /// `config_json.api_key`. Prefer `--api-key-env VAR_NAME` to avoid
-        /// persisting the key in system.db.
+        /// API key of the server, when it requires one. The runtime moves it
+        /// into the secret store before saving the backend: `config_json`
+        /// keeps only `api_key_in_store`, never the key.
         #[arg(long, value_name = "KEY")]
         api_key: Option<String>,
         /// Environment variable name holding the API key.
         ///
-        /// The runtime reads `std::env::var(NAME)` at boot. Recommended to
-        /// keep the key out of system.db.
+        /// The runtime reads `std::env::var(NAME)` at boot; only the variable
+        /// name is saved.
         #[arg(long, value_name = "VAR_NAME")]
         api_key_env: Option<String>,
         /// Base URL (Ollama, self-hosted OpenAI-compatible gateway, ...).
@@ -192,13 +173,14 @@ pub enum LlmBackendsCommand {
     Update {
         /// Backend name to update.
         name: String,
-        /// New provider (rarely useful, changes the backend implementation).
-        #[arg(long, alias = "kind", value_name = "PROVIDER")]
+        /// New provider (rarely useful, changes the backend implementation):
+        /// `llama-cpp`, `openai` or `ollama`.
+        #[arg(long, alias = "kind", value_name = "PROVIDER", value_parser = backends::parse_provider)]
         provider: Option<String>,
         /// New model (absolute path for `llama-cpp`).
         #[arg(long)]
         model: Option<String>,
-        /// New API key (cloud providers).
+        /// New API key of the server.
         #[arg(long, value_name = "KEY")]
         api_key: Option<String>,
         /// New environment variable name for the API key.
@@ -253,11 +235,7 @@ pub async fn run(cmd: &LlmCommand, socket: Option<PathBuf>, json: bool) -> i32 {
         LlmCommand::Chat { prompt, backend } => {
             run_chat(&client, prompt, backend.as_deref(), json).await
         }
-        LlmCommand::Costs {
-            get_threshold,
-            threshold,
-            config,
-        } => run_costs(&client, *get_threshold, *threshold, config.as_deref(), json).await,
+        LlmCommand::Costs => run_costs(&client, json).await,
         LlmCommand::Backends { command } => run_backends(&client, command, json).await,
         LlmCommand::Reload => run_reload(&client, json).await,
         LlmCommand::Setup {
@@ -340,28 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn costs_config_help_names_the_file_the_runtime_loads() {
-        // GIVEN the help clap publishes for `llm costs --config`
-        let help = published_help(&["costs"], "config");
-
-        // WHEN it is read as an operator reads the CLI reference page
-        // THEN it names the runtime's own search order, and no longer points at
-        // the data directory, which holds no configuration
-        assert!(
-            !help.contains(".apollia/apollia.toml"),
-            "help still points at the data directory: {help}"
-        );
-        assert!(
-            help.contains("./apollia.toml"),
-            "help omits the working-directory file: {help}"
-        );
-        assert!(
-            help.contains(".config/apollia/apollia.toml"),
-            "help omits the user config file: {help}"
-        );
-    }
-
-    #[test]
     fn device_help_does_not_promise_an_accelerator_choice() {
         // GIVEN the three places the CLI accepts --device
         let places = [
@@ -407,12 +363,12 @@ mod tests {
 
     #[test]
     fn test_llm_ping_with_backend_parses() {
-        // GIVEN "ping anthropic"
+        // GIVEN "ping vllm"
         // WHEN
-        let cli = TestCli::parse_from(["apollia-os", "ping", "anthropic"]);
-        // THEN LlmCommand::Ping { backend: Some("anthropic") }
+        let cli = TestCli::parse_from(["apollia-os", "ping", "vllm"]);
+        // THEN LlmCommand::Ping { backend: Some("vllm") }
         match &cli.command {
-            LlmCommand::Ping { backend } => assert_eq!(backend.as_deref(), Some("anthropic")),
+            LlmCommand::Ping { backend } => assert_eq!(backend.as_deref(), Some("vllm")),
             other => panic!("expected Ping, got {other:?}"),
         }
     }
@@ -422,71 +378,24 @@ mod tests {
         // GIVEN "costs"
         // WHEN
         let cli = TestCli::parse_from(["apollia-os", "costs"]);
-        // THEN LlmCommand::Costs (no threshold flags)
-        assert!(matches!(
-            cli.command,
-            LlmCommand::Costs {
-                get_threshold: false,
-                threshold: None,
-                ..
-            }
-        ));
+        // THEN LlmCommand::Costs
+        assert!(matches!(cli.command, LlmCommand::Costs));
     }
 
     #[test]
-    fn test_llm_costs_get_threshold_parses() {
-        // GIVEN "llm costs --get-threshold"
-        // WHEN clap parses the argument line
-        let cli = TestCli::parse_from(["apollia-os", "costs", "--get-threshold"]);
-        // THEN the read flag is up and no new threshold is set
-        match &cli.command {
-            LlmCommand::Costs {
-                get_threshold,
-                threshold,
-                ..
-            } => {
-                assert!(*get_threshold);
-                assert!(threshold.is_none());
-            }
-            other => panic!("expected Costs, got {other:?}"),
+    fn test_llm_costs_threshold_flags_are_withdrawn() {
+        // GIVEN the flags that wrote and read a cost alert threshold nothing
+        // applied
+        let lines = [
+            vec!["apollia-os", "costs", "--threshold", "0.5"],
+            vec!["apollia-os", "costs", "--get-threshold"],
+            vec!["apollia-os", "costs", "--config", "/tmp/apollia.toml"],
+        ];
+        // WHEN clap parses each line
+        // THEN each is refused as an unknown argument
+        for line in lines {
+            assert!(TestCli::try_parse_from(&line).is_err(), "{line:?}");
         }
-    }
-
-    #[test]
-    fn test_llm_costs_set_threshold_parses() {
-        // GIVEN "llm costs --threshold 0.5"
-        // WHEN clap parses the argument line
-        let cli = TestCli::parse_from(["apollia-os", "costs", "--threshold", "0.5"]);
-        // THEN the value is captured and the read flag stays down
-        match &cli.command {
-            LlmCommand::Costs {
-                get_threshold,
-                threshold,
-                ..
-            } => {
-                assert!(!*get_threshold);
-                assert_eq!(*threshold, Some(0.5));
-            }
-            other => panic!("expected Costs, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_llm_costs_threshold_conflicts_with_get_threshold() {
-        // GIVEN a costs command line carrying both the read and the write flag
-        // WHEN clap parses the argument line
-        let result = TestCli::try_parse_from([
-            "apollia-os",
-            "costs",
-            "--threshold",
-            "0.5",
-            "--get-threshold",
-        ]);
-        // THEN parsing fails, so the two cannot be asked for at once
-        assert!(
-            result.is_err(),
-            "--threshold + --get-threshold must conflict"
-        );
     }
 
     #[test]
@@ -657,17 +566,17 @@ mod tests {
 
     #[test]
     fn test_llm_backends_create_parses() {
-        // GIVEN "backends create anthropic --kind anthropic --model claude-3-5-sonnet-20241022"
+        // GIVEN "backends create vllm --kind openai --model qwen3-32b"
         // WHEN
         let cli = TestCli::parse_from([
             "apollia-os",
             "backends",
             "create",
-            "anthropic",
+            "vllm",
             "--kind",
-            "anthropic",
+            "openai",
             "--model",
-            "claude-3-5-sonnet-20241022",
+            "qwen3-32b",
         ]);
         // THEN Create with the right fields
         match &cli.command {
@@ -680,15 +589,65 @@ mod tests {
                     base_url,
                     ..
                 } => {
-                    assert_eq!(name, "anthropic");
-                    assert_eq!(provider, "anthropic");
-                    assert_eq!(model, "claude-3-5-sonnet-20241022");
+                    assert_eq!(name, "vllm");
+                    assert_eq!(provider, "openai");
+                    assert_eq!(model, "qwen3-32b");
                     assert!(api_key.is_none());
                     assert!(base_url.is_none());
                 }
                 other => panic!("expected Create, got {other:?}"),
             },
             other => panic!("expected Backends, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_llm_backends_create_refuses_a_cloud_provider() {
+        // GIVEN "backends create x --provider anthropic --model y"
+        // WHEN
+        let err = TestCli::try_parse_from([
+            "apollia-os",
+            "backends",
+            "create",
+            "x",
+            "--provider",
+            "anthropic",
+            "--model",
+            "y",
+        ])
+        .unwrap_err();
+        // THEN the parse fails, naming the refused value and every accepted one
+        let message = err.to_string();
+        assert!(
+            message.contains("unknown provider 'anthropic'"),
+            "{message}"
+        );
+        for accepted in ["llama-cpp", "openai", "ollama"] {
+            assert!(message.contains(accepted), "{accepted} missing: {message}");
+        }
+        assert!(!message.contains("mistral"), "{message}");
+    }
+
+    #[test]
+    fn test_llm_backends_create_canonicalises_a_local_alias() {
+        // GIVEN "backends create x --provider local --model /m.gguf"
+        // WHEN
+        let cli = TestCli::parse_from([
+            "apollia-os",
+            "backends",
+            "create",
+            "x",
+            "--provider",
+            "local",
+            "--model",
+            "/m.gguf",
+        ]);
+        // THEN the provider is stored under its canonical name
+        match &cli.command {
+            LlmCommand::Backends {
+                command: LlmBackendsCommand::Create { provider, .. },
+            } => assert_eq!(provider, "llama-cpp"),
+            other => panic!("expected Create, got {other:?}"),
         }
     }
 
@@ -722,17 +681,17 @@ mod tests {
 
     #[test]
     fn test_llm_backends_update_parses() {
-        // GIVEN "backends update anthropic --model claude-3-opus-20240229"
+        // GIVEN "backends update vllm --model qwen3-72b"
         // WHEN
         let cli = TestCli::parse_from([
             "apollia-os",
             "backends",
             "update",
-            "anthropic",
+            "vllm",
             "--model",
-            "claude-3-opus-20240229",
+            "qwen3-72b",
         ]);
-        // THEN Update { name: "anthropic", model: Some("claude-3-opus-20240229"), api_key: None }
+        // THEN Update { name: "vllm", model: Some("qwen3-72b"), api_key: None }
         match &cli.command {
             LlmCommand::Backends { command } => match command {
                 LlmBackendsCommand::Update {
@@ -741,8 +700,8 @@ mod tests {
                     api_key,
                     ..
                 } => {
-                    assert_eq!(name, "anthropic");
-                    assert_eq!(model.as_deref(), Some("claude-3-opus-20240229"));
+                    assert_eq!(name, "vllm");
+                    assert_eq!(model.as_deref(), Some("qwen3-72b"));
                     assert!(api_key.is_none());
                 }
                 other => panic!("expected Update, got {other:?}"),
@@ -753,15 +712,14 @@ mod tests {
 
     #[test]
     fn test_llm_backends_delete_confirm_parses() {
-        // GIVEN "backends delete anthropic --confirm"
+        // GIVEN "backends delete vllm --confirm"
         // WHEN
-        let cli =
-            TestCli::parse_from(["apollia-os", "backends", "delete", "anthropic", "--confirm"]);
-        // THEN Delete { name: "anthropic", confirm: true }
+        let cli = TestCli::parse_from(["apollia-os", "backends", "delete", "vllm", "--confirm"]);
+        // THEN Delete { name: "vllm", confirm: true }
         match &cli.command {
             LlmCommand::Backends { command } => match command {
                 LlmBackendsCommand::Delete { name, confirm } => {
-                    assert_eq!(name, "anthropic");
+                    assert_eq!(name, "vllm");
                     assert!(confirm);
                 }
                 other => panic!("expected Delete, got {other:?}"),
@@ -772,13 +730,13 @@ mod tests {
 
     #[test]
     fn test_llm_backends_set_default_parses() {
-        // GIVEN "backends set-default anthropic"
+        // GIVEN "backends set-default vllm"
         // WHEN
-        let cli = TestCli::parse_from(["apollia-os", "backends", "set-default", "anthropic"]);
-        // THEN SetDefault { name: "anthropic" }
+        let cli = TestCli::parse_from(["apollia-os", "backends", "set-default", "vllm"]);
+        // THEN SetDefault { name: "vllm" }
         match &cli.command {
             LlmCommand::Backends { command } => match command {
-                LlmBackendsCommand::SetDefault { name } => assert_eq!(name, "anthropic"),
+                LlmBackendsCommand::SetDefault { name } => assert_eq!(name, "vllm"),
                 other => panic!("expected SetDefault, got {other:?}"),
             },
             other => panic!("expected Backends, got {other:?}"),
@@ -927,10 +885,10 @@ mod tests {
         // WHEN the notes are built
         // THEN only the egress note applies, never the cleartext one
         let notes = backend_security_notes(
-            "anthropic",
-            "claude-sonnet-4-6",
-            Some("https://api.anthropic.com"),
-            Some("sk-ant-x"),
+            "openai",
+            "qwen3-32b",
+            Some("https://llm.example.org/v1"),
+            Some("sk-x"),
             None,
         );
         let joined = notes.join(" ");

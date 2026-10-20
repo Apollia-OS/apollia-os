@@ -40,8 +40,8 @@ use crate::resilience::ResilienceLayer;
 
 /// Trait abstracting agent execution for testability.
 ///
-/// Concrete implementation dispatches to `AIPBridge::call_run()`.
-/// Tests use a mock runner.
+/// No implementation ships: the runner of a Python agent is gone, and an agent
+/// is run by the agent executor. Tests use a mock runner.
 pub trait AgentRunner: Send + Sync {
     /// Executes the agent's `run(task)` method and returns the result.
     fn call_run(
@@ -61,6 +61,19 @@ pub trait AIPAgent: Send + Sync {
     /// Returns the agent's manifest declaring capabilities and execution mode.
     fn manifest(&self) -> AgentManifest;
 
+    /// The tools the agent may call in this run: the access of the agent as
+    /// resolved (its definition, then the user's overrides). This is the only
+    /// list the engine reads; none by default.
+    fn granted_tools(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The backend every model call of this run goes to, when the agent was
+    /// given a model of its own. `None` leaves the default of the router.
+    fn model_backend(&self) -> Option<String> {
+        None
+    }
+
     /// Returns `true` if the agent exposes an `on_plan_complete()` method.
     ///
     /// Detected via `hasattr` Python. Returns `false` by default, in which case
@@ -72,8 +85,7 @@ pub trait AIPAgent: Send + Sync {
     /// Calls `on_plan_complete(step_results)` on the agent.
     ///
     /// Invoked by `ORIAEngine::execute_orchestrated_plan()` when [`has_on_plan_complete`]
-    /// returns `true`. The concrete Python implementation delegates to
-    /// `AIPBridge::call_on_plan_complete()`.
+    /// returns `true`.
     ///
     /// Default: concatenates step outputs automatically (same as the fallback path).
     ///
@@ -177,6 +189,8 @@ pub struct ORIAEngine {
     /// ORIA engine configuration injected from `apollia.toml`.
     pub(crate) oria_config: ORIAConfig,
     pub(crate) db_path: Option<String>,
+    /// The batch this run is an item of: one plan serves every item.
+    pub(crate) plan_template: Option<crate::plan_template::PlanTemplate>,
     /// HITL registry of pending approvals, shared with the `ResumeHandler`.
     ///
     /// Required for `execute_direct()` to suspend the task and wait for the
@@ -250,9 +264,8 @@ impl ORIAEngine {
     /// Calls [`Reasoner::plan_with_alternatives`] via `tokio::join!` (both plans are
     /// produced in parallel) then emits `RuntimeEvent::PlanAlternativesGenerated`.
     ///
-    /// The frontend (CLI `--alternatives` or `PlanAlternativesView.svelte`) intercepts
-    /// the event, shows both plans, and asks the operator to choose.
-    /// The choice is persisted by `PlanChoiceStore::log_plan_choice()`.
+    /// Nothing calls it: plan alternatives were retired from the product, and
+    /// no surface offers the operator a choice between two plans any more.
     ///
     /// # Errors
     ///
@@ -301,6 +314,7 @@ impl ORIAEngine {
         let mode = classify(
             &task,
             &manifest,
+            agent.granted_tools().len(),
             None,
             self.oria_config.orchestrated_threshold as f32,
         );
@@ -1074,12 +1088,11 @@ mod orchestrated_tests {
 
     fn orchestrated_manifest_with_prompt() -> AgentManifest {
         AgentManifest {
+            autonomy_level: None,
             format_version: 1,
             name: "test-agent".into(),
             version: "1.0.0".into(),
             description: "Test orchestrated agent".into(),
-            tools_required: vec!["file_io".into(), "bash_executor".into()],
-            tools_optional: vec![],
             supports_streaming: false,
             supports_a2a: false,
             memory_namespace: None,
@@ -1090,16 +1103,13 @@ mod orchestrated_tests {
                 max_tool_calls: 50,
                 wall_clock_secs: 600,
             }),
-            network_allowlist: None,
-            dangerous_tools_allowed: false,
             tags: vec![],
             skills: vec![],
             execution_mode: "orchestrated".into(),
             supports_mailbox: false,
             mailbox_allowlist: None,
             system_prompt: Some("Plan the necessary steps.".into()),
-            tools_requiring_approval: vec![],
-            llm_backend: None,
+            model: None,
             packages: vec![],
             memory_config: None,
             agent_type: None,
@@ -1234,28 +1244,24 @@ mod orchestrated_tests {
         let engine = ORIAEngine::new();
         let agent = MockAgent {
             manifest: AgentManifest {
+                autonomy_level: None,
                 format_version: 1,
                 name: "no-prompt-agent".into(),
                 version: "1.0.0".into(),
                 description: "Agent without system_prompt".into(),
-                tools_required: vec![],
-                tools_optional: vec![],
                 supports_streaming: false,
                 supports_a2a: false,
                 memory_namespace: None,
                 shared_memory_namespaces: vec![],
                 max_concurrent_tasks: 1,
                 step_budget: None,
-                network_allowlist: None,
-                dangerous_tools_allowed: false,
                 tags: vec![],
                 skills: vec![],
                 execution_mode: "orchestrated".into(),
                 supports_mailbox: false,
                 mailbox_allowlist: None,
                 system_prompt: None, // ← absent
-                tools_requiring_approval: vec![],
-                llm_backend: None,
+                model: None,
                 packages: vec![],
                 memory_config: None,
                 agent_type: None,
@@ -1345,6 +1351,56 @@ mod orchestrated_tests {
             Some(4),
             "expected PlanGenerated with step_count=4"
         );
+    }
+
+    #[tokio::test]
+    async fn test_the_planner_says_when_it_thinks_on_the_engine_bus() {
+        // GIVEN an engine whose bus is set after its planner, as the runtime does
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<RuntimeEvent>(64);
+        let engine = make_engine_with_mock(four_step_plan_json()).with_event_bus(tx);
+        let agent = MockAgent {
+            manifest: orchestrated_manifest_with_prompt(),
+        };
+        let task = AIPTask {
+            task_id: "task-thinking".to_string(),
+            ..AIPTask::default()
+        };
+
+        // WHEN it plans a task
+        let _ = engine.execute(task, &agent).await;
+
+        // THEN the start of the planner's thinking reached the bus, under the task
+        let mut started = None;
+        while let Ok(event) = rx.try_recv() {
+            if let RuntimeEvent::ThinkingStarted { turn_id, .. } = event {
+                started = Some(turn_id);
+                break;
+            }
+        }
+        assert_eq!(started.as_deref(), Some("task-thinking"));
+    }
+
+    #[tokio::test]
+    async fn test_a_plan_is_kept_in_the_plans_database_the_engine_is_given() {
+        // GIVEN an engine told to keep its plans in a database on disk
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plans.db");
+        let engine = make_engine_with_mock(four_step_plan_json())
+            .with_plans_db(db.to_string_lossy().into_owned());
+        let agent = MockAgent {
+            manifest: orchestrated_manifest_with_prompt(),
+        };
+
+        // WHEN it runs a task
+        let _ = engine.execute(AIPTask::default(), &agent).await;
+
+        // THEN the plan and its four steps are in that database, where the
+        // timeline of the task reads them
+        let conn = rusqlite::Connection::open(&db).expect("open");
+        let steps: i64 = conn
+            .query_row("SELECT COUNT(*) FROM plan_steps", [], |row| row.get(0))
+            .expect("plan_steps");
+        assert_eq!(steps, 4);
     }
 
     // Plan gate
@@ -2282,6 +2338,90 @@ mod orchestrated_tests {
             })
             .expect("a VerificationCompleted event must be emitted");
         assert_eq!(verdict, (true, true, 0));
+    }
+
+    #[tokio::test]
+    async fn test_a_plan_is_cached_only_once_it_ran_through() {
+        // GIVEN an engine with a cache whose plan of two tool steps succeeds
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = crate::plan_cache::PlanCacheRepository::open(&dir.path().join("plan_cache.db"))
+            .expect("open repository");
+        let shared = Arc::new(Mutex::new(repo));
+        let engine =
+            make_engine_with_mock(two_step_plan_json()).with_shared_plan_cache(Arc::clone(&shared));
+        let agent = MockAgent {
+            manifest: orchestrated_manifest_with_prompt(),
+        };
+
+        // WHEN it runs a task
+        let result = engine.execute(AIPTask::default(), &agent).await;
+
+        // THEN the plan, which ran through, is cached once
+        assert_eq!(result.status, TaskStatus::Completed);
+        let stats = shared.lock().expect("cache mutex").stats().expect("stats");
+        assert_eq!(stats.total_entries, 1);
+    }
+
+    #[tokio::test]
+    async fn test_a_plan_whose_step_fails_is_not_cached() {
+        // GIVEN an engine with a cache and no tool to run its plan's steps
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = crate::plan_cache::PlanCacheRepository::open(&dir.path().join("plan_cache.db"))
+            .expect("open repository");
+        let shared = Arc::new(Mutex::new(repo));
+        let model = Arc::new(SimpleMockModel {
+            response: two_step_plan_json(),
+        });
+        let engine = ORIAEngine::new()
+            .with_reasoner(model, 20)
+            .with_shared_plan_cache(Arc::clone(&shared));
+        let agent = MockAgent {
+            manifest: orchestrated_manifest_with_prompt(),
+        };
+
+        // WHEN it runs a task whose steps fail
+        let result = engine.execute(AIPTask::default(), &agent).await;
+
+        // THEN nothing was cached, so the next task plans anew
+        assert_ne!(result.status, TaskStatus::Completed);
+        let stats = shared.lock().expect("cache mutex").stats().expect("stats");
+        assert_eq!(stats.total_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn test_the_items_of_a_batch_share_one_plan() {
+        // GIVEN a cache, and a first item whose plan names its file by field
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = crate::plan_cache::PlanCacheRepository::open(&dir.path().join("plan_cache.db"))
+            .expect("open repository");
+        let shared = Arc::new(Mutex::new(repo));
+        let item = |file: &str| crate::plan_template::PlanTemplate {
+            key: "batch-1".into(),
+            fields: vec![("File".into(), file.into())],
+            outputs: Vec::new(),
+        };
+        let template = r#"{"steps":[
+            {"step_id":"s1","description":"Read {{File}}","tool_hint":"file_io","depends_on":[]}
+        ]}"#;
+        let first = make_engine_with_mock(template.to_string())
+            .with_shared_plan_cache(Arc::clone(&shared))
+            .with_plan_template(item("quote-01.pdf"));
+        let agent = MockAgent {
+            manifest: orchestrated_manifest_with_prompt(),
+        };
+        let done = first.execute(AIPTask::default(), &agent).await;
+        assert_eq!(done.status, TaskStatus::Completed);
+
+        // WHEN a second item runs with a model that could not plan at all
+        let second = make_engine_with_mock("not a plan".to_string())
+            .with_shared_plan_cache(Arc::clone(&shared))
+            .with_plan_template(item("quote-02.pdf"));
+        let result = second.execute(AIPTask::default(), &agent).await;
+
+        // THEN it ran the template of the batch, kept once for both
+        assert_eq!(result.status, TaskStatus::Completed);
+        let stats = shared.lock().expect("cache mutex").stats().expect("stats");
+        assert_eq!(stats.total_entries, 1);
     }
 
     /// GIVEN a plan cache repository shared with the runtime, as the supervisor

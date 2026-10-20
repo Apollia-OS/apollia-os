@@ -14,83 +14,40 @@ use tokio_util::sync::CancellationToken;
 use apollia_core::events::{EventBusSender, RuntimeEvent};
 use apollia_core::{LlmBackendConfig, LlmProvider};
 
-use crate::router::config::{BackendConfig, BackendKind, LlmConfig};
+use crate::router::config::{BackendConfig, BackendKind};
 use crate::types::{CompletionModel, CompletionRequest, CompletionResponse, LlmError, StreamChunk};
 
 #[cfg(feature = "cloud")]
-use crate::backends::anthropic::AnthropicClient;
-#[cfg(feature = "cloud")]
-use crate::backends::ollama::{OllamaClient, OllamaConfig};
+use apollia_core::inference_server::{openai_api_base, DEFAULT_OLLAMA_ADDRESS};
+
 #[cfg(feature = "cloud")]
 use crate::backends::openai::{ApiBackendConfig, OpenAICompatibleClient};
 #[cfg(feature = "cloud")]
-use crate::backends::vertex::VertexClient;
+use crate::server_window;
 
 /// Instantiate an `Arc<dyn CompletionModel>` backend from its config.
 ///
-/// Heuristic: Anthropic API maps to `AnthropicClient`, any other provider to
-/// `OpenAICompatibleClient`. Returns `Err` if the API key cannot be resolved.
+/// Every API backend is served by `OpenAICompatibleClient`. Returns `Err` if
+/// the API key cannot be resolved.
 #[cfg(feature = "cloud")]
 pub(super) fn build_backend(
     backend_cfg: &BackendConfig,
-    config: &LlmConfig,
     cancellation_token: &CancellationToken,
 ) -> Result<Arc<dyn CompletionModel>, LlmError> {
     match &backend_cfg.kind {
-        BackendKind::Api(cfg) => {
+        BackendKind::Api(entry) => {
+            let cfg = ApiBackendConfig::from(entry);
             let key = cfg
                 .resolve_api_key()
                 .map_err(|e| LlmError::BackendUnavailable {
                     backend: cfg.name.clone(),
                     reason: e.to_string(),
                 })?;
-            let backend: Arc<dyn CompletionModel> = if cfg.api_url.contains("anthropic.com") {
-                Arc::new(AnthropicClient::new(
-                    cfg,
-                    key,
-                    config.pricing_overrides.clone(),
-                    cancellation_token.clone(),
-                ))
-            } else {
-                Arc::new(OpenAICompatibleClient::new(
-                    cfg,
-                    key,
-                    cancellation_token.clone(),
-                ))
-            };
-            Ok(backend)
-        }
-    }
-}
-/// Instantiate the Vertex AI backend from `[llm.vertex]` when `enabled = true`.
-///
-/// Fails silently (logs a warning, skips the backend) and does not propagate
-/// an error.
-#[cfg(feature = "cloud")]
-pub(super) fn insert_vertex_backend(
-    backends: &mut HashMap<String, Arc<dyn CompletionModel>>,
-    config: &LlmConfig,
-    cancellation_token: &CancellationToken,
-) {
-    let Some(vertex_cfg) = &config.vertex else {
-        return;
-    };
-    if !vertex_cfg.enabled {
-        return;
-    }
-    match VertexClient::new(vertex_cfg, cancellation_token.clone()) {
-        Ok(client) => {
-            backends.insert(
-                "vertex".to_owned(),
-                Arc::new(client) as Arc<dyn CompletionModel>,
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                reason = "Vertex AI credentials missing or invalid",
-                "llm.backend.skipped"
-            );
+            Ok(Arc::new(OpenAICompatibleClient::new(
+                &cfg,
+                key,
+                cancellation_token.clone(),
+            )) as Arc<dyn CompletionModel>)
         }
     }
 }
@@ -100,12 +57,11 @@ pub(super) fn insert_vertex_backend(
 pub(super) fn load_backend_with_bus(
     backends: &mut HashMap<String, Arc<dyn CompletionModel>>,
     backend_cfg: &BackendConfig,
-    config: &LlmConfig,
     cancellation_token: &CancellationToken,
     bus: &Option<EventBusSender>,
 ) {
     let name = backend_cfg.name().to_owned();
-    let model_path = backend_cfg.model_path_hint();
+    let model_path = crate::router::config::model_path_hint(backend_cfg);
 
     // Emit LlmModelLoading before each load attempt.
     if let Some(b) = bus {
@@ -116,10 +72,10 @@ pub(super) fn load_backend_with_bus(
     }
 
     #[cfg(feature = "cloud")]
-    let result = build_backend(backend_cfg, config, cancellation_token);
+    let result = build_backend(backend_cfg, cancellation_token);
     #[cfg(not(feature = "cloud"))]
     let result: Result<Arc<dyn CompletionModel>, LlmError> = {
-        let _ = (config, cancellation_token);
+        let _ = cancellation_token;
         match &backend_cfg.kind {}
     };
 
@@ -149,53 +105,6 @@ pub(super) fn load_backend_with_bus(
                 });
             }
             // Keep going and try the remaining backends.
-        }
-    }
-}
-/// Variant of [`insert_vertex_backend`] that emits events on the bus.
-#[cfg(feature = "cloud")]
-pub(super) fn insert_vertex_backend_with_bus(
-    backends: &mut HashMap<String, Arc<dyn CompletionModel>>,
-    config: &LlmConfig,
-    cancellation_token: &CancellationToken,
-    bus: &Option<EventBusSender>,
-) {
-    let Some(vertex_cfg) = &config.vertex else {
-        return;
-    };
-    if !vertex_cfg.enabled {
-        return;
-    }
-    let vertex_name = "vertex".to_owned();
-    if let Some(b) = bus {
-        let _ = b.send(RuntimeEvent::LlmModelLoading {
-            backend: vertex_name.clone(),
-            model_path: vertex_cfg.model_id.clone(),
-        });
-    }
-    match VertexClient::new(vertex_cfg, cancellation_token.clone()) {
-        Ok(client) => {
-            let model_id = client.model_id().to_owned();
-            if let Some(b) = bus {
-                let _ = b.send(RuntimeEvent::LlmModelReady {
-                    backend: vertex_name.clone(),
-                    model_id,
-                });
-            }
-            backends.insert(vertex_name, Arc::new(client) as Arc<dyn CompletionModel>);
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                reason = "Vertex AI credentials missing or invalid",
-                "llm.backend.skipped"
-            );
-            if let Some(b) = bus {
-                let _ = b.send(RuntimeEvent::LlmModelFailed {
-                    backend: vertex_name,
-                    reason: e.to_string(),
-                });
-            }
         }
     }
 }
@@ -296,62 +205,65 @@ pub(super) async fn instantiate_from_config(
                      does not stage it: only the packaged build does"
                 .to_string(),
         }),
-        provider => instantiate_cloud_backend(cfg, provider, cancel).await,
+        LlmProvider::OpenAi => {
+            instantiate_remote_backend(cfg, RemoteKind::OpenAiCompatible, cancel).await
+        }
+        LlmProvider::Ollama => instantiate_remote_backend(cfg, RemoteKind::Ollama, cancel).await,
     }
 }
-/// Instantiate a cloud backend (OpenAI-compatible or Anthropic) from the SQLite config.
+/// The providers reached over HTTP, the local engine excluded by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RemoteKind {
+    /// An OpenAI-compatible server at the address the backend designates.
+    OpenAiCompatible,
+    /// An Ollama server, local by default.
+    Ollama,
+}
+impl std::fmt::Display for RemoteKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoteKind::OpenAiCompatible => f.write_str("openai"),
+            RemoteKind::Ollama => f.write_str("ollama"),
+        }
+    }
+}
+/// Instantiate an HTTP backend (OpenAI-compatible server or Ollama) from the
+/// SQLite config.
 ///
-/// Resolves the API key from `config_json["api_key"]` when present.
+/// Both are reached through the OpenAI-compatible client: an Ollama row is an
+/// OpenAI-compatible server on port 11434 by default, and nothing in its
+/// requests chooses how the server loads the model. Resolves the API key from
+/// `config_json["api_key"]` when present. An OpenAI-compatible backend must
+/// designate its server: there is no cloud address to fall back on.
 #[cfg(feature = "cloud")]
-pub(super) async fn instantiate_cloud_backend(
+pub(super) async fn instantiate_remote_backend(
     cfg: &LlmBackendConfig,
-    provider: &LlmProvider,
+    kind: RemoteKind,
     cancel: CancellationToken,
 ) -> Result<Arc<dyn CompletionModel>, LlmError> {
     let api_key = extract_api_key_value(cfg)?;
 
-    let default_url = match provider {
-        LlmProvider::OpenAi => "https://api.openai.com/v1",
-        LlmProvider::Mistral => "https://api.mistral.ai/v1",
-        LlmProvider::Ollama => "http://127.0.0.1:11434/v1",
-        LlmProvider::Anthropic => "https://api.anthropic.com",
-        LlmProvider::LlamaCpp => {
-            unreachable!("LlamaCpp is handled before reaching instantiate_cloud_backend (sidecar runner path)")
+    let base_url = match kind {
+        RemoteKind::Ollama => extract_base_url(cfg, DEFAULT_OLLAMA_ADDRESS),
+        RemoteKind::OpenAiCompatible => {
+            let url = extract_base_url(cfg, "");
+            if url.is_empty() {
+                return Err(LlmError::BackendUnavailable {
+                    backend: cfg.name.clone(),
+                    reason: "an OpenAI-compatible backend needs the address of its server \
+                             (base_url)"
+                        .to_string(),
+                });
+            }
+            url
         }
     };
-
-    let base_url = extract_base_url(cfg, default_url);
     let idle_timeout = extract_idle_timeout(cfg);
-
-    // Ollama is reached through its native API, the only one that lets the
-    // client choose the context window. See `backends::ollama`.
-    if matches!(provider, LlmProvider::Ollama) {
-        let root = OllamaConfig::root_of(&base_url);
-        let num_ctx =
-            OllamaClient::num_ctx(&root, &cfg.model, configured_context_window(cfg)).await;
-        tracing::info!(
-            backend = %cfg.name,
-            model = %cfg.model,
-            num_ctx = num_ctx,
-            "llm.ollama.num_ctx"
-        );
-        return Ok(Arc::new(OllamaClient::new(
-            OllamaConfig {
-                name: cfg.name.clone(),
-                root,
-                model: cfg.model.clone(),
-                num_ctx,
-            },
-            cancel,
-            idle_timeout,
-        )) as Arc<dyn CompletionModel>);
-    }
-
-    let context_window = resolve_context_window(cfg);
+    let context_window = discover_context_window(cfg, kind, &base_url, &api_key).await;
 
     let api_cfg = ApiBackendConfig {
         name: cfg.name.clone(),
-        api_url: base_url,
+        api_url: openai_api_base(&base_url),
         api_key_env: String::new(), // key already resolved
         model: cfg.model.clone(),
         context_window,
@@ -361,16 +273,6 @@ pub(super) async fn instantiate_cloud_backend(
         llama_cpp_extensions: false,
     };
 
-    if matches!(provider, LlmProvider::Anthropic) {
-        return Ok(Arc::new(AnthropicClient::with_idle_timeout(
-            &api_cfg,
-            api_key,
-            HashMap::new(),
-            cancel,
-            idle_timeout,
-        )) as Arc<dyn CompletionModel>);
-    }
-
     Ok(Arc::new(OpenAICompatibleClient::with_idle_timeout(
         &api_cfg,
         api_key,
@@ -378,25 +280,49 @@ pub(super) async fn instantiate_cloud_backend(
         idle_timeout,
     )) as Arc<dyn CompletionModel>)
 }
-/// The context window an operator pinned in `config_json["context_window"]`.
-#[cfg(feature = "cloud")]
-pub(super) fn configured_context_window(cfg: &LlmBackendConfig) -> Option<u32> {
-    crate::context_window::configured(&cfg.config_json)
-}
-
-/// Establish the usable context window of an OpenAI-compatible backend, so the
-/// router sizes compaction against the real window.
+/// The context window a remote backend declares, read on its server when the
+/// server exposes it, else the operator's configured figure.
 ///
-/// The OpenAI protocol has no way to ask, so this is the operator's configured
-/// figure or `None`, which the router reads as unknown. Ollama used to be asked
-/// here through `/api/ps`, which reported the window a model happened to be
-/// loaded with: 4096 tokens under Ollama's memory-based default, and nothing at
-/// all when the model was not loaded, so the same backend flipped between an
-/// assumed 200000 and a real 4096 depending on timing. Ollama now goes through
-/// its native client, which chooses the window instead of discovering it.
+/// Ollama is asked by `POST /api/show`; any other server is read in
+/// `GET /v1/models` (`max_model_len` on vLLM). A window read shorter than
+/// [`server_window::EXPECTED_CONTEXT_WINDOW`] is reported by
+/// `llm.server.context_short` and declared as it is: the server's
+/// configuration stays its administrator's.
+#[cfg(feature = "cloud")]
+pub(super) async fn discover_context_window(
+    cfg: &LlmBackendConfig,
+    kind: RemoteKind,
+    base_url: &str,
+    api_key: &str,
+) -> Option<usize> {
+    let key = Some(api_key).filter(|k| !k.is_empty());
+    let read = match kind {
+        RemoteKind::Ollama => server_window::ollama_window(base_url, &cfg.model, key).await,
+        RemoteKind::OpenAiCompatible => {
+            server_window::listed_window(base_url, &cfg.model, key).await
+        }
+    };
+    match read {
+        Some(window) => {
+            server_window::context_short(&cfg.name, &cfg.model, window);
+            tracing::event!(
+                tracing::Level::INFO,
+                backend = %cfg.name,
+                model = %cfg.model,
+                context_window = window,
+                "llm.server.context_read"
+            );
+            Some(window as usize)
+        }
+        None => resolve_context_window(cfg),
+    }
+}
+/// The context window the operator configured for a remote backend, the
+/// figure that stands when its server exposes none (see
+/// [`discover_context_window`]). `None` reads as unknown to the router.
 #[cfg(feature = "cloud")]
 pub(super) fn resolve_context_window(cfg: &LlmBackendConfig) -> Option<usize> {
-    configured_context_window(cfg).map(|v| v as usize)
+    crate::context_window::configured(&cfg.config_json).map(|v| v as usize)
 }
 /// Reads how long a backend may stay silent before the call is abandoned.
 ///
@@ -412,9 +338,9 @@ pub(super) fn extract_idle_timeout(cfg: &LlmBackendConfig) -> std::time::Duratio
 }
 /// Return `BackendUnavailable` when the `"cloud"` feature is not compiled.
 #[cfg(not(feature = "cloud"))]
-pub(super) async fn instantiate_cloud_backend(
+pub(super) async fn instantiate_remote_backend(
     cfg: &LlmBackendConfig,
-    provider: &LlmProvider,
+    provider: RemoteKind,
     _cancel: CancellationToken,
 ) -> Result<Arc<dyn CompletionModel>, LlmError> {
     Err(LlmError::BackendUnavailable {
@@ -462,3 +388,6 @@ pub(super) fn extract_base_url(cfg: &LlmBackendConfig, default: &str) -> String 
         .unwrap_or(default)
         .to_string()
 }
+
+#[cfg(all(test, feature = "cloud"))]
+mod tests;

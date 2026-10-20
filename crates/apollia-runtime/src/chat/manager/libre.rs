@@ -1,78 +1,25 @@
 use super::*;
 use tracing::Instrument;
 
-/// Merge the session's authorized tools with the live Chat-Libre overrides
-/// (additive: never removes an in-session authorization). Overrides are only
-/// applied for [`ChatMode::Libre`]; other modes return the base set as-is.
-///
-/// `governance_db` is the injected governance database path; `None` (tests,
-/// minimal runtimes) keeps the base set untouched by persisted overrides.
-pub(in crate::chat::manager) fn merge_live_authorized_tools(
+/// The tools the session granted by name, kept by an older binary, which a
+/// run counts as granted for the run. Governance decides every call and reads
+/// such a grant only for a classified family other than executing code; a
+/// code executor is left out here as well, so it never reaches the run as
+/// granted.
+pub(in crate::chat::manager) fn session_run_grants(
     base: &std::collections::HashSet<String>,
-    mode: &ChatMode,
-    governance_db: Option<&std::path::Path>,
 ) -> std::collections::HashSet<String> {
-    let mut authorized_tools = base.clone();
-    if *mode == ChatMode::Libre {
-        let live = load_chat_libre_overrides(governance_db);
-        for tool in live.pre_authorized_tools {
-            authorized_tools.insert(tool);
-        }
-    }
-    // A code executor is never blanket-authorized by name: whatever the source
-    // (legacy chat.db entry, live override), it must still go through
-    // per-invocation approval. This is the consumption-side backstop for the
-    // "always allow bash = blank check" finding.
-    authorized_tools.retain(|tool| !apollia_permissions::is_code_executor(tool));
-    authorized_tools
+    base.iter()
+        .filter(|tool| !apollia_permissions::is_code_executor(tool))
+        .cloned()
+        .collect()
 }
 
-/// Build the per-invocation prefix checker handed to the ReAct loop.
-///
-/// The closure owns only the governance database path and opens a fresh
-/// [`PrefixRuleEngine`] per call, the same pattern as the per-message override
-/// load above: a checker call happens exactly where the loop would otherwise
-/// block on a human, so the open cost is irrelevant and the rules are always
-/// current. Returns `None` when no governance database path is injected; the
-/// closure itself answers `None` while the database does not exist yet, so a
-/// database created mid-session is picked up without a restart.
-///
-/// `governance_db` is the injected governance database path; `None` (tests,
-/// minimal runtimes) disables the checker. `project_path` scopes the lookup:
-/// project rules are consulted first when the session is attached to a
-/// project (see [`PrefixRuleEngine::check_with_scope`]).
-pub(in crate::chat::manager) fn build_prefix_checker(
-    project_path: Option<std::path::PathBuf>,
-    governance_db: Option<std::path::PathBuf>,
-) -> Option<std::sync::Arc<crate::chat::builtin_agent::PrefixChecker>> {
-    use apollia_permissions::prefix_rule_engine::{PermissionScope, ScopeContext};
-
-    let db_path = governance_db?;
-    let scope_ctx = ScopeContext {
-        // Informational field; filtering is driven by the two options below.
-        scope: PermissionScope::Global,
-        project_path,
-        agent_id: Some(APOLLIA_CHAT_AGENT_ID.to_string()),
-    };
-    Some(std::sync::Arc::new(
-        move |tool: &str, first_arg: Option<&str>| {
-            if !db_path.exists() {
-                return None;
-            }
-            let engine = PrefixRuleEngine::new(&db_path).ok()?;
-            // Session-tier rules live in the in-memory authorized set, not here.
-            engine
-                .check_with_scope(tool, first_arg, &scope_ctx, &[])
-                .ok()
-                .flatten()
-        },
-    ))
-}
-
-/// Load the persisted Chat-Libre overrides from the injected governance
-/// database. `None`, or a database that does not exist yet, yields the empty
-/// overrides: this function never resolves a path from the process home
-/// directory, so a mount without a governance path reads nothing.
+/// Load the persisted Chat-Libre overrides: the settings of the Apollia agent,
+/// beside the injected governance database. `None`, or a database that does
+/// not exist yet, yields the empty overrides: this function never resolves a
+/// path from the process home directory, so a mount without a governance path
+/// reads nothing.
 pub(in crate::chat::manager) fn load_chat_libre_overrides(
     governance_db: Option<&std::path::Path>,
 ) -> ChatLibreOverrides {
@@ -85,132 +32,36 @@ pub(in crate::chat::manager) fn load_chat_libre_overrides(
         return out;
     }
 
-    apply_chat_libre_config(&mut out, db_path);
-    apply_chat_prefix_allow_rules(&mut out, db_path);
+    super::apollia_agent::apply_apollia_agent(&mut out, db_path);
 
     out
 }
 
-/// Apply the free-chat config (`chat_libre_config`) to the overrides.
-/// Silent fallback if the database is absent or unreadable.
-fn apply_chat_libre_config(out: &mut ChatLibreOverrides, db_path: &std::path::Path) {
-    let Ok(repo) = ChatLibreConfigRepository::open(db_path) else {
-        return;
-    };
-    let Ok(cfg) = repo.load() else {
-        return;
-    };
-    if !cfg.system_prompt.trim().is_empty() {
-        out.system_prompt = Some(cfg.system_prompt);
-    }
-    // chat_libre_config.allowed_tools are the auto-authorized tools (HITL
-    // skipped), matching the UX label "tools allowed without confirmation".
-    // They go into pre_authorized_tools, not available_tools: the LLM still
-    // sees the whole registry, but these tools no longer trigger a popup.
-    for tool in cfg.allowed_tools {
-        if apollia_permissions::is_code_executor(&tool) {
-            warn!(
-                tool = %tool,
-                "chat.rule.preauth.refused"
-            );
-            continue;
-        }
-        out.pre_authorized_tools.insert(tool);
-    }
-    if let Some(b) = cfg.llm_backend {
-        if !b.trim().is_empty() {
-            out.llm_backend = Some(b);
-        }
-    }
-}
-
-/// Add to the overrides the tools auto-authorized via `allow` rules scoped to
-/// the `apollia:chat` agent. Silent fallback on error.
-pub(in crate::chat::manager) fn apply_chat_prefix_allow_rules(
-    out: &mut ChatLibreOverrides,
-    db_path: &std::path::Path,
-) {
-    let Ok(engine) = PrefixRuleEngine::new(db_path) else {
-        return;
-    };
-    let Ok(rules) = engine.list_rules_for_agent(APOLLIA_CHAT_AGENT_ID) else {
-        return;
-    };
-    for r in rules {
-        // Same filters as the global pass below: a rule carrying an
-        // arg_prefix must not authorize the whole tool name (it is evaluated
-        // per invocation by the checker instead), and a code executor is
-        // never pre-authorized by name. Seeding a prefixed rule's bare name
-        // here would widen a targeted grant into a tool-wide one.
-        if matches!(r.action, RuleAction::Allow) && r.arg_prefix.is_none() {
-            if apollia_permissions::is_code_executor(&r.tool_name) {
-                warn!(
-                    tool = %r.tool_name,
-                    "chat.rule.blanket.ignored"
-                );
-                continue;
-            }
-            out.pre_authorized_tools.insert(r.tool_name);
-        }
-    }
-
-    // Global allow-rules (e.g. authorized during onboarding, persisted with
-    // scope='global' and no agent_id) are honored in libre chat too, not just
-    // agent-scoped ones. Without this pass such tools would keep triggering a
-    // HITL prompt every turn. Same safety filters as above: only name-only
-    // allow-rules, never code executors (they always require per-invocation
-    // approval). Arg-prefix rules stay out of the name-only HashSet, which
-    // cannot represent them: they are evaluated per invocation instead, by
-    // the checker built in `build_prefix_checker`.
-    let Ok(global_rules) =
-        engine.list_rules_filtered(Some(apollia_permissions::PermissionScope::Global), None)
-    else {
-        return;
-    };
-    for r in global_rules {
-        if matches!(r.action, RuleAction::Allow) && r.arg_prefix.is_none() {
-            if apollia_permissions::is_code_executor(&r.tool_name) {
-                warn!(
-                    tool = %r.tool_name,
-                    "chat.rule.global.ignored"
-                );
-                continue;
-            }
-            out.pre_authorized_tools.insert(r.tool_name);
-        }
-    }
-}
-
-/// Apply Libre-mode governance overrides to the session prompt and return the
-/// derived session defaults.
+/// The defaults a free chat is born with: the model assigned to the Apollia
+/// agent, recorded on the session for downstream routing.
 ///
-/// When `is_libre` is `false`, leaves `prompt` untouched and returns the empty
-/// defaults (legacy behavior).
-///
-/// - `system_prompt` : prepended to the caller's prompt when set.
-/// - `llm_backend`   : recorded on the session for downstream routing.
-/// - `pre_authorized`: agent-scoped allow rules seed authorized_tools so the
-///   chat ReAct loop skips HITL for them.
-pub(in crate::chat::manager) fn apply_libre_overrides(
+/// When `is_libre` is `false`, returns the empty defaults. The mission of
+/// Apollia is not copied onto the session: each message reads it from the
+/// agent ([`apollia_mission`]), and what the session adds to it lives in its
+/// settings.
+pub(in crate::chat::manager) fn libre_session_defaults(
     is_libre: bool,
-    prompt: &mut String,
     governance_db: Option<&std::path::Path>,
 ) -> LibreSessionDefaults {
     if !is_libre {
         return LibreSessionDefaults::default();
     }
-    let overrides = load_chat_libre_overrides(governance_db);
-    if let Some(sp) = overrides.system_prompt {
-        if prompt.trim().is_empty() {
-            *prompt = sp;
-        } else {
-            *prompt = format!("{sp}\n\n{prompt}");
-        }
-    }
     LibreSessionDefaults {
-        llm_backend: overrides.llm_backend,
-        pre_authorized: overrides.pre_authorized_tools,
+        llm_backend: load_chat_libre_overrides(governance_db).llm_backend,
     }
+}
+
+/// The mission of the Apollia agent as resolved now, empty when it has none:
+/// the run then starts from the built-in prompt of its tier.
+pub(in crate::chat::manager) fn apollia_mission(governance_db: Option<&std::path::Path>) -> String {
+    load_chat_libre_overrides(governance_db)
+        .system_prompt
+        .unwrap_or_default()
 }
 
 /// Accumulate the metrics of one completed exchange into `entry`.
@@ -273,31 +124,6 @@ pub(in crate::chat::manager) fn accumulate_exchange_metrics(
     }
 }
 
-/// Enrich `system_prompt` with the project context block when injection is
-/// enabled and both a project id and a provider are available.
-async fn maybe_inject_project_context(
-    system_prompt: String,
-    should_inject: bool,
-    session_project_id: &Option<String>,
-    project_ctx: &Option<Arc<dyn ProjectContextProvider>>,
-) -> String {
-    if !should_inject {
-        return system_prompt;
-    }
-    let (Some(pid), Some(provider)) = (session_project_id, project_ctx) else {
-        return system_prompt;
-    };
-    match provider.build_context(pid).await {
-        Some(ctx) => {
-            let mut enriched = system_prompt;
-            enriched.push_str("\n\n");
-            enriched.push_str(&ctx);
-            enriched
-        }
-        None => system_prompt,
-    }
-}
-
 /// Resolve the conversation summary for the exchange.
 ///
 /// Reuses `stored_summary` when present or the history fits the context
@@ -348,36 +174,32 @@ async fn resolve_exchange_summary(params: ExchangeSummaryParams<'_>) -> Option<S
 /// linear.
 pub(in crate::chat::manager) async fn run_libre_exchange(params: LibreExchangeParams) {
     let LibreExchangeParams {
+        agent_id,
         llm_router,
         tool_registry,
         event_bus,
         a2a_for_agent,
-        session_user_memory,
+        apollia_context,
         pending_approvals,
-        budget,
         autonomy_level,
-        level_config,
-        verification,
-        critic,
+        runtime_budget,
         history,
         available_tools,
         authorized_tools,
         system_prompt,
-        inject_project_context,
-        is_companion,
+        session_settings,
         context_window_size,
         stored_summary,
         llm_for_summarize,
-        project_ctx,
-        session_project_id,
-        project_repo_for_session,
         pending_user_inputs_for_session,
         mcp_handle_for_session,
+        mut package_tools,
+        composer,
+        governance,
         chat_tools_config_for_session,
         mcp_loading,
         tool_search_limit,
         session_id_str,
-        hitl_params,
         sid,
         mid,
         run_id,
@@ -390,7 +212,36 @@ pub(in crate::chat::manager) async fn run_libre_exchange(params: LibreExchangePa
         hook_executor,
         cancel,
         pending_injection,
+        answer_prefill,
+        preferred_backend,
+        turn_id,
+        turn_images,
     } = params;
+
+    let available_tools = available_tools
+        .tools(
+            &tool_registry,
+            &super::default_access_of(chat_tools_config_for_session.as_deref()),
+        )
+        .await;
+    // The conversation takes accesses out of the agent's list and may propose
+    // some the agent does not hold, for itself alone: nothing is written to
+    // the agent or to governance.
+    let proposed_accesses = session_settings.proposed_beyond(&available_tools);
+    let available_tools = session_settings.apply_to_accesses(available_tools);
+    // A conversation limited to a list of accesses is offered nothing a
+    // source of its agent would add.
+    let available_tools = if session_settings.is_limited() {
+        available_tools
+    } else {
+        super::code_context::with_code_context(
+            chat_tools_config_for_session.as_deref(),
+            &agent_id,
+            available_tools,
+            &mut package_tools,
+        )
+        .await
+    };
 
     // In deferred mode, snapshot the aggregated tool index once. The synthetic
     // `tool_search` tool is built from it twice: as a dispatcher executor (so a
@@ -409,26 +260,74 @@ pub(in crate::chat::manager) async fn run_libre_exchange(params: LibreExchangePa
         (LoadingMode::Eager, _) => Vec::new(),
     };
 
+    // A disabled tool is neither offered nor findable through `tool_search`,
+    // MCP and connector tools as much as natives.
+    let disabled: Vec<String> = chat_tools_config_for_session
+        .as_deref()
+        .map(super::dispatcher::effective_disabled_tools)
+        .unwrap_or_default();
+    // An access to a connector tool without its account names the single
+    // connected account, or nothing.
+    let available_tools =
+        crate::connectors_bridge::resolve_connector_access(&agent_id, available_tools).await;
+    // A proposed access is asked about under the name its calls carry.
+    let proposed_accesses =
+        crate::connectors_bridge::resolve_connector_access(&agent_id, proposed_accesses).await;
+    // The folders granted to the agent are the roots of its file tools.
+    let (available_tools, folders) = super::dispatcher::granted_folders(
+        available_tools,
+        chat_tools_config_for_session.as_deref(),
+    );
+    // The documents attached to this conversation are read by its file tools,
+    // and by those of no other conversation.
+    let planning_folders = folders.read.clone();
+    let folders = super::documents::with_session_documents(
+        folders,
+        chat_tools_config_for_session
+            .as_deref()
+            .map(|cfg| cfg.data_dir.as_path()),
+        &session_id_str,
+    );
+    let mcp_index = super::disabled::only_granted(mcp_index, &available_tools);
+    let (available_tools, mcp_index) =
+        super::disabled::without_disabled(available_tools, mcp_index, &disabled);
+    // The source tools are offered only when their source is checked.
+    let sources =
+        super::sources::source_access(chat_tools_config_for_session.as_deref(), &agent_id).await;
+    let available_tools = super::sources::offered(available_tools, &sources);
+    let memory_namespace = super::sources::memory_namespace(&agent_id);
+
+    // The request settings of the conversation, above the three levels read
+    // beside the data directory: the model, the package, and the preset of
+    // the conversation or of the agent.
+    let session = crate::chat::builtin_agent::SessionOverrides {
+        instructions: session_settings.instructions.clone(),
+        request: session_settings.request_level(),
+        request_levels: chat_tools_config_for_session.as_deref().map(|cfg| {
+            apollia_llm::AgentModelBinding::new(
+                agent_id.clone(),
+                None,
+                Some(apollia_core::paths::DataFile::System.path(&cfg.data_dir)),
+            )
+            .with_session_preset(session_settings.preset)
+        }),
+        thinking: session_settings.thinking,
+        reasoning_effort: session_settings.reasoning_effort,
+        preserve_thinking: session_settings.preserve_thinking,
+        overflow: session_settings.overflow(),
+        proposed_accesses,
+    };
+
     // Read the tool-turn temperature before the config is moved into the
     // session invoker below; it is applied to the agent further down.
     let tool_turn_temperature = chat_tools_config_for_session
         .as_ref()
         .and_then(|c| c.tool_turn_temperature);
 
-    // Same moment, same reason: the governance database path is derived from
-    // the injected data directory, never from the process home directory, so
-    // a mount without a tools config runs with no governance database at all.
-    let governance_db_path = chat_tools_config_for_session
-        .as_ref()
-        .map(|c| c.data_dir.join(GOVERNANCE_DB_FILENAME));
-
-    // Resolve per-session sandbox root from project workspace_path.
-    // On error (project not found) surface as ExchangeError, no panic.
+    // The session invoker, its file tools rooted at the granted folders.
     let session_invoker = match build_session_invoker(
         WorkspaceResolutionParams {
-            project_id: session_project_id.clone(),
-            project_repo: project_repo_for_session,
-            hitl: Some(hitl_params),
+            folders,
             pending_user_inputs: Some(pending_user_inputs_for_session),
             mcp_handle: mcp_handle_for_session,
             chat_tools_config: chat_tools_config_for_session,
@@ -436,6 +335,9 @@ pub(in crate::chat::manager) async fn run_libre_exchange(params: LibreExchangePa
             mcp_loading,
             mcp_index: mcp_index.clone(),
             tool_search_limit,
+            package_tools,
+            sources,
+            memory_namespace,
         },
         &a2a_for_agent,
         hook_executor.clone(),
@@ -461,55 +363,57 @@ pub(in crate::chat::manager) async fn run_libre_exchange(params: LibreExchangePa
         LoadingMode::Deferred => Some(mcp_index),
         LoadingMode::Eager => None,
     };
-    // Per-invocation prefix checker, Libre only: Companion sessions keep the
-    // previous behavior (name-set miss goes straight to HITL), mirroring the
-    // scope of the live overrides merged per message. Project rules are
-    // consulted only when the session is attached to a project.
-    let prefix_checker = if is_companion {
-        None
-    } else {
-        let project_path = if session_project_id.is_some() {
-            session_invoker.workspace.clone()
-        } else {
-            None
-        };
-        build_prefix_checker(project_path, governance_db_path)
+    // The session runs its agent: Apollia, whose stored prompt is the mission,
+    // whose session tools are its granted tools and whose stored backend is
+    // its model; or a declarative agent, as resolved when the message is sent.
+    // In a conversation the plan of a task is drafted and approved through the
+    // plan mode, so the agent never plans first there.
+    let spec = AgentRunSpec {
+        agent_id,
+        mission: system_prompt,
+        granted_tools: available_tools,
+        model: preferred_backend,
+        autonomy: autonomy_level,
+        planning: apollia_tools::PlanningMode::Never,
+        version: String::new(),
     };
-    let agent = BuiltInChatAgent::new(BuiltInChatAgentDeps {
-        llm_router,
-        tool_registry,
-        tool_invoker: session_invoker.invoker,
-        event_bus,
-        user_memory: session_user_memory,
-        a2a_invoker: a2a_for_agent,
-        todo,
-        plan,
-    })
-    .with_workspace_path(session_invoker.workspace)
-    .with_mcp_index(agent_mcp_index, tool_search_limit)
-    .with_plan_mode(session_plan_mode)
-    .with_plan_phase_start(session_plan_phase)
-    .with_hook_executor(hook_executor)
-    .with_pending_injection(pending_injection)
-    .with_tool_turn_temperature(tool_turn_temperature)
-    .with_prefix_checker(prefix_checker);
-
-    // Inject project context on first message OR right after the
-    // session was linked to a project (consumed flag).
-    tracing::info!(
-        session_id = %sid,
-        inject_project_context,
-        has_project = session_project_id.is_some(),
-        has_provider = project_ctx.is_some(),
-        "chat.project_context.gate"
-    );
-    let system_prompt = maybe_inject_project_context(
-        system_prompt,
-        inject_project_context && !is_companion,
-        &session_project_id,
-        &project_ctx,
+    let executor = AgentExecutor::new(
+        spec,
+        AgentExecutorDeps {
+            llm_router,
+            tool_registry,
+            tool_invoker: session_invoker.invoker,
+            event_bus,
+            todo,
+            plan,
+            plan_cache: None,
+        },
+        apollia_context,
+        SessionWiring {
+            planning_folders,
+            plan_template: None,
+            workspace_path: session_invoker.workspace,
+            mcp_index: agent_mcp_index,
+            tool_search_limit,
+            plan_mode: session_plan_mode,
+            plan_phase: session_plan_phase,
+            hook_executor,
+            pending_injection,
+            turn_images,
+            tool_turn_temperature,
+            governance,
+            unattended: false,
+            approval_timeout: Some(crate::chat::builtin_agent::CHAT_APPROVAL_TIMEOUT),
+            tool_output_dir: crate::chat::builtin_agent::default_tool_output_dir(),
+            shared_budget: None,
+            composition: composer.map(|composer| Composition { composer, depth: 1 }),
+            turn_id,
+            session,
+        },
+        &runtime_budget,
+        cancel,
     )
-    .await;
+    .continuing(answer_prefill);
     let summary = resolve_exchange_summary(ExchangeSummaryParams {
         history: &history,
         context_window_size,
@@ -525,25 +429,17 @@ pub(in crate::chat::manager) async fn run_libre_exchange(params: LibreExchangePa
     let turn_span = tracing::info_span!("chat.react.turn", session_id = %sid, run_id = %run_id);
     let result = crate::perf_trace::instrument_turn(
         &sid,
-        agent.execute(
-            &sid,
-            &mid,
-            &run_id,
-            &user_msg,
-            &history,
-            &system_prompt,
-            &available_tools,
-            &authorized_tools,
-            &pending_approvals,
-            &budget,
-            summary.as_deref(),
+        executor.run(RunInput {
+            session_id: &sid,
+            message_id: &mid,
+            run_id: &run_id,
+            user_message: &user_msg,
+            history: &history,
+            authorized_tools: &authorized_tools,
+            pending_approvals: &pending_approvals,
+            summary: summary.as_deref(),
             context_window_size,
-            Some(&autonomy_level),
-            verification.as_ref(),
-            critic.as_ref(),
-            Some(&level_config),
-            cancel,
-        ),
+        }),
     )
     .instrument(turn_span)
     .await;
@@ -565,7 +461,7 @@ pub(in crate::chat::manager) async fn run_libre_exchange(params: LibreExchangePa
 
 /// Resolve the native invoker for a session and wrap it in a composite invoker
 /// when an A2A invoker is configured.
-async fn build_session_invoker(
+pub(in crate::chat::manager) async fn build_session_invoker(
     workspace_params: WorkspaceResolutionParams,
     a2a_for_agent: &Option<Arc<A2AInvoker>>,
     hook_executor: Option<Arc<HookExecutor>>,
@@ -586,8 +482,8 @@ async fn build_session_invoker(
     Ok(ResolvedSessionInvoker { invoker, workspace })
 }
 
-/// Trace-log the enriched approval metadata (reject reason / always-accept
-/// scope) without touching the `log_tool_approval` SQL schema.
+/// Trace-log the enriched approval metadata (reject reason, always-accept)
+/// without touching the `log_tool_approval` SQL schema.
 pub(in crate::chat::manager) fn log_resolution_metadata(
     decision: &ToolDecision,
     session_id: &str,
@@ -604,12 +500,11 @@ pub(in crate::chat::manager) fn log_resolution_metadata(
                 "chat.tool.rejected"
             );
         }
-        ToolDecision::AlwaysAccept { scope } => {
+        ToolDecision::AlwaysAccept => {
             tracing::info!(
                 session_id,
                 message_id,
                 tool_name,
-                always_accept_scope = ?scope,
                 "chat.tool.always_accept.installed"
             );
         }
@@ -617,136 +512,21 @@ pub(in crate::chat::manager) fn log_resolution_metadata(
     }
 }
 
-/// Persist a scoped `allow` rule in `governance.db` for `tool_name`.
-///
-/// Driven by the chat "Always allow" button according to the scope the
-/// operator picked. Best-effort: logs and continues on failure (the in-memory
-/// authorization in `session.authorized_tools` stays in place). The write
-/// goes to the injected `governance_db` path; `None` (tests, minimal
-/// runtimes) skips the persistence rather than resolving a path from the
-/// process home directory.
-pub(in crate::chat::manager) fn persist_chat_allow_rule(
-    scope: apollia_permissions::PermissionScope,
-    project_path: Option<std::path::PathBuf>,
-    agent_id: Option<String>,
-    tool_name: &str,
-    governance_db: Option<&std::path::Path>,
-) {
-    // A code executor (bash/python) is never blanket-authorized: persisting an
-    // arg-prefix-less allow rule would grant a permanent blank check over the
-    // whole interpreter. Refuse it; each invocation keeps its per-call approval.
-    if apollia_permissions::is_code_executor(tool_name) {
-        warn!(
-            tool = %tool_name,
-            detail = "code executor, each invocation requires approval", "chat.rule.persist.refused"
-        );
-        return;
-    }
-
-    let db_path = match governance_db {
-        Some(p) => p,
-        None => {
-            warn!(
-                reason = "no governance database configured",
-                "chat.rule.persist.skipped"
-            );
-            return;
-        }
-    };
-    let base_dir = match db_path.parent() {
-        Some(dir) => dir,
-        None => {
-            warn!(
-                reason = "governance database path has no parent directory",
-                "chat.rule.persist.skipped"
-            );
-            return;
-        }
-    };
-
-    if let Err(e) = apollia_tools::governance_db::GovernanceDb::open(base_dir) {
-        warn!(error = %e, "chat.rule.store.open.failed");
-        return;
-    }
-
-    let mut engine = match PrefixRuleEngine::new(db_path) {
-        Ok(e) => e,
-        Err(e) => {
-            warn!(error = %e, "chat.rule.engine.open.failed");
-            return;
-        }
-    };
-
-    let rule = apollia_permissions::PrefixRule {
-        tool_name: tool_name.to_string(),
-        arg_prefix: None,
-        action: RuleAction::Allow,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
-        scope,
-        project_path,
-        agent_id,
-        ..apollia_permissions::PrefixRule::default()
-    };
-
-    match engine.add_rule(&rule) {
-        Ok(rule_id) => info!(
-            rule_id,
-            scope = %scope.as_str(),
-            tool = %tool_name,
-            "chat.rule.persisted"
-        ),
-        Err(e) => warn!(error = %e, "chat.rule.persist.failed"),
-    }
-}
-
 #[cfg(test)]
 mod code_executor_guard_tests {
     use super::*;
-    use apollia_permissions::{PermissionScope, PrefixRule, PrefixRuleEngine, RuleAction};
 
     #[test]
-    fn merge_live_authorized_tools_filters_code_executors() {
-        // GIVEN a base authorization set holding a code executor and a normal tool
+    fn session_run_grants_filters_code_executors() {
+        // GIVEN session grants holding a code executor and a normal tool
         let mut base = std::collections::HashSet::new();
         base.insert("bash_executor".to_string());
         base.insert("web_read".to_string());
-        // WHEN the effective set is assembled (no governance database injected)
-        let merged = merge_live_authorized_tools(&base, &ChatMode::Agent, None);
+        // WHEN the grants of the run are read from them
+        let grants = session_run_grants(&base);
         // THEN the code executor is dropped, the normal tool is kept
-        assert!(!merged.contains("bash_executor"));
-        assert!(merged.contains("web_read"));
-    }
-
-    #[test]
-    fn chat_prefix_allow_seeding_excludes_code_executors() {
-        // GIVEN a governance.db with agent-scoped Allow rules for a code
-        // executor and a normal tool
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("governance.db");
-        {
-            let mut engine = PrefixRuleEngine::new(&db_path).expect("engine");
-            for tool in ["bash_executor", "web_read"] {
-                engine
-                    .add_rule(&PrefixRule {
-                        tool_name: tool.to_string(),
-                        arg_prefix: None,
-                        action: RuleAction::Allow,
-                        scope: PermissionScope::Agent,
-                        agent_id: Some(APOLLIA_CHAT_AGENT_ID.to_string()),
-                        ..PrefixRule::default()
-                    })
-                    .expect("add_rule");
-            }
-        }
-        // WHEN the chat pre-authorization seeding runs
-        let mut out = ChatLibreOverrides::default();
-        apply_chat_prefix_allow_rules(&mut out, &db_path);
-        // THEN the code executor is not pre-authorized, the normal tool is
-        assert!(!out.pre_authorized_tools.contains("bash_executor"));
-        assert!(out.pre_authorized_tools.contains("web_read"));
+        assert!(!grants.contains("bash_executor"));
+        assert!(grants.contains("web_read"));
     }
 }
 
@@ -773,7 +553,6 @@ mod context_gauge_tests {
             id: "sess-gauge".into(),
             mode: ChatMode::Libre,
             agent_name: None,
-            system_prompt: String::new(),
             status: SessionStatus::Active,
             history,
             authorized_tools: std::collections::HashSet::new(),
@@ -784,13 +563,12 @@ mod context_gauge_tests {
             title: None,
             parent_session_id: None,
             fork_depth: 0,
-            project_id: None,
-            force_project_context_inject: false,
-            fs_allow_rules: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
             plan_mode: false,
             plan_phase: PlanPhase::Done,
+            profile_id: None,
+            use_profile: true,
+            settings: crate::chat::SessionSettings::default(),
+            notes: String::new(),
         }
     }
 

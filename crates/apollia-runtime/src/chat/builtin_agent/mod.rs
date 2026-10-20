@@ -38,8 +38,6 @@ use super::types::{
     ApprovalTimeoutParams, ChatError, ChatMessage, ChatRole, InjectedInstruction,
     PendingChatApprovals, PlanPhase, ToolCallRecord, ToolCallStatus, ToolDecision, TurnOutcome,
 };
-use crate::a2a::A2AInvoker;
-use crate::chat::a2a_tools::generate_a2a_tool_specs;
 use crate::chat::plan_actor::PlanHandle;
 use crate::chat::plan_tool::{
     self, PLAN_ADD_STEP_TOOL_NAME, PLAN_MODIFY_STEP_TOOL_NAME, PLAN_PROPOSE_TOOL_NAME,
@@ -49,14 +47,20 @@ use crate::chat::plan_tool::{
 use crate::chat::todo_handle::TodoHandle;
 use crate::chat::todo_tool::{run_todo_write, todo_write_spec, TODO_WRITE_TOOL_NAME};
 use crate::chat::turn_router::classify_turn;
+use crate::composition::Composer;
 use crate::eventbus::EventBusSender;
 use crate::hooks::executor::{HookDecision, HookExecutor};
 
+mod approval_request;
 mod builder;
+mod call_journal;
+mod catalog;
 mod context_window;
+mod governed;
 mod helpers;
 mod hitl;
 mod invoker;
+mod outputs;
 mod plan;
 mod prompt;
 mod react_loop;
@@ -65,16 +69,32 @@ mod stream;
 mod tool_guide;
 mod tools;
 
+pub(in crate::chat) use approval_request::approval_request;
+pub(in crate::chat) use governed::refusal_text;
+#[cfg(test)]
+pub(in crate::chat::builtin_agent) use helpers::build_tool_specs;
 pub(in crate::chat::builtin_agent) use helpers::{
-    build_llm_messages, build_tool_specs, executing_denies_proposal, extract_hostname,
-    is_plan_tool, next_failure_count, plan_gate_denies, run_verification_with_retry,
+    build_llm_messages, executing_denies_proposal, extract_hostname, is_plan_tool,
+    next_failure_count, plan_gate_denies, promote_discovered_tools, run_verification_with_retry,
     stamp_inject_provenance, step_status_token, truncate_preview, truncate_tool_output,
     unknown_tool_reason,
 };
-pub use invoker::{HitlInvokerParams, NativeChatToolInvoker};
+pub use invoker::NativeChatToolInvoker;
+pub use outputs::{context_tool_output, default_tool_output_dir, TOOL_OUTPUT_DIR};
 pub use response::{ChatAgentResponse, ConsolidatedVerificationReport};
 pub(in crate::chat::builtin_agent) use response::{NoopCheckInvoker, PlanPhaseTracker, RetryCarry};
 
+/// An "always accept" on a code executor covers the current call only.
+#[cfg(test)]
+mod call_journal_tests;
+#[cfg(test)]
+mod code_executor_grant_tests;
+#[cfg(test)]
+mod consent_journal_tests;
+#[cfg(test)]
+mod governed_test_support;
+#[cfg(test)]
+mod parity_tests;
 /// Cooperative pause/resume of the chat ReAct loop.
 #[cfg(test)]
 mod pause_tests;
@@ -84,9 +104,46 @@ mod tests;
 mod todo_compaction_tests;
 #[cfg(test)]
 mod verification_wire_tests;
+/// A write is consented to on the card of its family, with no prompt of its own.
+#[cfg(test)]
+mod write_consent_tests;
 
-/// Default timeout for chat tool approval requests (5 minutes).
-const CHAT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+/// What one conversation changes from its agent: the part of its settings
+/// the loop applies. The default changes nothing.
+#[derive(Debug, Clone, Default)]
+pub struct SessionOverrides {
+    /// Instructions added to the mission, after it.
+    pub instructions: Option<String>,
+    /// Request settings of the conversation, the level above the model, the
+    /// package and the preset.
+    pub request: apollia_llm::request_defaults::RequestDefaults,
+    /// Reads the three levels below, the preset of the conversation taking
+    /// the place of the agent's. `None` reads none of them.
+    pub request_levels: Option<apollia_llm::AgentModelBinding>,
+    /// Reasoning on or off, for a model that reads it.
+    pub thinking: Option<bool>,
+    /// Level of reasoning, for a model that reads it.
+    pub reasoning_effort: Option<apollia_llm::ReasoningEffort>,
+    /// Whether the reasoning of the earlier answers goes back to the model.
+    pub preserve_thinking: Option<bool>,
+    /// What happens when the messages reach the context limit.
+    pub overflow: apollia_oria::context_manager::ContextOverflow,
+    /// Accesses the agent does not hold, proposed for the conversation: each
+    /// of their calls asks, unless a standing consent covers it.
+    pub proposed_accesses: Vec<String>,
+}
+
+/// The request settings of one turn, read once and applied to each call.
+#[derive(Debug, Clone, Default)]
+pub(in crate::chat::builtin_agent) struct TurnRequestSettings {
+    /// The temperature the user chose, for the conversation or in a preset.
+    chosen_temperature: Option<f32>,
+    /// The four levels resolved.
+    resolved: apollia_llm::request_defaults::RequestDefaults,
+}
+
+/// Delay after which a tool approval of a conversation is refused (5 minutes).
+pub(crate) const CHAT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Maximum number of read-only tool calls executed concurrently within a single
 /// agent turn. Write calls and read-only calls awaiting approval stay
@@ -156,6 +213,7 @@ const TOOL_OUTPUT_MAX_LEN: usize = 4000;
 /// Re-exported base system prompts. The single source of truth lives in the
 /// `apollia-prompts` crate (English; tier-selected by `build_system_prompt`).
 pub use apollia_prompts::blocks::{DEFAULT_SYSTEM_PROMPT, PERSEVERANCE_SYSTEM_PROMPT};
+pub use prompt::built_in_prompt;
 
 /// Maximum number of verification retry iterations per run.
 ///
@@ -172,19 +230,6 @@ const VERIFICATION_MAX_RETRIES: u32 = 2;
 /// scope for this iteration.
 const ESCALATION_FAILURE_THRESHOLD: u32 = 3;
 
-/// Per-invocation permission checker consulted when a tool call misses the
-/// name-only authorization set, before a human approval is raised.
-///
-/// Arguments: the tool name and the call's first string argument (extracted
-/// with [`apollia_permissions::extract_first_arg`]). Returns the matched rule
-/// id and action, or `None` when no persisted rule decides, in which case the
-/// HITL flow proceeds as before. The decision is per invocation: an allow
-/// never widens the name-only set, the next call re-evaluates with its own
-/// argument.
-pub type PrefixChecker = dyn Fn(&str, Option<&str>) -> Option<(i64, apollia_permissions::prefix_rule_engine::RuleAction)>
-    + Send
-    + Sync;
-
 /// Dependencies required to construct a [`BuiltInChatAgent`].
 pub struct BuiltInChatAgentDeps {
     pub llm_router: Arc<LlmRouter>,
@@ -192,7 +237,6 @@ pub struct BuiltInChatAgentDeps {
     pub tool_invoker: Arc<dyn ToolInvoker>,
     pub event_bus: EventBusSender,
     pub user_memory: Option<Arc<std::sync::Mutex<UserMemoryRepository>>>,
-    pub a2a_invoker: Option<Arc<A2AInvoker>>,
     /// Optional per-session todo store. When present, the `todo_write` built-in
     /// tool is advertised to the LLM and handled inside the ReAct loop.
     pub todo: Option<TodoHandle>,
@@ -215,13 +259,20 @@ pub struct BuiltInChatAgent {
     tool_invoker: Arc<dyn ToolInvoker>,
     /// Event bus for emitting chat lifecycle events.
     event_bus: EventBusSender,
-    /// Optional user memory repository for injecting user context into the system prompt.
+    /// Profile store the profile block of the system prompt is read from.
+    /// `None` leaves the prompt without a profile block.
     user_memory: Option<Arc<std::sync::Mutex<UserMemoryRepository>>>,
-    /// Optional A2A invoker for discovering worker agent skills as virtual tools.
-    a2a_invoker: Option<Arc<A2AInvoker>>,
-    /// Context window manager: compacts `llm_messages` inside the ReAct loop
-    /// when accumulated messages exceed the model's window threshold.
+    /// Profile the conversation designates; `None` reads the default profile.
+    conversation_profile: Option<String>,
+    /// Reads the agents and workflows granted to the agent, offered as
+    /// tools. `None` offers none of them.
+    composer: Option<Arc<dyn Composer>>,
+    /// Context window manager: brings `llm_messages` under the model's window
+    /// threshold inside the ReAct loop, the way the conversation chose
+    /// (summarize, slide, or stop).
     context_manager: ContextManager,
+    /// What the conversation changes from its agent, for itself alone.
+    session: SessionOverrides,
     /// Optional handle to the `MetaLlmOrchestrator`, used to produce the
     /// `ToolCallRationale` narrated before each tool execution.
     /// Absent by default for backward compatibility; injected by the manager
@@ -269,6 +320,14 @@ pub struct BuiltInChatAgent {
     /// the operator text as reason. `None` for every ordinary turn, so behavior is
     /// unchanged when no injection is pending.
     pending_injection: Option<InjectedInstruction>,
+    /// The answer this turn continues. `Some` only when the user asked for the
+    /// last answer to be continued: the request then ends on that answer, as an
+    /// assistant message the engine prefills, and no message is added to ask
+    /// for the rest.
+    answer_prefill: Option<String>,
+    /// Images of the turn: those of the message answered and of the earlier
+    /// user messages in the window. Empty for a turn without images.
+    turn_images: crate::chat::images::TurnImages,
     /// Temperature applied to a turn that advertises tools to the model.
     ///
     /// Lowering it whenever tools are exposed makes structured tool-call output
@@ -277,16 +336,37 @@ pub struct BuiltInChatAgent {
     /// `[chat] tool_turn_temperature`, defaulting to
     /// [`DEFAULT_TOOL_TURN_TEMPERATURE`].
     tool_turn_temperature: f32,
-    /// Optional per-invocation prefix-rule checker. `None` keeps the previous
-    /// behavior: a miss on the name-only set goes straight to HITL.
-    prefix_checker: Option<Arc<PrefixChecker>>,
+    /// The governance every tool call is decided by, before it runs.
+    governance: crate::governance::GovernanceHandle,
+    /// Nobody watches the run: a call that would ask waits instead.
+    unattended: bool,
+    /// Backend the owning session prefers. Each call of the turn routes to it
+    /// when the router can reach it, and to the default otherwise (said with
+    /// `LlmAgentModelFallback`). `None` routes to the default.
+    preferred_backend: Option<String>,
+    /// Identifier of the agent this loop runs for, named in the model
+    /// resolution and its fallback event. Defaults to the Apollia agent.
+    agent_id: String,
+    /// Delay after which a pending tool approval is refused. `None` waits for
+    /// the human however long it takes.
+    approval_timeout: Option<Duration>,
+    /// Directory where a tool output too long for the context is kept whole.
+    /// `None` cuts such an output instead.
+    tool_output_dir: Option<std::path::PathBuf>,
+    /// Circuit breakers of the tools this loop calls, one per tool.
+    resilience: apollia_oria::ResilienceLayer,
+    /// The conversation turn every model call of the run is made for: the
+    /// identifier of the answer it produces. `None` outside a conversation.
+    turn_id: Option<String>,
 }
 
 /// Mutable accumulators threaded through one ReAct turn's tool-call handling.
 struct ReactAccumulators {
     all_tool_calls: Vec<ToolCallRecord>,
-    newly_authorized: Vec<String>,
+    /// The accesses the caller of the run granted for the run alone.
     authorized: HashSet<String>,
+    /// The measure of every model call of the turn, in order.
+    llm_calls: Vec<apollia_llm::CallMeasure>,
 }
 
 /// Owned/borrowed state needed to build the terminal [`ChatAgentResponse`]
@@ -319,9 +399,11 @@ struct ToolCallContext<'a> {
     /// The arguments of this call were replaced by a `PreToolUse` hook, so the
     /// session-level authorization of the tool name no longer covers what is
     /// about to run: the operator approved one argument set and a handler
-    /// answered with another. Set, the call goes through the approval flow
-    /// whatever `acc.authorized` says.
+    /// answered with another. Set, a call a consent would let run is asked
+    /// about again.
     rewritten_by_hook: bool,
+    /// Action family of the tool, as its descriptor declares it.
+    family: apollia_tools::ActionFamily,
 }
 
 /// Borrowed identifiers shared by every tool call in a single ReAct turn
@@ -364,6 +446,8 @@ struct ToolExecTarget<'a> {
     message_id: &'a str,
     call: &'a ToolCall,
     run_id: &'a RunId,
+    /// What governance asked about the call, carried to the answer.
+    asked: governed::AskedConsent,
 }
 
 /// Result of processing one tool call.

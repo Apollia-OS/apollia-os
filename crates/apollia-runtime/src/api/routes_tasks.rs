@@ -13,12 +13,21 @@ use crate::api::server::AppState;
 use crate::coordinator::ExecutionBackend;
 use crate::router::SubmitError;
 
+mod declarative;
+/// The A2A delegation tree of a task.
+pub mod delegation;
 mod pause;
+/// The hard deletion of a stored task.
+pub mod record;
+mod resume;
+/// The task list an operator reads, history included.
+pub mod summaries;
 pub use pause::ResumeErrorBody;
 use pause::{check_resume, plain};
+pub(crate) use resume::resume_paused_task;
 
 use apollia_core::token_budget::TokenBudget;
-use apollia_core::{AIPInput, AIPPart, DataPart, RuntimeEvent, TaskId, TaskStatus};
+use apollia_core::{AIPInput, AIPPart, DataPart, TaskId, TaskStatus};
 
 /// Request body for `POST /api/v1/tasks`.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -63,6 +72,21 @@ pub struct TaskResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Object>)]
     pub token_budget: Option<TokenBudget>,
+}
+
+impl TaskResponse {
+    /// The answer to an accepted submission.
+    fn submitted(task_id: TaskId) -> Self {
+        Self {
+            task_id: task_id.to_string(),
+            status: "submitted".into(),
+            run_id: None,
+            result: None,
+            error: None,
+            error_code: None,
+            token_budget: None,
+        }
+    }
 }
 
 /// Standard error response body.
@@ -244,7 +268,9 @@ pub async fn list_tasks<B: ExecutionBackend + Clone>(
 
 /// Handler for `POST /api/v1/tasks`.
 ///
-/// Submits a new task to the specified agent via the TaskRouter.
+/// Submits a new task to the specified agent via the TaskRouter. A stored
+/// agent that runs no code is run by the agent executor on the message the
+/// input carries, outside any conversation.
 /// Returns 202 Accepted with the generated task_id on success.
 #[utoipa::path(
     post,
@@ -261,6 +287,11 @@ pub async fn submit_task<B: ExecutionBackend + Clone>(
     State(state): State<AppState<B>>,
     Json(req): Json<SubmitTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), (StatusCode, Json<ErrorResponse>)> {
+    if let Some(agent) = declarative::stored_agent_without_code(&state, &req.agent_id)? {
+        let agent = declarative::for_this_run(agent, &req.run_options);
+        let task_id = declarative::launch(&state, &agent, req.input).await?;
+        return Ok((StatusCode::ACCEPTED, Json(TaskResponse::submitted(task_id))));
+    }
     let input = json_to_aip_input(req.input);
 
     let task_id = state
@@ -269,18 +300,7 @@ pub async fn submit_task<B: ExecutionBackend + Clone>(
         .await
         .map_err(submit_error_to_response)?;
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(TaskResponse {
-            task_id: task_id.to_string(),
-            status: "submitted".into(),
-            run_id: None,
-            result: None,
-            error: None,
-            error_code: None,
-            token_budget: None,
-        }),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(TaskResponse::submitted(task_id))))
 }
 
 /// Handler for `GET /api/v1/tasks/{id}`.
@@ -368,11 +388,24 @@ pub async fn get_task<B: ExecutionBackend + Clone>(
 /// Handler for `DELETE /api/v1/tasks/{id}`.
 ///
 /// Cancels a running task. Returns 404 if the task does not exist.
+///
+/// `id` is a task id, or the `invocation_id` a client gave a synchronous
+/// `POST /api/v1/a2a/invoke` that is still running. The second form exists
+/// because that route answers only once the worker has finished, so its task id
+/// reaches the caller too late to cancel anything; the name the caller chose is
+/// bound to the task from the moment it is submitted. A name that resolves wins
+/// over a task of the same spelling, which costs nothing: task ids are UUIDs
+/// and a client that picks one as its own name gets the task it meant either
+/// way.
+///
+/// A live `invocation_id` that names a workflow invoked through
+/// `POST /api/v1/a2a/invoke` stops that run: the answer carries the run id and
+/// the status the run ended with.
 #[utoipa::path(
     delete,
     path = "/api/v1/tasks/{id}",
     tag = "tasks",
-    params(("id" = String, Path, description = "Task id")),
+    params(("id" = String, Path, description = "Task id, or a live invocation_id")),
     responses(
         (status = 200, description = "Task cancelled", body = TaskResponse),
         (status = 404, description = "Task not found", body = crate::api::openapi::ApiErrorBody),
@@ -382,6 +415,18 @@ pub async fn cancel_task<B: ExecutionBackend + Clone>(
     State(state): State<AppState<B>>,
     Path(task_id): Path<String>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let target = state
+        .a2a_invoker
+        .as_ref()
+        .and_then(|invoker| invoker.aliases().resolve_target(&task_id));
+    let task_id = match target {
+        Some(crate::a2a::AliasTarget::WorkflowRun(run_id)) => {
+            return cancel_workflow_run_by_alias(&state, run_id).await;
+        }
+        Some(crate::a2a::AliasTarget::Task(task_id)) => task_id,
+        None => task_id,
+    };
+
     let status = state
         .router_handle
         .cancel(&task_id)
@@ -407,6 +452,36 @@ pub async fn cancel_task<B: ExecutionBackend + Clone>(
                 error: format!("task not found: {task_id}"),
             }),
         )),
+    }
+}
+
+/// Stops the workflow run a client invocation name designates.
+async fn cancel_workflow_run_by_alias<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+    run_id: String,
+) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let refuse = |status: StatusCode, error: String| (status, Json(ErrorResponse { error }));
+    let Some(engine) = state.workflows.as_ref() else {
+        return Err(refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the workflow engine is not running in this runtime".into(),
+        ));
+    };
+    match engine.cancel(&run_id).await {
+        Ok(run) => Ok(Json(TaskResponse {
+            task_id: run.run_id,
+            status: run.status,
+            run_id: None,
+            result: None,
+            error: run.error,
+            error_code: None,
+            token_budget: None,
+        })),
+        Err(e @ crate::workflows::WorkflowError::UnknownRun(_))
+        | Err(e @ crate::workflows::WorkflowError::AlreadyEnded(_)) => {
+            Err(refuse(StatusCode::NOT_FOUND, e.to_string()))
+        }
+        Err(e) => Err(refuse(StatusCode::SERVICE_UNAVAILABLE, e.to_string())),
     }
 }
 
@@ -477,143 +552,28 @@ pub async fn resume_task<B: ExecutionBackend + Clone>(
     State(state): State<AppState<B>>,
     Json(body): Json<ResumeRequest>,
 ) -> Result<Json<ResumeResponse>, (StatusCode, Json<ResumeErrorBody>)> {
-    // Check that the TaskRepository is available.
-    let repo = match state.task_repository.as_ref() {
-        Some(r) => r,
-        None => {
-            return Err(plain(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "HITL not configured - task_repository absent".into(),
-            ));
-        }
-    };
-
-    // Check the status via the TaskRepository.
-    let db_status = repo.get_task_status(&task_id).await.map_err(|e| {
-        tracing::error!(task_id = %task_id, error = %e, "task.status.read.failed");
-        plain(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("database error: {e}"),
-        )
-    })?;
-
-    match db_status.as_deref() {
-        // Task absent from the tasks table: 404.
-        None => {
-            return Err(plain(
-                StatusCode::NOT_FOUND,
-                format!("task not found: {task_id}"),
-            ));
-        }
-        // Task present but not in input_required: 409.
-        Some(status) if status != "input_required" => {
-            return Err(plain(
-                StatusCode::CONFLICT,
-                format!("task '{task_id}' is not in input_required status (current: {status})"),
-            ));
-        }
-        _ => {}
-    }
-
-    // Check the answer against the pause it answers, before anything is
-    // written: a refused answer leaves the task paused and resumable.
-    let pending = repo.pending_pause(&task_id).await.map_err(|e| {
-        tracing::error!(task_id = %task_id, error = %e, "task.pause.read.failed");
-        plain(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("database error: {e}"),
-        )
-    })?;
-    let input_response = check_resume(
-        pending.as_ref(),
-        body.approved,
-        body.reason.clone(),
-        body.answer.clone(),
-    )?;
-
-    // Durability before notification: write to the DB before the EventBus.
-    repo.save_input_response(&task_id, &input_response)
-        .await
-        .map_err(|e| {
-            tracing::error!(task_id = %task_id, error = %e, "task.input_response.save.failed");
-            plain(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to persist response: {e}"),
-            )
-        })?;
-
-    // Emit TaskResumed on the EventBus.
-    let _ = state.event_sender.send(RuntimeEvent::TaskResumed {
-        task_id: TaskId::from(task_id.as_str()),
-        approved: body.approved,
-    });
-
-    // Rebuild the enriched AIPTask and resolve the ORIA oneshot.
-    match repo.rebuild_for_resume(&task_id).await {
-        Ok(enriched_task) => {
-            // Resolve the PendingApprovals oneshot to unblock execute_direct().
-            if let Some(pending) = state.pending_approvals.as_ref() {
-                match pending.resolve(
-                    &task_id,
-                    enriched_task
-                        .input_response
-                        .clone()
-                        .unwrap_or_else(|| input_response.clone()),
-                ) {
-                    Ok(()) => {
-                        tracing::info!(
-                            task_id = %task_id,
-                            approved = body.approved,
-                            "task.approval.resolved"
-                        );
-                    }
-                    Err(e) => {
-                        // Not a fatal error, the task may have been cleaned up or
-                        // PendingApprovals was not registered (e.g. non-ORIA execution).
-                        tracing::warn!(
-                            task_id = %task_id,
-                            error = %e,
-                            "task.approval.resolve.failed"
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    task_id = %task_id,
-                    detail = "the suspended ORIA run stays blocked",
-                    "task.approval.resolver.missing"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::error!(task_id = %task_id, error = %e, "task.resume.rebuild.failed");
-            return Err(plain(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to rebuild task for resume: {e}"),
-            ));
-        }
-    }
-
-    Ok(Json(ResumeResponse {
-        task_id,
-        approved: body.approved,
-        status: "working".into(),
-    }))
+    resume_paused_task(&state, task_id, body).await.map(Json)
 }
 
 // Plan gate decision, POST /api/v1/tasks/{id}/plan-decision
 
 /// Request body for `POST /api/v1/tasks/{id}/plan-decision`.
 ///
-/// The operator approves the generated plan or rejects it with optional
-/// feedback used to guide replanning.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+/// The operator approves the generated plan, rejects it with optional
+/// feedback used to guide replanning, or submits an edited plan.
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PlanDecisionRequest {
-    /// `"approved"` to execute the plan, `"rejected"` to replan.
+    /// `"approved"` to execute the plan, `"rejected"` to replan, `"edited"` to
+    /// execute `revised_steps` instead.
     pub decision: String,
     /// Optional feedback injected into the next planning attempt on rejection.
     #[serde(default)]
     pub feedback: Option<String>,
+    /// The edited plan, required with `"edited"`, validated by the engine
+    /// before it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub revised_steps: Option<Vec<apollia_core::plan::PlanStep>>,
 }
 
 /// Response body for `POST /api/v1/tasks/{id}/plan-decision`.
@@ -621,7 +581,7 @@ pub struct PlanDecisionRequest {
 pub struct PlanDecisionResponse {
     /// Run identifier whose gate was resolved.
     pub run_id: String,
-    /// Decision applied (`"approved"` or `"rejected"`).
+    /// Decision applied (`"approved"`, `"rejected"` or `"edited"`).
     pub decision: String,
 }
 
@@ -633,7 +593,7 @@ pub struct PlanDecisionResponse {
 ///
 /// ## HTTP codes
 /// - `200 OK`, decision recorded and the gate resolved
-/// - `400 Bad Request`, unknown `decision` value
+/// - `400 Bad Request`, unknown `decision` value, or `edited` without steps
 /// - `404 Not Found`, no gate pending for this run (unknown, resolved, expired)
 /// - `503 Service Unavailable`, the plan gate is not configured
 #[utoipa::path(
@@ -644,7 +604,7 @@ pub struct PlanDecisionResponse {
     request_body = PlanDecisionRequest,
     responses(
         (status = 200, description = "Plan decision recorded", body = PlanDecisionResponse),
-        (status = 400, description = "Unknown decision value", body = crate::api::openapi::ApiErrorBody),
+        (status = 400, description = "Unknown decision value, or an edit without steps", body = crate::api::openapi::ApiErrorBody),
         (status = 404, description = "No gate pending", body = crate::api::openapi::ApiErrorBody),
         (status = 503, description = "Plan gate not configured", body = crate::api::openapi::ApiErrorBody),
     )
@@ -670,11 +630,24 @@ pub async fn submit_plan_decision<B: ExecutionBackend + Clone>(
     let outcome = match body.decision.as_str() {
         "approved" | "approve" => handle.approve(&run_id),
         "rejected" | "reject" => handle.reject(&run_id, body.feedback.clone()),
+        "edited" | "edit" => match body.revised_steps.clone() {
+            Some(steps) => handle.edit(&run_id, steps),
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "an edited plan carries its revised_steps".into(),
+                    }),
+                ));
+            }
+        },
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: format!("invalid decision '{other}', expected 'approved' or 'rejected'"),
+                    error: format!(
+                        "invalid decision '{other}', expected 'approved', 'rejected' or 'edited'"
+                    ),
                 }),
             ));
         }
@@ -763,28 +736,24 @@ mod tests {
 
     fn test_manifest(name: &str) -> AgentManifest {
         AgentManifest {
+            autonomy_level: None,
             format_version: 1,
             name: name.to_string(),
             version: "0.1.0".to_string(),
             description: String::new(),
-            tools_required: vec![],
-            tools_optional: vec![],
             supports_streaming: false,
             supports_a2a: false,
             memory_namespace: None,
             shared_memory_namespaces: vec![],
             max_concurrent_tasks: 1,
             step_budget: None,
-            network_allowlist: None,
-            dangerous_tools_allowed: false,
             tags: vec![],
             skills: vec![],
             execution_mode: "auto".to_string(),
             supports_mailbox: false,
             mailbox_allowlist: None,
             system_prompt: None,
-            tools_requiring_approval: vec![],
-            llm_backend: None,
+            model: None,
             packages: vec![],
             memory_config: None,
             agent_type: None,
@@ -809,7 +778,6 @@ mod tests {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -818,11 +786,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -842,6 +812,12 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         Router::new()
             .route("/api/v1/tasks", post(submit_task::<MockBackend>))
@@ -863,7 +839,6 @@ mod tests {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -872,11 +847,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: Some(gates),
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -896,6 +873,12 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         }
     }
 
@@ -916,6 +899,7 @@ mod tests {
             Json(PlanDecisionRequest {
                 decision: "approved".into(),
                 feedback: None,
+                revised_steps: None,
             }),
         )
         .await;
@@ -942,6 +926,7 @@ mod tests {
             Json(PlanDecisionRequest {
                 decision: "approved".into(),
                 feedback: None,
+                revised_steps: None,
             }),
         )
         .await;
@@ -949,6 +934,62 @@ mod tests {
         // THEN it is a 404
         let err = resp.expect_err("should fail");
         assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_plan_decision_runs_an_edited_plan() {
+        // GIVEN a run paused at the plan gate
+        let gates = apollia_oria::PendingPlanGates::new();
+        let rx = gates.register("run-edit");
+        let state = state_with_plan_gates(gates);
+        let step: apollia_core::plan::PlanStep =
+            serde_json::from_value(serde_json::json!({ "step_id": "s1", "description": "Read" }))
+                .unwrap();
+
+        // WHEN the operator submits an edited plan
+        let resp = submit_plan_decision(
+            Path("run-edit".to_string()),
+            State(state),
+            Json(PlanDecisionRequest {
+                decision: "edited".into(),
+                feedback: None,
+                revised_steps: Some(vec![step]),
+            }),
+        )
+        .await;
+
+        // THEN the gate resolves to the edited steps
+        assert!(resp.is_ok());
+        let decision = rx.await.expect("gate should resolve");
+        assert!(matches!(
+            decision,
+            apollia_oria::PlanGateDecision::Edited { ref revised_steps } if revised_steps[0].step_id == "s1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_plan_decision_refuses_an_edit_without_steps() {
+        // GIVEN a run paused at the plan gate
+        let gates = apollia_oria::PendingPlanGates::new();
+        let _rx = gates.register("run-edit-empty");
+        let state = state_with_plan_gates(gates);
+
+        // WHEN an edit carries no steps
+        let resp = submit_plan_decision(
+            Path("run-edit-empty".to_string()),
+            State(state),
+            Json(PlanDecisionRequest {
+                decision: "edited".into(),
+                feedback: None,
+                revised_steps: None,
+            }),
+        )
+        .await;
+
+        // THEN it is a 400 that says what is missing
+        let err = resp.expect_err("should fail");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.error.contains("revised_steps"));
     }
 
     /// Build a test environment with an active agent and coordinator registered.
@@ -980,7 +1021,6 @@ mod tests {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -989,11 +1029,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -1013,6 +1055,12 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         let router = Router::new()
             .route("/api/v1/tasks", post(submit_task::<MockBackend>))
@@ -1027,6 +1075,14 @@ mod tests {
 
     /// Build a test environment with a never-completing backend, for cancel tests.
     async fn test_router_with_blocking_agent() -> (Router, String) {
+        let (router, agent_id, _) = test_router_with_blocking_agent_and_invoker().await;
+        (router, agent_id)
+    }
+
+    /// The same environment, with the A2A invoker whose alias registry
+    /// `cancel_task` resolves a client-supplied invocation id through.
+    async fn test_router_with_blocking_agent_and_invoker(
+    ) -> (Router, String, std::sync::Arc<crate::a2a::A2AInvoker>) {
         let (event_tx, _) = broadcast::channel::<RuntimeEvent>(64);
         let registry_handle = AgentRegistry::spawn(event_tx.clone());
         let router_handle: TaskRouterHandle<NeverMockBackend> =
@@ -1048,11 +1104,17 @@ mod tests {
             .await
             .expect("register coordinator failed");
 
+        let a2a_invoker = std::sync::Arc::new(crate::a2a::A2AInvoker::new(
+            registry_handle.clone(),
+            router_handle.clone(),
+            event_tx.clone(),
+            apollia_core::A2AConfig::default(),
+        ));
+
         let state = AppState {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: NeverMockBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -1061,11 +1123,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -1081,10 +1145,16 @@ mod tests {
             mcp_server_repo: None,
             llm_backend_repo: None,
             stt_config_repo: None,
-            a2a_invoker: None,
+            a2a_invoker: Some(std::sync::Arc::clone(&a2a_invoker)),
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         let router = Router::new()
             .route("/api/v1/tasks", post(submit_task::<NeverMockBackend>))
@@ -1094,7 +1164,7 @@ mod tests {
             )
             .with_state(state);
 
-        (router, agent_id.to_string())
+        (router, agent_id.to_string(), a2a_invoker)
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -1268,6 +1338,236 @@ mod tests {
         assert_eq!(json["status"], "canceled");
     }
 
+    #[tokio::test]
+    async fn cancelling_by_a_client_invocation_id_reaches_the_task_it_names() {
+        // GIVEN a task running on a blocking backend, and the client-chosen
+        // name a synchronous `POST /a2a/invoke` bound to it. The name is the
+        // only handle the caller holds: that route answers after the worker,
+        // so its task id arrives too late to cancel anything.
+        let (router, agent_id, invoker) = test_router_with_blocking_agent_and_invoker().await;
+
+        let body = serde_json::json!({
+            "agent_id": agent_id,
+            "input": {"prompt": "Read the import"}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
+            .expect("build request");
+        let resp = router.clone().oneshot(req).await.expect("request failed");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let submit_json = body_json(resp).await;
+        let task_id = submit_json["task_id"].as_str().expect("task_id").to_owned();
+        assert!(invoker.aliases().bind("import-42", &task_id));
+
+        // WHEN the caller deletes the invocation by the name it chose
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/tasks/import-42")
+            .body(Body::empty())
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("request failed");
+
+        // THEN the task behind the name is the one that got cancelled
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["task_id"], task_id);
+        assert_eq!(json["status"], "canceled");
+    }
+
+    /// Backend whose execution never ends, and which records when that
+    /// execution is dropped, so a test can tell a stopped run from a caller
+    /// that merely stopped waiting for it.
+    #[derive(Clone)]
+    struct ForeverTrackedBackend {
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct SetOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl ExecutionBackend for ForeverTrackedBackend {
+        fn execute(
+            &self,
+            _task: apollia_core::AIPTask,
+        ) -> Pin<Box<dyn Future<Output = Result<AIPResult, String>> + Send>> {
+            let flag = SetOnDrop(std::sync::Arc::clone(&self.dropped));
+            Box::pin(async move {
+                let _flag = flag;
+                std::future::pending::<Result<AIPResult, String>>().await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_a2a_invocation_by_its_client_id_stops_the_execution() {
+        // GIVEN a worker that exposes one A2A skill and whose execution never
+        // ends, behind the invoke and cancel routes
+        let (event_tx, _) = broadcast::channel::<RuntimeEvent>(64);
+        let registry_handle = AgentRegistry::spawn(event_tx.clone());
+        let router_handle: TaskRouterHandle<ForeverTrackedBackend> =
+            TaskRouterHandle::spawn(registry_handle.clone(), event_tx.clone(), 64);
+        let mut manifest = test_manifest("import-worker");
+        manifest.supports_a2a = true;
+        manifest.skills = vec![apollia_core::AgentSkill {
+            id: "read-import".to_string(),
+            name: "read-import".to_string(),
+            description: String::new(),
+            input_modes: vec!["text".to_string()],
+            output_modes: vec!["text".to_string()],
+            input_schema: None,
+            examples: vec![],
+        }];
+        let agent_id = registry_handle
+            .register(manifest)
+            .await
+            .expect("register failed");
+        registry_handle
+            .update_state(agent_id.as_str(), ProcessState::Active)
+            .await
+            .expect("activate failed");
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let backend = ForeverTrackedBackend {
+            dropped: std::sync::Arc::clone(&dropped),
+        };
+        let coordinator =
+            ExecutionCoordinator::new(agent_id.clone(), 1, event_tx.clone(), backend.clone());
+        router_handle
+            .register_coordinator(agent_id.clone(), coordinator)
+            .await
+            .expect("register coordinator failed");
+        let invoker = std::sync::Arc::new(crate::a2a::A2AInvoker::new(
+            registry_handle.clone(),
+            router_handle.clone(),
+            event_tx.clone(),
+            apollia_core::A2AConfig::default(),
+        ));
+        let state = AppState {
+            router_handle,
+            registry_handle,
+            event_sender: event_tx,
+            backend,
+            llm_router: crate::api::server::empty_shared_llm_router(),
+            trigger_engine: None,
+            config_path: None,
+            task_repository: None,
+            pending_approvals: None,
+            plan_gates: None,
+            notification_config: None,
+            tool_registry_handle: None,
+            audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
+            obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
+            llm_call_repository: None,
+            trigger_def_repo: None,
+            notification_repo: None,
+            notification_engine_handle: None,
+            chat_manager: None,
+            plan_cache: None,
+            mailbox_handle: None,
+            user_memory: None,
+            data_dir: std::path::PathBuf::new(),
+            stt_engine: crate::api::server::empty_shared_stt_engine(),
+            stt_repository: crate::api::server::empty_shared_stt_repository(),
+            mcp_handle: None,
+            mcp_server_repo: None,
+            llm_backend_repo: None,
+            stt_config_repo: None,
+            a2a_invoker: Some(std::sync::Arc::clone(&invoker)),
+            resilience_layer: None,
+            runner_proxy: None,
+            llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/a2a/invoke",
+                post(crate::api::routes_a2a::invoke_by_skill::<ForeverTrackedBackend>),
+            )
+            .route(
+                "/api/v1/tasks/:id",
+                axum::routing::delete(cancel_task::<ForeverTrackedBackend>),
+            )
+            .with_state(state);
+
+        // AND a synchronous invocation the client named, under way
+        let body = serde_json::json!({
+            "skill_id": "read-import",
+            "input": {"prompt": "Read the import"},
+            "invocation_id": "import-42",
+            "timeout_secs": 30
+        });
+        let invoke = Request::builder()
+            .method("POST")
+            .uri("/api/v1/a2a/invoke")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
+            .expect("build request");
+        let invoking = tokio::spawn(app.clone().oneshot(invoke));
+        let bound = crate::test_support::poll_until(std::time::Duration::from_secs(5), || {
+            invoker.aliases().resolve("import-42").is_some()
+        })
+        .await;
+        assert!(bound, "the invocation never bound its name");
+
+        // WHEN the client deletes the invocation by the name it chose
+        let cancel = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/tasks/import-42")
+            .body(Body::empty())
+            .expect("build request");
+        let resp = app.oneshot(cancel).await.expect("request failed");
+
+        // THEN the execution itself has stopped, not only the caller
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["status"], "canceled");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the worker's execution must be stopped by the cancel"
+        );
+        // AND the invocation answers with its own cancellation, at once
+        let freed = crate::test_support::poll_until(std::time::Duration::from_secs(5), || {
+            invoking.is_finished()
+        })
+        .await;
+        assert!(freed, "the invocation kept waiting after the cancel");
+        let answered = invoking.await.expect("join").expect("request failed");
+        assert_eq!(answered.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn cancelling_by_an_unbound_name_is_still_a_404() {
+        // GIVEN an environment where no invocation holds that name
+        let (router, _agent_id, _invoker) = test_router_with_blocking_agent_and_invoker().await;
+
+        // WHEN a name nobody bound is deleted
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/v1/tasks/import-42")
+            .body(Body::empty())
+            .expect("build request");
+        let resp = router.oneshot(req).await.expect("request failed");
+
+        // THEN the route reads it as a task id and reports it missing, rather
+        // than inventing a task or answering 200 on nothing
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     // ResumeHandler tests, POST /api/v1/tasks/{id}/resume
 
     /// Open a `TaskRepository` on a unique temporary file.
@@ -1288,7 +1588,6 @@ mod tests {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -1297,11 +1596,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -1321,6 +1622,12 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
         Router::new()
             .route("/api/v1/tasks/:id/resume", post(resume_task::<MockBackend>))

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "qwen3.5/Qwen3.5-27B",
+  "kind": "language",
+  "label": "Qwen3.5 27B",
+  "publisher": "Qwen",
+  "license": {
+    "id": "apache-2.0",
+    "source": "https://huggingface.co/Qwen/Qwen3.5-27B"
+  },
+  "source_url": "https://huggingface.co/Qwen/Qwen3.5-27B",
+  "released": "2026-02-24",
+  "params_b": 27.78,
+  "usage": "general",
+  "description": {
+    "fr": "Génération Qwen3.5 d'Alibaba : chaque taille lit les images, appelle des outils et peut réfléchir avant de répondre, avec une architecture qui réduit le coût en mémoire des longs contextes. Grande taille, plus rigoureuse sur les tâches longues ; compter une machine d'au moins 32 Go de mémoire en quantification Q4.",
+    "en": "The Qwen3.5 generation from Alibaba: every size reads images, calls tools and can think before answering, with an architecture that lowers the memory cost of long contexts. A large size, more rigorous on long tasks; plan for a machine with at least 32 GB of memory at Q4 quantization."
+  },
+  "capabilities": {
+    "tools": true,
+    "reasoning": true,
+    "vision": true,
+    "source": "https://huggingface.co/Qwen/Qwen3.5-27B/tree/main"
+  },
+  "memory": {
+    "min_gb": 16.8,
+    "source": "https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/blob/main/Qwen3.5-27B-Q4_K_M.gguf"
+  },
+  "defaults": {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "source": "https://huggingface.co/Qwen/Qwen3.5-27B/blob/main/generation_config.json"
+  },
+  "author_fields": [
+    {
+      "name": "enable_thinking",
+      "type": "booleen",
+      "default": true,
+      "explanation": {
+        "fr": "Active ou coupe la réflexion visible avant la réponse. Coupée, le modèle répond plus vite ; active, il pose mieux les problèmes en plusieurs étapes.",
+        "en": "Turns the visible thinking before the answer on or off. Off, the model answers faster; on, it handles multi-step problems better."
+      },
+      "source": "https://huggingface.co/Qwen/Qwen3.5-27B/blob/main/chat_template.jinja"
+    }
+  ],
+  "repos": [
+    "Qwen/Qwen3.5-27B",
+    "unsloth/Qwen3.5-27B-GGUF",
+    "mlx-community/Qwen3.5-27B-4bit",
+    "bartowski/Qwen_Qwen3.5-27B-GGUF",
+    "lmstudio-community/Qwen3.5-27B-GGUF",
+    "mlx-community/Qwen3.5-27B-5bit",
+    "mlx-community/Qwen3.5-27B-6bit",
+    "mlx-community/Qwen3.5-27B-8bit"
+  ],
+  "template": "registry/models/templates/qwen3.5.jinja"
+}

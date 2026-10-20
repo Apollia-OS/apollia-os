@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 use futures::StreamExt;
 
-use crate::backends::openai::convert::{estimate_cost_usd, map_openai_error};
+use crate::backends::openai::convert::{estimate_cost_usd, map_finish_reason, map_openai_error};
 use crate::backends::openai::reasoning::{THINK_CLOSE, THINK_OPEN};
 use crate::backends::openai::{TimedChatStream, TimedStreamResponse};
-use crate::types::{LlmError, StreamChunk, TokenUsage, ToolCall};
+use crate::types::{FinishReason, LlmError, StreamChunk, TokenUsage, ToolCall};
 
 /// State machine for the OpenAI streaming response.
 ///
@@ -32,9 +32,17 @@ pub(super) enum OpenAIStreamState {
         /// emit. Held back so they surface on the following poll, since the
         /// state machine yields one item at a time.
         pending_timings: Option<serde_json::Value>,
+        /// Token accounting seen on a chunk that also carried text. An engine
+        /// may send its last tokens, its finish reason and its usage in one
+        /// chunk (vllm-mlx does): the text is emitted first, the usage on the
+        /// following poll, rather than the text being lost behind it.
+        pending_usage: Option<TokenUsage>,
         /// Whether a `<think>` block opened by a separate reasoning field is
         /// still open. See [`RawReasoning`].
         in_think: bool,
+        /// Why the model stopped, read off the choice that said so. Emitted
+        /// last, after the tool calls.
+        finish: Option<FinishReason>,
     },
     /// SSE ended inside a `<think>` block: the closing tag has been emitted and
     /// the terminal items still owe an appearance. A distinct state because the
@@ -42,11 +50,23 @@ pub(super) enum OpenAIStreamState {
     Ending {
         timings: Option<serde_json::Value>,
         pending: HashMap<u32, PartialToolCall>,
+        finish: Option<FinishReason>,
     },
-    /// SSE stream ended; emitting accumulated tool calls one by one.
-    Flushing { remaining: Vec<ToolCall> },
+    /// SSE stream ended; emitting accumulated tool calls one by one, then the
+    /// finish reason.
+    Flushing {
+        remaining: Vec<ToolCall>,
+        finish: Option<FinishReason>,
+    },
     /// Fully consumed.
     Done,
+}
+/// The state a chunk updates beside the text it yields.
+pub(super) struct StreamFlags<'a> {
+    /// Whether a `<think>` block opened by a reasoning field is still open.
+    pub(super) in_think: &'a mut bool,
+    /// The finish reason, once a choice has carried one.
+    pub(super) finish: &'a mut Option<FinishReason>,
 }
 /// Accumulated fragments for a single tool call during OpenAI streaming.
 #[derive(Default)]
@@ -63,20 +83,29 @@ pub(super) async fn next_openai_stream_item(
 ) -> Option<(Result<StreamChunk, LlmError>, OpenAIStreamState)> {
     match state {
         OpenAIStreamState::Done => None,
-        OpenAIStreamState::Flushing { mut remaining } => remaining.pop().map(|call| {
-            (
+        OpenAIStreamState::Flushing {
+            mut remaining,
+            finish,
+        } => match remaining.pop() {
+            Some(call) => Some((
                 Ok(StreamChunk::ToolCall(call)),
-                OpenAIStreamState::Flushing { remaining },
-            )
-        }),
-        OpenAIStreamState::Ending { timings, pending } => match timings {
+                OpenAIStreamState::Flushing { remaining, finish },
+            )),
+            None => finish.map(|reason| (Ok(StreamChunk::Finish(reason)), OpenAIStreamState::Done)),
+        },
+        OpenAIStreamState::Ending {
+            timings,
+            pending,
+            finish,
+        } => match timings {
             Some(t) => Some((
                 Ok(StreamChunk::Timings(t)),
                 OpenAIStreamState::Flushing {
                     remaining: drain_pending_tool_calls(pending),
+                    finish,
                 },
             )),
-            None => flush_pending_tool_calls(pending),
+            None => flush_pending_tool_calls(pending, finish),
         },
         OpenAIStreamState::Streaming {
             mut inner,
@@ -84,7 +113,9 @@ pub(super) async fn next_openai_stream_item(
             mut pending,
             model,
             mut pending_timings,
+            mut pending_usage,
             mut in_think,
+            mut finish,
         } => {
             // Timings held back from an earlier chunk take priority, so they are
             // never lost behind a later text delta.
@@ -97,7 +128,24 @@ pub(super) async fn next_openai_stream_item(
                         pending,
                         model,
                         pending_timings: None,
+                        pending_usage,
                         in_think,
+                        finish,
+                    },
+                ));
+            }
+            if let Some(usage) = pending_usage.take() {
+                return Some((
+                    Ok(StreamChunk::Usage(usage)),
+                    OpenAIStreamState::Streaming {
+                        inner,
+                        first,
+                        pending,
+                        model,
+                        pending_timings,
+                        pending_usage: None,
+                        in_think,
+                        finish,
                     },
                 ));
             }
@@ -116,35 +164,30 @@ pub(super) async fn next_openai_stream_item(
                         }
                         let reasoning = envelope.reasoning;
                         let response = envelope.inner;
-                        // The terminal chunk (empty `choices`, populated `usage`)
-                        // carries the call's token accounting. Surface it as
-                        // `StreamChunk::Usage`, priced like the non-streaming path.
-                        if let Some(usage) = response.usage.as_ref() {
-                            let mapped = TokenUsage {
-                                prompt_tokens: usage.prompt_tokens,
-                                completion_tokens: usage.completion_tokens,
-                                cost_usd: estimate_cost_usd(
-                                    &model,
-                                    usage.prompt_tokens,
-                                    usage.completion_tokens,
-                                ),
-                                ..Default::default()
-                            };
-                            return Some((
-                                Ok(StreamChunk::Usage(mapped)),
-                                OpenAIStreamState::Streaming {
-                                    inner,
-                                    first,
-                                    pending,
-                                    model,
-                                    pending_timings,
-                                    in_think,
-                                },
-                            ));
-                        }
-                        if let Some(text) =
-                            next_emittable_text(&mut pending, response, reasoning, &mut in_think)
-                        {
+                        // The chunk that carries `usage` holds the call's token
+                        // accounting, priced like the non-streaming path. It is
+                        // usually the terminal one, with empty `choices`; an
+                        // engine may put its last tokens and its finish reason
+                        // in it too, and those are read before the usage.
+                        let usage = response.usage.as_ref().map(|usage| TokenUsage {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            cost_usd: estimate_cost_usd(
+                                &model,
+                                usage.prompt_tokens,
+                                usage.completion_tokens,
+                            ),
+                            ..Default::default()
+                        });
+                        if let Some(text) = next_emittable_text(
+                            &mut pending,
+                            response,
+                            reasoning,
+                            StreamFlags {
+                                in_think: &mut in_think,
+                                finish: &mut finish,
+                            },
+                        ) {
                             return Some((
                                 Ok(StreamChunk::Text(text)),
                                 OpenAIStreamState::Streaming {
@@ -153,7 +196,24 @@ pub(super) async fn next_openai_stream_item(
                                     pending,
                                     model,
                                     pending_timings,
+                                    pending_usage: usage,
                                     in_think,
+                                    finish,
+                                },
+                            ));
+                        }
+                        if let Some(usage) = usage {
+                            return Some((
+                                Ok(StreamChunk::Usage(usage)),
+                                OpenAIStreamState::Streaming {
+                                    inner,
+                                    first,
+                                    pending,
+                                    model,
+                                    pending_timings,
+                                    pending_usage: None,
+                                    in_think,
+                                    finish,
                                 },
                             ));
                         }
@@ -174,6 +234,7 @@ pub(super) async fn next_openai_stream_item(
                                 OpenAIStreamState::Ending {
                                     timings: pending_timings.take(),
                                     pending,
+                                    finish,
                                 },
                             ));
                         }
@@ -185,11 +246,12 @@ pub(super) async fn next_openai_stream_item(
                                 Ok(StreamChunk::Timings(timings)),
                                 OpenAIStreamState::Flushing {
                                     remaining: drain_pending_tool_calls(pending),
+                                    finish,
                                 },
                             ));
                         }
                         // SSE stream ended, flush accumulated tool calls
-                        return flush_pending_tool_calls(pending);
+                        return flush_pending_tool_calls(pending, finish);
                     }
                 }
             }
@@ -203,14 +265,20 @@ pub(super) async fn next_openai_stream_item(
 /// A `reasoning` delta is re-inlined as a `<think>` block so a backend that
 /// splits reasoning out reaches the pipeline in the same shape as one that
 /// keeps it in the content stream. `in_think` carries the open/closed state
-/// across chunks, since the tags straddle them.
+/// across chunks, since the tags straddle them. The choice's finish reason, on
+/// the chunk that carries one, is kept in `flags.finish`.
 pub(super) fn next_emittable_text(
     pending: &mut HashMap<u32, PartialToolCall>,
     response: async_openai::types::CreateChatCompletionStreamResponse,
     reasoning: Option<String>,
-    in_think: &mut bool,
+    flags: StreamFlags<'_>,
 ) -> Option<String> {
+    let StreamFlags { in_think, finish } = flags;
     let choice = response.choices.into_iter().next()?;
+
+    if let Some(reason) = choice.finish_reason.as_ref() {
+        *finish = Some(map_finish_reason(Some(reason)));
+    }
 
     if let Some(tc_chunks) = choice.delta.tool_calls {
         accumulate_tool_calls(pending, tc_chunks);
@@ -264,16 +332,19 @@ pub(super) fn accumulate_tool_calls(
 /// `Flushing` to emit them one by one (or finish if there are none).
 pub(super) fn flush_pending_tool_calls(
     pending: HashMap<u32, PartialToolCall>,
+    finish: Option<FinishReason>,
 ) -> Option<(Result<StreamChunk, LlmError>, OpenAIStreamState)> {
     let mut tool_calls = drain_pending_tool_calls(pending);
-    tool_calls.pop().map(|call| {
-        (
+    match tool_calls.pop() {
+        Some(call) => Some((
             Ok(StreamChunk::ToolCall(call)),
             OpenAIStreamState::Flushing {
                 remaining: tool_calls,
+                finish,
             },
-        )
-    })
+        )),
+        None => finish.map(|reason| (Ok(StreamChunk::Finish(reason)), OpenAIStreamState::Done)),
+    }
 }
 /// Sort the accumulated calls by index and reverse them, so `Flushing` can pop
 /// from the end and still emit in index order.

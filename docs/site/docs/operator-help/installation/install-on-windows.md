@@ -1,24 +1,27 @@
 ---
-title: Install Apollia on Windows
+title: Install Apollia Desktop on Windows
 slug: /operator-help/installation/install-on-windows
 sidebar_position: 2
 ---
 
-# Install Apollia on Windows
+# Install Apollia Desktop on Windows
+
+The application is Apollia Desktop. Its installers and the files they put on
+disk still carry the name of the engine underneath, Apollia OS, which is the
+name you will read below.
 
 Every file below is attached to each release on the publication page,
 `https://github.com/Apollia-OS/apollia-os/releases`.
 
 - **`Apollia-OS_<version>_x64_en-US.msi`** (recommended): standard Windows installer with Start menu entries + uninstaller.
 - **`Apollia-OS_<version>_x64-setup.exe`**: the NSIS installer. A single file, and it installs rather than runs in place: it registers an uninstaller in **Settings > Apps** exactly as the `.msi` does.
-- **`Apollia-OS_<version>_x64_en-US-cuda.msi`** and **`Apollia-OS_<version>_x64-setup-cuda.exe`**: the same two installers with a CUDA build of the inference engine, for an NVIDIA card.
 - **`apollia-os-windows-x86-cpu.zip`** and **`apollia-os-windows-x86-vulkan.zip`**: the two command-line bundles, one per engine, CPU or Vulkan.
 
 ## Requirements
 
 - Windows 10 22H2 / Windows 11.
 - 4 GB of free RAM minimum.
-- For GPU inference: a Vulkan-capable driver, or the NVIDIA 550+ driver if you take the CUDA bundle.
+- For GPU inference: a Vulkan-capable driver. The accelerated engine for NVIDIA cards, which the application offers after install, needs the NVIDIA 550+ driver.
 - **No need** to install the Visual C++ Redistributable: the CRT is statically embedded.
 
 ## Installation (MSI)
@@ -28,8 +31,9 @@ Every file below is attached to each release on the publication page,
    (Apollia), the version and the dual MIT / Apache-2.0 licence.
 3. The app shows up in the Start menu.
 
-The installer is not signed with an Authenticode certificate yet, so SmartScreen
-warns about an unrecognised publisher: choose **More info**, then **Run anyway**.
+The release pipeline signs the installers with an Authenticode certificate only
+when it holds one. On an unsigned installer, SmartScreen warns about an
+unrecognised publisher: choose **More info**, then **Run anyway**.
 
 The Windows firewall will ask you to allow `apollia-os.exe`, the `llama-server.exe` inference engine and `apollia-runner-*.exe` (speech-to-text) on first launch: **allow them on private networks** (these components talk to the daemon over loopback 127.0.0.1).
 
@@ -118,11 +122,17 @@ Git Bash, WSL or MSYS2, and fails without one.
 Two accelerations, and Windows answers them differently.
 
 **Local LLM inference already runs on the GPU.** The installers embed a Vulkan
-build of the `llama-server` engine, and the `-cuda` installers a CUDA build for
-NVIDIA cards; the `apollia-os-windows-x86-vulkan.zip` command-line bundle carries
-the Vulkan one. Vulkan drives NVIDIA, AMD and Intel cards alike. Nothing to
-install and nothing to set: with a working driver the engine uses the card. The
-`-cpu` bundle is the one to take on a machine with no graphics driver.
+build of the `llama-server` engine; the `apollia-os-windows-x86-vulkan.zip`
+command-line bundle carries the Vulkan one. Vulkan drives NVIDIA, AMD and Intel
+cards alike. Nothing to install and nothing to set: with a working driver the
+engine uses the card. The `-cpu` bundle is the one to take on a machine with no
+graphics driver.
+
+**An NVIDIA card can go further.** There is one installer per system, and no
+separate one for NVIDIA cards. When the application detects such a card, its AI
+screen offers the accelerated engine, **Speed up with your NVIDIA card**: one
+click downloads it with the libraries it needs, after its signature is
+verified, and the next model load uses it.
 
 **Dictation runs on the GPU too.** Speech to text runs in the `apollia-runner`
 sidecar, built on whisper, and the installer ships two of them:

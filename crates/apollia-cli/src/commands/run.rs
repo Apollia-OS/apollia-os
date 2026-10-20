@@ -4,10 +4,6 @@
 //! In orchestrated mode, the stream displays the execution plan, step-by-step
 //! progression, and replanning events. In direct mode, the legacy
 //! behaviour is preserved.
-//!
-//! With `--alternatives`, displays two plan alternatives (conservative vs. exploratory)
-//! received via the `plan_alternatives_generated` SSE event and prompts for a choice
-//! before the task proceeds.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -25,8 +21,8 @@ mod helpers;
 mod plan;
 
 use helpers::{
-    build_input_payload, build_session_filter, handle_submit_error, output_error, poll_task,
-    report_detached_submission, stream_task, StreamTaskArgs,
+    build_input_payload, handle_submit_error, output_error, poll_task, report_detached_submission,
+    stream_task, StreamTaskArgs,
 };
 
 // ─── Public entry point ───────────────────────────────────────────────────────
@@ -51,16 +47,10 @@ pub struct RunCommandArgs<'a> {
     pub stream: bool,
     /// Submit and return immediately without waiting.
     pub detach: bool,
-    /// Show two plan alternatives and prompt for a choice before executing.
-    pub alternatives: bool,
     /// Pause after plan generation to review and approve the plan before
     /// execution. Forces the plan gate active for this run and streams the
     /// `plan_approval_required` event to collect the operator's decision.
     pub plan: bool,
-    /// Session-level tool allow-list (empty = all tools permitted).
-    pub allowed_tools: Vec<String>,
-    /// Session-level tool deny-list (takes priority over `allowed_tools`).
-    pub disallowed_tools: Vec<String>,
     /// Autonomy tier for this run. `None` means assisted (the runtime default).
     ///
     /// When set to a valid tier it is forwarded to the runtime as the
@@ -73,10 +63,7 @@ pub struct RunCommandArgs<'a> {
 ///
 /// Submits a task to the specified agent and waits for the result.
 /// With `--detach`, returns immediately after submission and prints the task ID.
-/// With `--alternatives`, activates the binary feedback mode: the SSE stream will
-/// pause on `plan_alternatives_generated` and prompt the operator to choose a plan.
-/// With `--allowed-tools` / `--disallowed-tools`, enforces a session-level tool
-/// filter on the runtime side (forwarded in the task submission payload).
+/// The tools the run may call are the access list of the agent.
 /// Returns the process exit code.
 pub async fn run(args: RunCommandArgs<'_>) -> i32 {
     let RunCommandArgs {
@@ -87,10 +74,7 @@ pub async fn run(args: RunCommandArgs<'_>) -> i32 {
         json,
         stream,
         detach,
-        alternatives,
         plan,
-        allowed_tools,
-        disallowed_tools,
         autonomy,
     } = args;
 
@@ -116,22 +100,11 @@ pub async fn run(args: RunCommandArgs<'_>) -> i32 {
     let client = RuntimeClient::new(socket_path);
     let start = Instant::now();
 
-    // Build the session tool filter fragment if any restrictions are specified.
-    // The runtime applies them when constructing the ToolDispatcher for this task.
-    let session_filter = build_session_filter(&allowed_tools, &disallowed_tools);
-
-    // Build the AIPInput payload (see [`build_input_payload`]), merging in the
-    // session tool filter when present.
-    let mut input_value = match build_input_payload(input, input_json, json) {
+    // Build the AIPInput payload (see [`build_input_payload`]).
+    let input_value = match build_input_payload(input, input_json, json) {
         Ok(v) => v,
         Err(code) => return code,
     };
-
-    if !session_filter.is_null() {
-        if let Some(obj) = input_value.as_object_mut() {
-            obj.insert("session_config".to_string(), session_filter);
-        }
-    }
 
     // Build per-run control options forwarded under `run_options` (the input
     // payload only carries `parts`, so control fields must travel separately).
@@ -175,15 +148,14 @@ pub async fn run(args: RunCommandArgs<'_>) -> i32 {
     // The router now stores task output alongside status (see router.rs), so polling
     // correctly surfaces the agent result without SSE race conditions.
     //
-    // With `--stream` or `--alternatives`: SSE streaming shows plan/step events in real time.
-    let code = if stream || alternatives || plan {
+    // With `--stream` or `--plan`: SSE streaming shows plan/step events in real time.
+    let code = if stream || plan {
         stream_task(StreamTaskArgs {
             client: &client,
             task_id: &task_id,
             json,
             start,
             terminal_only: false,
-            alternatives,
             plan,
         })
         .await

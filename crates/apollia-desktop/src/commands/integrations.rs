@@ -16,23 +16,39 @@
 //! so the `complete_flow` handler can pair the callback `state` with the
 //! original PKCE verifier and provider configuration.
 //!
-//! ## Sovereignty profile
+//! ## Organisation policy
 //!
-//! When the user has selected the `local_only` sovereignty profile, every
-//! OAuth-starting command returns [`IntegrationsError::SovereigntyBlocked`]
-//! and the UI surfaces a static explanation panel instead of the wizards.
-//!
+//! Starting a consent is submitted to the runtime's connection admission
+//! before the loopback port is bound, so a policy that denies remote
+//! connections refuses the flow with [`IntegrationsError::RefusedByPolicy`].
+//! The check reads the policy the runtime loaded, never a value the renderer
+//! sends.
+
 //! ## Credentials
 //!
 //! Builds embed Apollia's own Microsoft client, and no Google client at all
 //! (see `apollia_auth::connector_providers`). Either way every connect attempt
 //! goes through [`credential_gate`] first, so an unresolved or half-resolved
 //! credential is refused, by name, before a browser window opens.
+//!
+//! ## Governance
+//!
+//! An account is submitted to the runtime's connection admission before its
+//! code is exchanged, and connecting or disconnecting one is journaled, the
+//! same as through the runtime's HTTP consent routes.
+//!
+//! ## Attached mode
+//!
+//! Attached to the daemon `apollia-os start`, the consent, the accounts and
+//! the Drive folders are the daemon's: the commands reach its routes through
+//! [`attached`], and the window keeps only its loopback listener and the
+//! browser it opens.
 
 //! The credential surface lives in its own module: `credentials` holds the
 //! client ids, secrets, API keys and Drive folders, and the checks that refuse
 //! a half-resolved credential.
 
+mod attached;
 pub mod credentials;
 
 use credentials::ensure_credentials;
@@ -40,12 +56,21 @@ use credentials::ensure_credentials;
 use std::sync::{Arc, OnceLock};
 
 use apollia_auth::{
-    build_google_provider, build_microsoft_provider, AccountId, AuthManager, ConnectorProvider,
-    GoogleScope, MicrosoftScope, OAuth2PkceFlow, ProviderConfig, StoredToken,
+    AccountId, AuthManager, ConnectorProvider, ConsentError, OAuth2PkceFlow, ProviderConfig,
+    StoredToken,
+};
+use apollia_runtime::governance::{
+    AdmissionDecision, AdmissionRequest, ConnectionEvent, ConnectionGovernance,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use tauri::State;
 use tokio::sync::OnceCell;
+
+use crate::attached::RuntimeLink;
+
+/// Who the connection journal names for an account changed from the desktop.
+const DESKTOP_ACTOR: &str = "desktop";
 
 // ─── Shared state ────────────────────────────────────────────────────────────
 
@@ -94,9 +119,6 @@ fn pending_flows() -> &'static DashMap<String, FlowEntry> {
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum IntegrationsError {
-    /// The active sovereignty profile (`local_only`) bans cloud connectors.
-    #[error("sovereignty profile blocks cloud connectors")]
-    SovereigntyBlocked,
     /// The provider has no OAuth client id configured.
     ///
     /// Google's normal state on a fresh install: no build embeds a Google
@@ -136,9 +158,18 @@ pub enum IntegrationsError {
     /// A token store / keyring error.
     #[error("auth: {0}")]
     Auth(String),
+    /// The connection admission refused the account; the detail is its reason.
+    #[error("refused by the connection policy: {0}")]
+    RefusedByPolicy(String),
     /// Catch-all internal failure.
     #[error("internal: {0}")]
     Internal(String),
+    /// The daemon the desktop is attached to refused or did not answer. The
+    /// text is the one the interface shows, the daemon's own words when it
+    /// gave some, so it crosses the bridge as a plain string.
+    #[error("{0}")]
+    #[serde(untagged)]
+    Service(String),
 }
 
 // ─── DTOs ───────────────────────────────────────────────────────────────────
@@ -156,7 +187,7 @@ pub struct OauthStartFlow {
 }
 
 /// Result of `oauth_complete_flow`: minimal account info to confirm success.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OauthCompletedAccount {
     /// Provider id (`google` / `microsoft`).
     pub provider: String,
@@ -167,7 +198,7 @@ pub struct OauthCompletedAccount {
 }
 
 /// Account metadata returned by `oauth_get_status`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OauthAccountInfo {
     /// Provider id.
     pub provider: String,
@@ -178,87 +209,20 @@ pub struct OauthAccountInfo {
 // ─── Provider + scope resolution ─────────────────────────────────────────────
 
 fn provider_from_id(id: &str) -> Result<ConnectorProvider, IntegrationsError> {
-    match id {
-        "google" => Ok(ConnectorProvider::Google),
-        "microsoft" => Ok(ConnectorProvider::Microsoft),
-        other => Err(IntegrationsError::UnknownProvider(other.to_owned())),
-    }
+    ConnectorProvider::from_id(id).ok_or_else(|| IntegrationsError::UnknownProvider(id.to_owned()))
 }
 
+/// The scope vocabulary is `apollia_auth`'s, shared with the runtime's HTTP
+/// consent route, so a scope added there is offered here without a second
+/// table to keep in step.
 fn build_provider_with_scopes(
     provider: ConnectorProvider,
     scopes: &[String],
 ) -> Result<ProviderConfig, IntegrationsError> {
-    match provider {
-        ConnectorProvider::Google => {
-            let mut typed = Vec::with_capacity(scopes.len());
-            for s in scopes {
-                let g = match s.as_str() {
-                    "mail.send" => GoogleScope::MailSend,
-                    "mail.drafts" => GoogleScope::MailDraftsCreate,
-                    // Restricted `gmail.compose`: Expert Mode only, kept for
-                    // power users who supply their own OAuth client.
-                    "mail.compose" => GoogleScope::MailCompose,
-                    "calendar.read" => GoogleScope::CalendarRead,
-                    "calendar.write" => GoogleScope::CalendarWrite,
-                    "drive.workspace" => GoogleScope::DriveWorkspace,
-                    "sheets" => GoogleScope::SheetsReadWrite,
-                    "docs" => GoogleScope::DocsReadWrite,
-                    "slides" => GoogleScope::SlidesReadWrite,
-                    "tasks" => GoogleScope::Tasks,
-                    "forms" => GoogleScope::FormsReadWrite,
-                    "youtube" => GoogleScope::YouTubeReadOnly,
-                    "openid" => GoogleScope::OpenId,
-                    "email" => GoogleScope::Email,
-                    "profile" => GoogleScope::Profile,
-                    other => return Err(IntegrationsError::UnknownScope(other.to_owned())),
-                };
-                typed.push(g);
-            }
-            Ok(build_google_provider(&typed))
-        }
-        ConnectorProvider::Microsoft => {
-            let mut typed = Vec::with_capacity(scopes.len());
-            for s in scopes {
-                let m = match s.as_str() {
-                    "mail.read" => MicrosoftScope::MailRead,
-                    "mail.send" => MicrosoftScope::MailSend,
-                    "mail.readwrite" => MicrosoftScope::MailReadWrite,
-                    "calendar.read" => MicrosoftScope::CalendarRead,
-                    "calendar.write" => MicrosoftScope::CalendarWrite,
-                    "files.read" => MicrosoftScope::FilesRead,
-                    "files.write" => MicrosoftScope::FilesWrite,
-                    "profile" => MicrosoftScope::Profile,
-                    "offline" => MicrosoftScope::Offline,
-                    other => return Err(IntegrationsError::UnknownScope(other.to_owned())),
-                };
-                typed.push(m);
-            }
-            Ok(build_microsoft_provider(&typed))
-        }
-    }
-}
-
-// ─── Sovereignty gate ────────────────────────────────────────────────────────
-
-/// Sovereignty profile (mirror of the desktop config field). When set to
-/// `local_only`, cloud OAuth flows are blocked at the command boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SovereigntyProfile {
-    /// All cloud connectors allowed.
-    CloudAllowed,
-    /// Local-only: block all cloud OAuth flows.
-    LocalOnly,
-}
-
-/// Convenience guard returning [`IntegrationsError::SovereigntyBlocked`] when
-/// the active profile forbids cloud connectors.
-fn ensure_cloud_allowed(profile: SovereigntyProfile) -> Result<(), IntegrationsError> {
-    match profile {
-        SovereigntyProfile::CloudAllowed => Ok(()),
-        SovereigntyProfile::LocalOnly => Err(IntegrationsError::SovereigntyBlocked),
-    }
+    apollia_auth::connector_consent::provider_config_for(provider, scopes).map_err(|e| match e {
+        ConsentError::UnknownScope(name) => IntegrationsError::UnknownScope(name),
+        other => IntegrationsError::Internal(other.to_string()),
+    })
 }
 
 // ─── Tauri commands ──────────────────────────────────────────────────────────
@@ -275,26 +239,50 @@ fn ensure_cloud_allowed(profile: SovereigntyProfile) -> Result<(), IntegrationsE
 /// When the loopback can't fire (browser blocked the redirect, headless
 /// environment, user closed the tab before granting), the frontend keeps a
 /// manual paste fallback so the user can recover the code from the URL bar.
+///
+/// The account is submitted to the connection admission first, before any
+/// port is bound or browser opened. Attached to the daemon, the consent is
+/// started there, for the same loopback redirect, under the daemon's own
+/// admission, and completed there by [`oauth_complete_flow`].
 #[tauri::command]
 pub async fn oauth_start_flow(
     app: tauri::AppHandle,
+    link: State<'_, RuntimeLink>,
     provider: String,
     scopes: Vec<String>,
-    sovereignty: SovereigntyProfile,
 ) -> Result<OauthStartFlow, IntegrationsError> {
     use tauri::Emitter;
 
-    ensure_cloud_allowed(sovereignty)?;
-    let provider_id = provider_from_id(&provider)?;
-    ensure_credentials(provider_id)?;
-    let provider_config = build_provider_with_scopes(provider_id, &scopes)?;
-
+    if let RuntimeLink::Embedded(runtime) = link.inner() {
+        admit_start(&runtime.connection_governance, &provider)?;
+    }
     let (listener, port) = apollia_auth::callback::bind_ephemeral_port()
         .await
         .map_err(|e| IntegrationsError::Internal(e.to_string()))?;
     let flow = OAuth2PkceFlow::new(port);
-    let auth_url = apollia_auth::build_auth_url(&provider_config, &flow);
-    let state = flow.state.clone();
+    let (auth_url, state) = match link.inner() {
+        RuntimeLink::Embedded(_) => {
+            let provider_id = provider_from_id(&provider)?;
+            ensure_credentials(provider_id)?;
+            let provider_config = build_provider_with_scopes(provider_id, &scopes)?;
+            let auth_url = apollia_auth::build_auth_url(&provider_config, &flow);
+            let state = flow.state.clone();
+            pending_flows().insert(
+                state.clone(),
+                FlowEntry {
+                    provider: provider_id,
+                    flow,
+                    provider_config,
+                },
+            );
+            (auth_url, state)
+        }
+        RuntimeLink::Attached(remote) => {
+            let started =
+                attached::start_consent(remote, &provider, &scopes, &flow.redirect_uri).await?;
+            (started.auth_url, started.state)
+        }
+    };
 
     // Open the system browser via the Tauri opener plugin; `window.open`
     // from the renderer is unreliable in Tauri 2 webviews (browser sandboxing
@@ -310,15 +298,6 @@ pub async fn oauth_start_flow(
             );
         }
     }
-
-    pending_flows().insert(
-        state.clone(),
-        FlowEntry {
-            provider: provider_id,
-            flow,
-            provider_config,
-        },
-    );
 
     // Spawn the loopback callback waiter; emit a Tauri event as soon as the
     // browser hits 127.0.0.1:port/callback. Frontend auto-finalises by
@@ -351,11 +330,23 @@ pub async fn oauth_start_flow(
 
 /// Complete the OAuth flow with the authorization code returned by the
 /// browser callback.
+///
+/// The account is submitted to the connection admission before the code is
+/// exchanged, and the connection is journaled once its token is stored.
+/// Attached, the daemon that started the consent does all of it.
 #[tauri::command]
 pub async fn oauth_complete_flow(
+    link: State<'_, RuntimeLink>,
     state: String,
     code: String,
 ) -> Result<OauthCompletedAccount, IntegrationsError> {
+    let runtime = match link.inner() {
+        RuntimeLink::Embedded(runtime) => runtime,
+        RuntimeLink::Attached(remote) => {
+            return attached::complete_consent(remote, &state, &code).await
+        }
+    };
+    let governance = &runtime.connection_governance;
     let (provider, flow, provider_config) = {
         let entry = pending_flows()
             .remove(&state)
@@ -363,6 +354,7 @@ pub async fn oauth_complete_flow(
             .1;
         (entry.provider, entry.flow, entry.provider_config)
     };
+    admit_account(governance, provider)?;
 
     let token: StoredToken = apollia_auth::token::exchange_code(&provider_config, &flow, &code)
         .await
@@ -370,40 +362,130 @@ pub async fn oauth_complete_flow(
 
     let account_id = resolve_account_id(provider, &token.access_token).await?;
     let manager = auth_manager().await?;
-    manager
-        .put_token(provider, &account_id, token.clone())
-        .await
-        .map_err(|e| IntegrationsError::Auth(e.to_string()))?;
+    let granted_scopes = token.scopes.clone();
+    store_and_record(governance, &manager, provider, &account_id, token).await?;
+    // Publish the tools of the account so it is usable without a restart. A
+    // failure is logged: the account is connected, and its tools are
+    // published at the next start.
+    if let Err(error) = apollia_runtime::connectors_bridge::register_account_tools(
+        &runtime.tool_registry_handle,
+        provider,
+        account_id.as_str(),
+    )
+    .await
+    {
+        tracing::event!(
+            tracing::Level::WARN,
+            provider = %provider.id(),
+            error = %error,
+            "integrations.account.tools.unpublished"
+        );
+    }
 
     Ok(OauthCompletedAccount {
         provider: provider.id().to_owned(),
         account_id: account_id.0,
-        granted_scopes: token.scopes,
+        granted_scopes,
     })
+}
+
+/// Store the token of `account_id` in `manager`, then journal the connection.
+async fn store_and_record(
+    governance: &ConnectionGovernance,
+    manager: &AuthManager,
+    provider: ConnectorProvider,
+    account_id: &AccountId,
+    token: StoredToken,
+) -> Result<(), IntegrationsError> {
+    manager
+        .put_token(provider, account_id, token)
+        .await
+        .map_err(|e| IntegrationsError::Auth(e.to_string()))?;
+    governance.record_or_warn(&ConnectionEvent::account_connected(
+        provider,
+        &account_id.0,
+        DESKTOP_ACTOR,
+    ));
+    Ok(())
 }
 
 /// Revoke (forget) the token for `(provider, account_id)`.
 ///
 /// The local keyring entry is cleared. The upstream is not notified; call
 /// the provider's revocation endpoint separately if a server-side revoke is
-/// required.
+/// required. The disconnection is journaled.
 #[tauri::command]
 pub async fn oauth_disconnect(
+    link: State<'_, RuntimeLink>,
     provider: String,
     account_id: String,
 ) -> Result<(), IntegrationsError> {
+    let runtime = match link.inner() {
+        RuntimeLink::Embedded(runtime) => runtime,
+        RuntimeLink::Attached(remote) => {
+            return attached::disconnect(remote, &provider, &account_id).await
+        }
+    };
     let provider_id = provider_from_id(&provider)?;
     let manager = auth_manager().await?;
+    revoke_and_record(
+        &runtime.connection_governance,
+        &manager,
+        provider_id,
+        &account_id,
+    )
+    .await
+}
+
+/// Submit an account of `provider` to the connection admission.
+/// Submit the provider a consent is about to start for to the connection
+/// admission, answering the provider it names.
+fn admit_start(
+    governance: &ConnectionGovernance,
+    provider: &str,
+) -> Result<ConnectorProvider, IntegrationsError> {
+    let provider = provider_from_id(provider)?;
+    admit_account(governance, provider)?;
+    Ok(provider)
+}
+
+fn admit_account(
+    governance: &ConnectionGovernance,
+    provider: ConnectorProvider,
+) -> Result<(), IntegrationsError> {
+    match governance.admit(&AdmissionRequest::for_native_account(provider)) {
+        AdmissionDecision::Admitted => Ok(()),
+        AdmissionDecision::Refused { reason } => Err(IntegrationsError::RefusedByPolicy(reason)),
+    }
+}
+
+/// Forget the token of `account_id`, then journal the disconnection.
+async fn revoke_and_record(
+    governance: &ConnectionGovernance,
+    manager: &AuthManager,
+    provider: ConnectorProvider,
+    account_id: &str,
+) -> Result<(), IntegrationsError> {
     manager
-        .revoke(provider_id, &AccountId::new(account_id))
+        .revoke(provider, &AccountId::new(account_id))
         .await
         .map_err(|e| IntegrationsError::Auth(e.to_string()))?;
+    governance.record_or_warn(&ConnectionEvent::account_disconnected(
+        provider,
+        account_id,
+        DESKTOP_ACTOR,
+    ));
     Ok(())
 }
 
 /// List connected accounts across all providers.
 #[tauri::command]
-pub async fn oauth_get_status() -> Result<Vec<OauthAccountInfo>, IntegrationsError> {
+pub async fn oauth_get_status(
+    link: State<'_, RuntimeLink>,
+) -> Result<Vec<OauthAccountInfo>, IntegrationsError> {
+    if let RuntimeLink::Attached(remote) = link.inner() {
+        return attached::accounts(remote).await;
+    }
     let manager = auth_manager().await?;
     let mut out = Vec::new();
     for provider in [ConnectorProvider::Google, ConnectorProvider::Microsoft] {
@@ -427,38 +509,12 @@ async fn resolve_account_id(
     provider: ConnectorProvider,
     bearer: &str,
 ) -> Result<AccountId, IntegrationsError> {
-    let client =
-        apollia_core::net::safe_client().map_err(|e| IntegrationsError::Internal(e.to_string()))?;
-    let response = client
-        .get(provider.userinfo_url())
-        .bearer_auth(bearer)
-        .send()
+    apollia_auth::connector_consent::resolve_account_id(provider, bearer)
         .await
-        .map_err(|e| IntegrationsError::Internal(e.to_string()))?;
-    if !response.status().is_success() {
-        return Err(IntegrationsError::Internal(format!(
-            "userinfo returned {}",
-            response.status()
-        )));
-    }
-    let json: serde_json::Value =
-        apollia_core::net::read_capped_json(response, apollia_core::net::MAX_METADATA_BYTES)
-            .await
-            .map_err(|e| IntegrationsError::Internal(e.to_string()))?;
-    let id = match provider {
-        ConnectorProvider::Google => json
-            .get("email")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| IntegrationsError::Internal("userinfo missing email".into()))?,
-        ConnectorProvider::Microsoft => json
-            .get("userPrincipalName")
-            .and_then(|v| v.as_str())
-            .or_else(|| json.get("mail").and_then(|v| v.as_str()))
-            .ok_or_else(|| {
-                IntegrationsError::Internal("Graph /me missing userPrincipalName".into())
-            })?,
-    };
-    Ok(AccountId::new(id))
+        .map_err(|e| match e {
+            ConsentError::AccountResolution(msg) => IntegrationsError::Internal(msg),
+            other => IntegrationsError::Internal(other.to_string()),
+        })
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -466,6 +522,193 @@ async fn resolve_account_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Token store held in memory, so no test touches the OS keychain.
+    #[derive(Default)]
+    struct MemoryStore(std::sync::Mutex<std::collections::HashMap<(String, String), String>>);
+
+    impl apollia_auth::SecretStore for MemoryStore {
+        fn set(
+            &self,
+            service: &str,
+            user: &str,
+            value: &str,
+        ) -> Result<(), apollia_auth::AuthError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert((service.to_owned(), user.to_owned()), value.to_owned());
+            Ok(())
+        }
+        fn get(
+            &self,
+            service: &str,
+            user: &str,
+        ) -> Result<Option<String>, apollia_auth::AuthError> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .get(&(service.to_owned(), user.to_owned()))
+                .cloned())
+        }
+        fn delete(&self, service: &str, user: &str) -> Result<(), apollia_auth::AuthError> {
+            self.0
+                .lock()
+                .unwrap()
+                .remove(&(service.to_owned(), user.to_owned()));
+            Ok(())
+        }
+        fn backend_id(&self) -> &'static str {
+            "memory"
+        }
+    }
+
+    struct Unreadable;
+
+    impl apollia_runtime::governance::ConnectionAdmission for Unreadable {
+        fn read_decision(
+            &self,
+            _request: &AdmissionRequest,
+        ) -> Result<AdmissionDecision, apollia_runtime::governance::PolicyReadError> {
+            Err(apollia_runtime::governance::PolicyReadError::Unreadable(
+                "policy.toml: invalid".into(),
+            ))
+        }
+    }
+
+    // An account the policy cannot be read for is refused before any exchange.
+    #[test]
+    fn test_account_refused_when_the_policy_cannot_be_read() {
+        // GIVEN governance whose policy read fails
+        let governance = ConnectionGovernance::new(std::sync::Arc::new(Unreadable), None);
+
+        // WHEN a Google account is submitted
+        let err = admit_account(&governance, ConnectorProvider::Google).unwrap_err();
+
+        // THEN it is refused by the policy, naming why
+        assert!(
+            matches!(&err, IntegrationsError::RefusedByPolicy(reason) if reason.contains("policy.toml")),
+            "{err:?}"
+        );
+        // AND the default governance admits it
+        assert!(admit_account(&ConnectionGovernance::default(), ConnectorProvider::Google).is_ok());
+    }
+
+    // Connecting from the desktop stores the token and journals it.
+    #[tokio::test]
+    async fn test_desktop_connect_journals_the_account() {
+        // GIVEN an empty isolated store, and governance over a journal
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = apollia_auth::MultiAccountStorage::with_store(
+            dir.path().join("connectors-index.json"),
+            Box::new(MemoryStore::default()),
+        );
+        let manager = AuthManager::with_storage(storage);
+        let journal = apollia_runtime::audit_journal::AuditJournalHandle::open(
+            &dir.path().join("journal.db"),
+        )
+        .await
+        .unwrap();
+        let governance = ConnectionGovernance::without_policy(Some(journal.clone()));
+
+        // WHEN the token of a Microsoft account is stored
+        store_and_record(
+            &governance,
+            &manager,
+            ConnectorProvider::Microsoft,
+            &AccountId::new("ada@contoso.test"),
+            StoredToken {
+                access_token: "at".into(),
+                refresh_token: None,
+                expires_at: None,
+                scopes: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        // THEN the account is listed and the connection is journaled by the desktop
+        let accounts = manager
+            .list_accounts(ConnectorProvider::Microsoft)
+            .await
+            .unwrap();
+        assert_eq!(accounts, vec![AccountId::new("ada@contoso.test")]);
+        let entries = journal
+            .query_run(&apollia_runtime::governance::connection_run_id(
+                "native:microsoft:ada@contoso.test",
+            ))
+            .await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].kind,
+            apollia_runtime::audit_journal::JournalEntryKind::AccountConnected
+        );
+        assert_eq!(entries[0].payload["actor"], "desktop");
+        assert_eq!(entries[0].payload["account"], "ada@contoso.test");
+        journal.shutdown().await;
+    }
+
+    // Disconnecting from the desktop forgets the token and journals it.
+    #[tokio::test]
+    async fn test_desktop_disconnect_journals_the_account() {
+        // GIVEN a connected Microsoft account in an isolated store, and
+        // governance over a journal
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = apollia_auth::MultiAccountStorage::with_store(
+            dir.path().join("connectors-index.json"),
+            Box::new(MemoryStore::default()),
+        );
+        let manager = AuthManager::with_storage(storage);
+        manager
+            .put_token(
+                ConnectorProvider::Microsoft,
+                &AccountId::new("ada@contoso.test"),
+                StoredToken {
+                    access_token: "at".into(),
+                    refresh_token: None,
+                    expires_at: None,
+                    scopes: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        let journal = apollia_runtime::audit_journal::AuditJournalHandle::open(
+            &dir.path().join("journal.db"),
+        )
+        .await
+        .unwrap();
+        let governance = ConnectionGovernance::without_policy(Some(journal.clone()));
+
+        // WHEN the account is disconnected
+        revoke_and_record(
+            &governance,
+            &manager,
+            ConnectorProvider::Microsoft,
+            "ada@contoso.test",
+        )
+        .await
+        .unwrap();
+
+        // THEN the token is gone and the disconnection is journaled by the desktop
+        assert!(manager
+            .list_accounts(ConnectorProvider::Microsoft)
+            .await
+            .unwrap()
+            .is_empty());
+        let entries = journal
+            .query_run(&apollia_runtime::governance::connection_run_id(
+                "native:microsoft:ada@contoso.test",
+            ))
+            .await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].kind,
+            apollia_runtime::audit_journal::JournalEntryKind::AccountDisconnected
+        );
+        assert_eq!(entries[0].payload["actor"], "desktop");
+        journal.shutdown().await;
+    }
 
     #[test]
     fn test_provider_from_id_known_returns_ok() {
@@ -530,21 +773,66 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_sovereignty_gate_allows_cloud_when_cloud_allowed() {
-        // GIVEN a profile that allows the cloud
-        // WHEN the sovereignty gate is asked
-        // THEN the call goes through
-        assert!(ensure_cloud_allowed(SovereigntyProfile::CloudAllowed).is_ok());
+    /// Governance over the organisation policy whose `[connections]` section
+    /// is `connections`, as the runtime builds it at boot.
+    fn governance_over_policy(connections: &str) -> ConnectionGovernance {
+        let text = format!(
+            "schema_version = 1\nsigned_at = 2026-10-01T09:00:00Z\n[connections]\n{connections}\n"
+        );
+        let policy = apollia_permissions::parse_policy(&text).unwrap();
+        let verdict =
+            apollia_permissions::PolicyVerdict::Valid(Box::new(apollia_permissions::ValidPolicy {
+                signed_at: policy.signed_at,
+                policy,
+                key_fingerprint: "00".into(),
+                policy_digest: "00".into(),
+                publisher: "it".into(),
+            }));
+        ConnectionGovernance::new(
+            std::sync::Arc::new(apollia_runtime::governance::PolicyAdmission::new(
+                std::sync::Arc::new(verdict),
+            )),
+            None,
+        )
     }
 
+    // A policy denying remote connections refuses the start of a native consent.
     #[test]
-    fn test_sovereignty_gate_blocks_when_local_only() {
-        // GIVEN a local-only profile
-        // WHEN the sovereignty gate is asked
-        let err = ensure_cloud_allowed(SovereigntyProfile::LocalOnly).unwrap_err();
-        // THEN the call is blocked, which is what keeps an OAuth round trip from starting
-        assert!(matches!(err, IntegrationsError::SovereigntyBlocked));
+    fn test_start_refused_by_a_policy_denying_remote_connections() {
+        // GIVEN a loaded organisation policy carrying `connections.remote = "deny"`
+        let governance = governance_over_policy("remote = \"deny\"");
+
+        // WHEN the start of a Google consent is submitted
+        let err = admit_start(&governance, "google").unwrap_err();
+
+        // THEN it is refused by the policy, a kind the renderer recognises
+        assert!(
+            matches!(&err, IntegrationsError::RefusedByPolicy(reason)
+                if reason == apollia_runtime::governance::REMOTE_DENIED_REASON),
+            "{err:?}"
+        );
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["kind"], "refused_by_policy");
+    }
+
+    // With no policy and no sovereignty key anywhere, a Google consent starts.
+    #[test]
+    fn test_start_admitted_without_a_policy() {
+        // GIVEN no organisation policy (the command takes no profile value)
+        let governance = ConnectionGovernance::new(
+            std::sync::Arc::new(apollia_runtime::governance::PolicyAdmission::new(
+                std::sync::Arc::new(apollia_permissions::PolicyVerdict::Absent),
+            )),
+            None,
+        );
+
+        // WHEN the start of a Google consent is submitted
+        let provider = admit_start(&governance, "google").unwrap();
+
+        // THEN it is admitted
+        assert_eq!(provider, ConnectorProvider::Google);
+        // AND a policy silent on remote connections admits it too
+        assert!(admit_start(&governance_over_policy(""), "google").is_ok());
     }
 
     #[test]
@@ -555,6 +843,18 @@ mod tests {
         let json = serde_json::to_value(&err).expect("serialize");
         // THEN it carries a kind tag the front end can branch on
         assert_eq!(json["kind"], "unknown_provider");
+    }
+
+    #[test]
+    fn test_a_refusal_of_the_daemon_crosses_the_bridge_as_its_own_words() {
+        // GIVEN the daemon's refusal, as the attached arm carries it
+        let err = IntegrationsError::Service("refused by the connection policy".into());
+
+        // WHEN it crosses the IPC boundary
+        let json = serde_json::to_value(&err).expect("serialize");
+
+        // THEN the interface receives the daemon's text alone, no kind before it
+        assert_eq!(json, serde_json::json!("refused by the connection policy"));
     }
 
     #[test]

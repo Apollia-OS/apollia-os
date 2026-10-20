@@ -11,6 +11,7 @@ import type {
   RegistryRemoteView,
   RegistryServerView,
 } from "$lib/types";
+import { isOfficial } from "$lib/connections/vendor";
 
 /**
  * Backend validate_name() in apollia-mcp enforces `[a-z0-9_-]+` strictly,
@@ -83,6 +84,24 @@ export function resolveStdioLauncher(
   return { command: runtimeHint || "npx", prefixArgs: [] };
 }
 
+/**
+ * The package argument of a launcher. An npm package is always named at the
+ * exact version its entry gives (the curated pin, or the registry's version),
+ * so the desktop installs that version and never whatever is published at
+ * launch; one without a version is resolved once, when it is added, and
+ * recorded. Other launchers take the bare identifier.
+ */
+export function packageSpec(
+  command: string,
+  pkg: Pick<RegistryPackageView, "identifier" | "version">,
+): string {
+  const version = (pkg.version ?? "").trim();
+  if (command === "npx" && version.length > 0) {
+    return `${pkg.identifier}@${version}`;
+  }
+  return pkg.identifier;
+}
+
 /** Everything `buildConnectorConfig` reads, gathered by the wizard component. */
 export interface ConnectorConfigInputs {
   server: RegistryServerView;
@@ -93,7 +112,6 @@ export interface ConnectorConfigInputs {
   oauthResolved: boolean;
   envValues: Record<string, string>;
   argValues: Record<number, string>;
-  approvalLevel: "auto" | "ask";
 }
 
 /**
@@ -102,6 +120,10 @@ export interface ConnectorConfigInputs {
  * `forTest` is the one difference between the two: a test connection needs the
  * literal secret the operator just typed, while an install stores a
  * `${APOLLIA_SECRET:...}` placeholder the transport resolves at each request.
+ *
+ * Every catalogue entry is sent as coming from the registry, with the official
+ * badge it was shown under; the desktop records the ones that match the
+ * curated selection as such, and decides their badge itself.
  */
 export function buildConnectorConfig(
   inputs: ConnectorConfigInputs,
@@ -115,7 +137,6 @@ export function buildConnectorConfig(
     oauthResolved,
     envValues,
     argValues,
-    approvalLevel,
   } = inputs;
   const safeName = deriveServerName(server);
   if (connectionMode === "remote" && remote) {
@@ -151,8 +172,8 @@ export function buildConnectorConfig(
       url: remote.url,
       transport: remote.type,
       env,
-      requires_approval: approvalLevel === "ask",
       tags: [],
+      origin: { provenance: "registry", official: isOfficial(server) },
     };
   }
   if (connectionMode === "package" && pkg) {
@@ -180,11 +201,11 @@ export function buildConnectorConfig(
     return {
       name: safeName,
       command: launcher.command,
-      args: [...launcher.prefixArgs, pkg.identifier, ...extraArgs],
+      args: [...launcher.prefixArgs, packageSpec(launcher.command, pkg), ...extraArgs],
       env,
       transport: pkg.transport?.type ?? "stdio",
-      requires_approval: approvalLevel === "ask",
       tags: [],
+      origin: { provenance: "registry", official: isOfficial(server) },
     };
   }
   return null;

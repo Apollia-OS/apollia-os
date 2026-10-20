@@ -12,10 +12,9 @@ use apollia_core::events::EventBusSender;
 use apollia_core::{LlmBackendConfig, LlmBackendRepository, LlmRoutingConfig};
 
 use crate::router::backends::{
-    build_backend, insert_vertex_backend, insert_vertex_backend_with_bus, instantiate_from_config,
-    load_backend_with_bus, resolve_default_backend,
+    build_backend, instantiate_from_config, load_backend_with_bus, resolve_default_backend,
 };
-use crate::router::config::LlmConfig;
+use crate::router::config::{LlmConfig, ObservabilityConfig};
 use crate::router::validate_routing;
 use crate::router::LlmRouter;
 use crate::token_budget::SessionBudgetTracker;
@@ -27,8 +26,8 @@ impl LlmRouter {
     /// No production path calls this: the daemon builds its router from
     /// `system.db` through
     /// [`from_repository_with_override`](Self::from_repository_with_override).
-    /// Everything this constructor reads and that one does not, `[llm.vertex]`
-    /// and `[llm.pricing_overrides]`, is therefore inert on a running daemon.
+    /// What this constructor reads and that one does not,
+    /// `[llm.pricing_overrides]`, is therefore inert on a running daemon.
     ///
     /// Iterates over `config.backends` and tries to instantiate each backend.
     /// For `Api`: resolves the API key; if missing, logs `tracing::warn!` and
@@ -49,7 +48,7 @@ impl LlmRouter {
             let name = backend_cfg.name().to_owned();
 
             #[cfg(feature = "cloud")]
-            let result = build_backend(backend_cfg, config, &cancellation_token);
+            let result = build_backend(backend_cfg, &cancellation_token);
             #[cfg(not(feature = "cloud"))]
             let result: Result<Arc<dyn CompletionModel>, LlmError> = match &backend_cfg.kind {};
 
@@ -69,10 +68,6 @@ impl LlmRouter {
             }
         }
 
-        // Vertex AI is instantiated separately from [llm.vertex] when enabled = true.
-        #[cfg(feature = "cloud")]
-        insert_vertex_backend(&mut backends, config, &cancellation_token);
-
         // The default backend must be available after the loop.
         if !backends.contains_key(&config.default) {
             return Err(LlmError::BackendUnavailable {
@@ -87,16 +82,17 @@ impl LlmRouter {
             backends,
             default: config.default.clone(),
             routing: config.routing.clone(),
+            servers: Default::default(),
+            live: Default::default(),
             cancellation_token,
             session_budget: Arc::new(Mutex::new(SessionBudgetTracker::default())),
+            observability: config.observability.clone(),
         })
     }
     /// Build the router from configuration with EventBus observability.
     ///
     /// Variant of [`from_config`](Self::from_config) with event emission. Like
-    /// `from_config`, no production path calls it, so `cost_alert_threshold_usd`
-    /// (the one field it reads that `from_config` does not) never reaches a
-    /// running daemon's [`SessionBudgetTracker`].
+    /// `from_config`, no production path calls it.
     ///
     /// Emits on the bus for each backend:
     /// - [`RuntimeEvent::LlmModelLoading`]: before loading
@@ -122,18 +118,8 @@ impl LlmRouter {
         let mut backends: HashMap<String, Arc<dyn CompletionModel>> = HashMap::new();
 
         for backend_cfg in &config.backends {
-            load_backend_with_bus(
-                &mut backends,
-                backend_cfg,
-                config,
-                &cancellation_token,
-                &bus,
-            );
+            load_backend_with_bus(&mut backends, backend_cfg, &cancellation_token, &bus);
         }
-
-        // Vertex AI is instantiated separately from [llm.vertex] when enabled = true.
-        #[cfg(feature = "cloud")]
-        insert_vertex_backend_with_bus(&mut backends, config, &cancellation_token, &bus);
 
         if !backends.contains_key(&config.default) {
             return Err(LlmError::BackendUnavailable {
@@ -148,11 +134,11 @@ impl LlmRouter {
             backends,
             default: config.default.clone(),
             routing: config.routing.clone(),
+            servers: Default::default(),
+            live: Default::default(),
             cancellation_token,
-            session_budget: Arc::new(Mutex::new(SessionBudgetTracker::new(
-                bus,
-                config.cost_alert_threshold_usd,
-            ))),
+            session_budget: Arc::new(Mutex::new(SessionBudgetTracker::new(bus, None))),
+            observability: config.observability.clone(),
         })
     }
     /// Build an `LlmRouter` from already-instantiated backends.
@@ -178,8 +164,11 @@ impl LlmRouter {
             backends,
             default,
             routing: None,
+            servers: Default::default(),
+            live: Default::default(),
             cancellation_token: CancellationToken::new(),
             session_budget: Arc::new(Mutex::new(SessionBudgetTracker::default())),
+            observability: ObservabilityConfig::default(),
         }
     }
     /// Build the router from an already-loaded list of [`LlmBackendConfig`].
@@ -246,8 +235,11 @@ impl LlmRouter {
             backends,
             default,
             routing: None,
+            servers: Default::default(),
+            live: Default::default(),
             cancellation_token,
             session_budget: Arc::new(Mutex::new(SessionBudgetTracker::default())),
+            observability: ObservabilityConfig::default(),
         })
     }
     /// Build the router from a SQLite [`LlmBackendRepository`].
@@ -336,8 +328,11 @@ impl LlmRouter {
             backends,
             default,
             routing: None,
+            servers: Default::default(),
+            live: Default::default(),
             cancellation_token,
             session_budget: Arc::new(Mutex::new(SessionBudgetTracker::default())),
+            observability: ObservabilityConfig::default(),
         })
     }
     /// Attach (or replace) the router's `[llm.routing]`.
@@ -357,6 +352,20 @@ impl LlmRouter {
         self.routing = Some(routing);
         self
     }
+    /// Attach (or replace) the router's `[llm.observability]`.
+    ///
+    /// The supervisor builds the router from `system.db`, then grafts the
+    /// section read from `apollia.toml`, as it does for `[llm.routing]`.
+    /// `debug_log_prompt` then logs every prompt this router sends, whatever
+    /// configuration the caller passes per call.
+    pub fn with_observability(mut self, observability: ObservabilityConfig) -> Self {
+        self.observability = observability;
+        self
+    }
+    /// The `[llm.observability]` this router applies.
+    pub fn observability(&self) -> &ObservabilityConfig {
+        &self.observability
+    }
     /// Create an empty `LlmRouter` with no backend, for unit tests.
     ///
     /// Used to test degradation paths: `ctx.llm = None` and `AgentDegraded`
@@ -366,8 +375,11 @@ impl LlmRouter {
             backends: HashMap::new(),
             default: String::new(),
             routing: None,
+            servers: Default::default(),
+            live: Default::default(),
             cancellation_token: CancellationToken::new(),
             session_budget: Arc::new(Mutex::new(SessionBudgetTracker::default())),
+            observability: ObservabilityConfig::default(),
         }
     }
 }

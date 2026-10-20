@@ -9,19 +9,14 @@
 //! No Python dependency - CI friendly.
 
 use apollia_e2e_tests::reserve_port;
-use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 
 use apollia_core::{AIPResult, AIPTask, AgentId, RuntimeEvent};
 use apollia_llm::{LlmConfig, LlmRouter, ObservabilityConfig};
 use apollia_runtime::{
-    api::{
-        routes_agents::StubAgentLoader, server::empty_shared_llm_router, APIServer,
-        APIServerConfig, AppState,
-    },
+    api::{server::empty_shared_llm_router, APIServer, APIServerConfig, AppState},
     coordinator::{DynBackend, ExecutionBackend},
     eventbus::EventBus,
     registry::AgentRegistry,
@@ -84,9 +79,11 @@ async fn test_runtime_starts_without_llm_router() {
         router_handle: router,
         registry_handle: registry,
         event_sender,
-        agent_loader: Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         backend: NeverMockBackend,
         llm_router: empty_shared_llm_router(), // no LLM configured
         trigger_engine: None,
@@ -94,10 +91,9 @@ async fn test_runtime_starts_without_llm_router() {
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -117,6 +113,12 @@ async fn test_runtime_starts_without_llm_router() {
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     };
 
     // WHEN the APIServer starts
@@ -124,6 +126,7 @@ async fn test_runtime_starts_without_llm_router() {
         APIServerConfig {
             socket_path: socket_path.clone(),
             tcp_port: Some(port),
+            tcp_listener: None,
             bind_addr: "127.0.0.1".to_string(),
             api_token: None,
             tls_cert_path: None,
@@ -209,14 +212,16 @@ async fn test_ctx_llm_is_none_when_no_backend() {
 async fn test_runtime_continues_after_llm_init_failure() {
     // GIVEN an LLM config whose default backend does not exist
     let config = LlmConfig {
+        format_version: 1,
         default: "backend-inexistant".to_owned(),
         backends: vec![],
         observability: ObservabilityConfig::default(),
         routing: None,
-        pricing_overrides: HashMap::new(),
-        cost_alert_threshold_usd: None,
-        vertex: None,
-        runner: apollia_core::config::LlmRunnerConfig::default(),
+        guardrails: Default::default(),
+        residency: Default::default(),
+        defaults: Default::default(),
+        images: Default::default(),
+        devices: Default::default(),
     };
 
     // WHEN LlmRouter::from_config() fails (the backend is absent)
@@ -242,9 +247,11 @@ async fn test_runtime_continues_after_llm_init_failure() {
         router_handle: router,
         registry_handle: registry,
         event_sender,
-        agent_loader: Arc::new(StubAgentLoader),
         plan_gates: None,
         audit_journal: None,
+        connection_governance: Default::default(),
+        governance: None,
+        inference_governance: Default::default(),
         backend: NeverMockBackend,
         llm_router: empty_shared_llm_router(),
         trigger_engine: None,
@@ -252,10 +259,9 @@ async fn test_runtime_continues_after_llm_init_failure() {
         task_repository: None,
         pending_approvals: None,
         notification_config: None,
-        backend_factory: None,
         tool_registry_handle: None,
-        audit_trail: None,
         obs_config: apollia_core::ObservabilityConfig::default(),
+        config_reload: None,
         llm_call_repository: None,
         trigger_def_repo: None,
         notification_repo: None,
@@ -275,12 +281,19 @@ async fn test_runtime_continues_after_llm_init_failure() {
         resilience_layer: None,
         runner_proxy: None,
         llama_server_supervisor: None,
+        mlx_engine: None,
+        secret_store: apollia_runtime::inference_servers::default_store_opener(),
+        batches: None,
+        workflows: None,
+        compat_server: None,
+        source_registry: None,
     };
 
     let api = APIServer::new(
         APIServerConfig {
             socket_path: socket_path.clone(),
             tcp_port: Some(port),
+            tcp_listener: None,
             bind_addr: "127.0.0.1".to_string(),
             api_token: None,
             tls_cert_path: None,

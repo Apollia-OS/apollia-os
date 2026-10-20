@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { openNewChatRequested } from "$lib/stores/chat";
   import { onMount } from "svelte";
     import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { isLoading, t } from "svelte-i18n";
@@ -7,19 +6,28 @@
   import { SkipToContent } from "$lib/components/layout";
   import KeyboardHintOverlay from "./components/common/KeyboardHintOverlay.svelte";
   import OnboardingModal from "./components/onboarding/OnboardingModal.svelte";
-  import TourHost from "$lib/components/tour/TourHost.svelte";
+  import OnboardingFirstTask from "./components/onboarding/OnboardingFirstTask.svelte";
+  import ProjectMigrationNotice from "./components/projectMigration/ProjectMigrationNotice.svelte";
+  import PackagePreviewDialog from "./components/packages/PackagePreviewDialog.svelte";
   import { ToastContainer } from "$lib/components/ui/toast";
   import PlanModeHost from "$lib/components/operator/PlanModeHost.svelte";
   import CompanionContextProvider from "./components/companion/CompanionContextProvider.svelte";
-  import CompanionPanel from "./components/companion/CompanionPanel.svelte";
   import { companionStore } from "$lib/stores/companion";
   import { Tooltip } from "bits-ui";
   import { createSSEConnection } from "$lib/stores/sse";
   import { initTheme } from "$lib/stores/theme";
+  import { initChatAppearance, navPosition } from "$lib/stores/chatAppearance";
+  import { navSide } from "$lib/layout/navSide";
   import { hydratePlanModeDefault } from "$lib/stores/planModeSetting";
+  import { hydrateChatAutoNaming } from "$lib/stores/chatAutoNaming";
+  import { hydrateChatBehaviours } from "$lib/stores/chatBehaviours";
+  import { hydrateGeneralBehaviours } from "$lib/stores/generalBehaviours";
+  import { startGenerationSpeedListener } from "$lib/chat/autoName";
+  import { hydrateDeveloperMode } from "$lib/stores/developerMode";
+  import { hydrateDeveloperSettings } from "$lib/stores/developerSettings";
   import { navigateTo } from "$lib/stores/navigation";
   import { onboardingModalOpen } from "$lib/stores/onboarding";
-  import type { OnboardingState } from "$lib/types";
+  import { engineArrivalAsksAgain, shouldOpenOnboarding } from "$lib/onboarding/reopening";
   import { CommandPalette } from "./components/command-palette";
   import { mountShortcutDispatcher } from "$lib/navigation/shortcutDispatcher";
   import { registerGlobalShortcutHandlers } from "$lib/navigation/globalShortcutHandlers";
@@ -28,28 +36,18 @@
   import { getSttConfig } from "$lib/ipc/models";
   import { getOnboardingState, markOnboarded } from "$lib/ipc/onboarding";
   import { automationScript } from "$lib/ipc/system";
+  import { mountPackageOpening } from "$lib/packages/packageOpening";
 
   let ready = $state(false);
   let prevLlmCount = 0;
+  // Set when the first-launch modal is closed, finished or put off: a language
+  // model that arrives later in this run does not open it again.
+  let onboardingClosed = false;
 
   const isMac = typeof navigator !== "undefined" && navigator.platform.includes("Mac");
 
   function handleAncillaryKeydown(event: KeyboardEvent) {
     const mod = isMac ? event.metaKey : event.ctrlKey;
-    // Cmd/Ctrl+T: create a new task (navigates to /tasks and opens dialog).
-    if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "t") {
-      const target = event.target as HTMLElement | null;
-      const isEditing =
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable);
-      if (isEditing) return;
-      event.preventDefault();
-      navigateTo("chat");
-      openNewChatRequested.set(Date.now());
-      return;
-    }
     // Cmd/Ctrl+Shift+A: toggle the artifacts tab of the context drawer.
     if (mod && event.shiftKey && !event.altKey && event.key.toLowerCase() === "a") {
       event.preventDefault();
@@ -63,13 +61,21 @@
     }
   }
 
-  function shouldOpenOnboarding(state: OnboardingState): boolean {
-    return !state.completed && !state.skipped && state.started_at === null;
-  }
-
   onMount(() => {
     initTheme();
+    initChatAppearance();
     void hydratePlanModeDefault();
+    void hydrateDeveloperMode();
+    void hydrateDeveloperSettings();
+    void hydrateChatAutoNaming();
+    void hydrateChatBehaviours();
+    void hydrateGeneralBehaviours();
+    let unlistenSpeed: (() => void) | null = null;
+    void startGenerationSpeedListener()
+      .then((fn) => {
+        unlistenSpeed = fn;
+      })
+      .catch(() => {});
     const cleanup = createSSEConnection();
     // Phase-0 shortcut dispatcher: the single window keydown listener that
     // routes chords to handlers surfaces register via `registerShortcutHandler`.
@@ -137,7 +143,7 @@
       });
 
     // Live channel - supervisor emits OnboardingRequired at first launch and
-    // OnboardingCompleted once the agent writes onboarding.completed_at.
+    // OnboardingCompleted once the phase machine reaches its last phase.
     let unlistenRuntime: UnlistenFn | null = null;
     void listen<{ category: string; event_type: string }>(
       "runtime-event",
@@ -161,35 +167,52 @@
     prevLlmCount = get(llmBackends).length;
     const unsubscribeLlm = llmBackends.subscribe((list) => {
       const count = list.length;
-      const justBecameAvailable = prevLlmCount === 0 && count > 0;
+      const asksAgain = engineArrivalAsksAgain({
+        previous: prevLlmCount,
+        count,
+        closedThisRun: onboardingClosed,
+      });
       prevLlmCount = count;
-      if (!justBecameAvailable) return;
+      if (!asksAgain) return;
       void getOnboardingState()
         .then((state) => {
-          if (shouldOpenOnboarding(state)) {
+          // The modal may have been closed while the state was read.
+          if (!onboardingClosed && shouldOpenOnboarding(state)) {
             onboardingModalOpen.set(true);
           }
         })
         .catch(() => {});
     });
 
+    // Opened again, by a reset or from the settings: a new run of the modal.
+    const unsubscribeOnboarding = onboardingModalOpen.subscribe((open) => {
+      if (open) onboardingClosed = false;
+    });
+
     window.addEventListener("keydown", handleAncillaryKeydown);
+
+    // A package file opened from the system, or dropped on the window, opens
+    // its preview.
+    const stopPackageOpening = mountPackageOpening();
 
     return () => {
       cleanup?.();
+      stopPackageOpening();
       window.removeEventListener("keydown", handleAncillaryKeydown);
       disposeGlobalHandlers();
       disposeShortcutDispatcher();
       unlistenRuntime?.();
+      unlistenSpeed?.();
       unsubscribeLlm();
+      unsubscribeOnboarding();
     };
   });
 
   function handleOnboardingClose(): void {
+    onboardingClosed = true;
     onboardingModalOpen.set(false);
-    // The guided tour used to own this call, which meant a user who never
-    // finished the tour was never marked onboarded. The tour is now optional
-    // and launched from the dashboard, so completing the modal is what counts.
+    // Closing the modal, whether finished or skipped, is what marks the user
+    // as onboarded: no later step is required to count as done.
     void markOnboarded().catch(() => {});
   }
 </script>
@@ -212,18 +235,27 @@
     </div>
   {:else}
     <CompanionContextProvider>
-      <div class="flex h-screen w-screen overflow-hidden" data-testid="app-main">
+      <div
+        class="flex h-screen w-screen overflow-hidden {navSide($navPosition).shellRow}"
+        data-testid="app-main"
+        data-nav-position={$navPosition}
+      >
         <Sidebar />
         <Main />
       </div>
-      <CompanionPanel />
     </CompanionContextProvider>
     <PlanModeHost />
+    <!-- The preview of a `.apo` package, opened from any screen by its path. -->
+    <PackagePreviewDialog />
     <ToastContainer />
+    <!-- What the first launch closes on: a conversation, or a batch. -->
+    <OnboardingFirstTask />
     {#if $onboardingModalOpen}
       <OnboardingModal onclose={handleOnboardingClose} />
+    {:else}
+      <!-- Shown once, after the former projects became sources. -->
+      <ProjectMigrationNotice />
     {/if}
-    <TourHost />
   {/if}
 
   <!-- Global Cmd+K / Ctrl+Shift+P palette. Always mounted so it survives

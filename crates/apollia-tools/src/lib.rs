@@ -12,8 +12,10 @@
 //! - `SandboxProfile`: tool isolation profiles (namespace isolation is Linux-only)
 //! - `AuditTrail`: SQLite-persisted tool invocation log
 //! - `TaskRepository`: SQLite-persisted HITL task state
-//! - `AgentRepository`: SQLite-persisted installed agents
+//! - `AgentRepository`: SQLite-persisted agents, their definitions and overrides
 //! - `executor`: [`ToolExecutor`] trait and [`ToolDispatcher`] for unified JSON dispatch
+//! - `apollia_manifest`, `apo_archive`: the `apollia.toml` package manifest and
+//!   the `.apo` archive that carries it
 //!
 //! Native tools:
 //! - `bash_executor`: shell execution through a resolved POSIX shell;
@@ -25,14 +27,20 @@
 //! - `notebook_read`: read and format Jupyter `.ipynb` cells for LLM consumption
 //! - `notebook_edit`: apply atomic cell operations to Jupyter `.ipynb` notebooks
 
+pub mod agent_definition;
+mod agent_overrides;
 pub mod agent_repository;
 pub(crate) mod agents_db;
+pub mod apo_archive;
+pub mod apollia_manifest;
 pub mod audit;
-pub mod chat_libre_config;
+pub mod default_access;
 pub mod descriptor;
 pub mod dispatcher_invoker;
 pub mod executor;
+pub mod exposed_items;
 pub mod file_path_extractor;
+pub mod folder_access;
 pub mod governance_db;
 pub mod hitl_schema;
 pub mod host_env;
@@ -41,23 +49,37 @@ pub mod native_dispatcher;
 pub mod package_repository;
 pub mod project_repository;
 pub mod registry;
-pub mod resolver;
 pub mod sandbox_path;
+pub mod source_access;
 pub mod task_repository;
+pub mod tool_credentials;
 pub mod tool_registry;
 pub mod tools;
+pub mod trusted_keys;
 
-pub use agent_repository::{AgentRepository, AgentRepositoryError, InstalledAgent};
+pub use agent_definition::{
+    apollia_definition, is_built_in_agent, manifest_of, resolve as resolve_agent, AgentOrigin,
+    AgentOverride, OverrideField, OverrideValueError, PlanningMode, ResolvedAgent, StoredAgent,
+    APOLLIA_AGENT_ID, OVERRIDE_FIELDS,
+};
+pub use agent_repository::{AgentRepository, AgentRepositoryError};
 pub use audit::{
     compute_input_hash, AuditStats, AuditTrailError, AuditTrailHandle, ToolInvocationRecord,
 };
+pub use default_access::{
+    default_access, reading_family, reads_by_default, with_default_access, AgentAccess,
+    DefaultAccess,
+};
 pub use descriptor::{
-    ApprovalRiskLevel, McpTransport, ToolDescriptor, ToolDescriptorError, ToolKind,
+    ActionFamily, ApprovalRiskLevel, FamilySource, McpTransport, ToolDescriptor,
+    ToolDescriptorError, ToolKind,
 };
 pub use executor::{
     SessionToolFilter, ToolBatchCall, ToolDispatcher, ToolExecutionError, ToolExecutor,
 };
+pub use exposed_items::{ExposedItem, ExposedItemError, ExposedItemRepository, ExposedKind};
 pub use file_path_extractor::FilePathExtractor;
+pub use folder_access::{granted_folders, resolve_folder_access, FolderRoots};
 pub use governance_db::{
     GovernanceDb, GovernanceError, GOVERNANCE_DB_FILENAME, LEGACY_BACKUP_FILENAME,
     LEGACY_PERMISSIONS_FILENAME,
@@ -66,33 +88,49 @@ pub use journal::{
     list_sessions, rollback_session, JournalEntry, JournalError, JournalWriter, JournalWriterHandle,
 };
 pub use native_dispatcher::{
-    build_dispatcher_with, build_native_dispatcher, NativeDispatcherConfig, UnavailableTool,
+    build_dispatcher_with, build_native_dispatcher, is_disabled, NativeDispatcherConfig,
+    NoFolderGranted, UnavailableTool,
 };
-pub use package_repository::{InstalledPackage, PackageRepository, PackageRepositoryError};
+pub use package_repository::{
+    InstalledPackage, PackageItem, PackageItemKind, PackageRepository, PackageRepositoryError,
+    PackageSignature,
+};
 pub use project_repository::{
-    ProjectDetail, ProjectDocument, ProjectPatch, ProjectProviderRow, ProjectRepository,
-    ProjectRepositoryError, ProjectSummary, ProjectTemplate,
+    ProjectDetail, ProjectDocument, ProjectProviderRow, ProjectRepository, ProjectRepositoryError,
+    ProjectSummary,
 };
 pub use registry::{ToolRegistryError, ToolRegistryHandle};
-pub use resolver::{resolve, ResolutionReport, ResolutionStatus, ToolResolutionError};
 pub use sandbox_path::{SandboxPathError, SandboxRoot, SandboxSpec};
+pub use source_access::{
+    granted_with_memory, granted_with_profile, memory_is_checked, SourceAccess, MEMORY_SEARCH_TOOL,
+    MEMORY_WRITE_TOOL, PROFILE_PROPOSE_TOOL,
+};
 pub use task_repository::{
-    ApprovalInfo, PauseRecord, PausedTaskRow, PersistedTaskSummary, ResolvedApprovalRow,
-    TaskDetail, TaskRepoError, TaskRepository,
+    AgentRunEnd, AgentRunStart, ApprovalInfo, BatchDeletion, BatchItemRow, BatchRow,
+    HistoryRemoved, NewBatch, NewWorkflowRun, PauseRecord, PausedTaskRow, PersistedTaskSummary,
+    TaskDetail, TaskRepoError, TaskRepository, WorkflowRunRow, WorkflowStepEnd, WorkflowStepRow,
+};
+pub use tool_credentials::{
+    credential_account, list_credential_index, CredentialEntry, ToolCredentialStore,
+    TOOL_CREDENTIALS_SERVICE,
 };
 pub use tool_registry::{
-    load_governance_snapshot, CredentialEntry, GovernanceSnapshot, ToolCredentialStore,
+    load_governance_snapshot, load_governance_snapshot_with, GovernanceSnapshot,
     ToolGovernanceError, ToolRegistry as NativeToolRegistry, ToolStatus,
     AGENT_CREDENTIALS_NAMESPACE, NATIVE_TOOL_NAMES,
 };
 pub use tools::bash_executor::{BashExecutor, BashExecutorError, BashInput, BashOutput};
 pub use tools::bash_validator::BashValidator;
+pub use tools::code_context::{
+    granted_with_code_folders, CodeContext, CodeFolder, CODE_CONTEXT_TOOL,
+};
 pub use tools::notebook_edit::{
     NotebookEdit, NotebookEditError, NotebookEditInput, NotebookEditOutput,
 };
 pub use tools::notebook_read::{
     NotebookRead, NotebookReadError, NotebookReadInput, NotebookReadOutput,
 };
-pub use tools::risk_classifier::{FilesystemOp, RiskCategory, RiskClassifier, RiskLevel};
+pub use tools::risk_classifier::{RiskCategory, RiskClassifier};
 #[cfg(feature = "web-search")]
 pub use tools::web_search::{ToolConfigError, WebSearch, WebSearchError};
+pub use trusted_keys::{TrustedKey, TrustedKeyError, TrustedKeyOrigin, TrustedKeyRepository};

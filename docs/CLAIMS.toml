@@ -118,90 +118,76 @@ evidence = ""
 note = """
 This is where the anti-chaining protection actually lives. It went dark once,
 its only call chain leading to an aggregate no binary installed while the docs
-promised it anyway; it is live through the chat loop's per-invocation prefix
-checker (`build_prefix_checker` -> `check_with_scope` ->
-`code_executor_prefix_matches`). If that checker ever loses its caller, this
-claim must flip back to not-wired together with the pages that state it.
+promised it anyway; it is live through the governance decision every tool call
+of every agent goes through (`governance::decide` -> `rule_matches` ->
+`code_executor_prefix_matches`, and `decide` itself for a code call allowed by
+a rule). If that decision ever loses its caller, this claim must flip back to
+not-wired together with the pages that state it.
 """
 
 [[claim]]
 id = "prefix-rules-evaluated-per-invocation"
 scope = "public"
-symbol = "build_prefix_checker"
+symbol = "rule_matches"
 status = "wired"
-proof = "crates/apollia-runtime/src/chat/manager/libre.rs"
+proof = "crates/apollia-runtime/src/governance/decision.rs"
 evidence = ""
 note = """
 The onboarding round found the previous state the hard way: a rule allowing
 `ls` was recorded and free chat still asked for approval, because the chat
 authorization was a name-only HashSet and no production code evaluated the
-stored prefixes. The checker built here closes that gap: on a miss of the
-name-only set, the ReAct loop consults `check_with_scope` with the call's
-first argument, per invocation, Libre sessions only. The name-only seeding
-still drops arg-prefix rules from the set; that is now complemented, not
-contradicted, by the per-invocation evaluation. If this checker loses its
-caller, replace this claim with the not-wired retraction it superseded.
+stored prefixes. The governance decision closes that gap: before every tool
+call of every agent, in the chat and outside it, it matches the stored rules
+against the call's first argument, per invocation. No name-only set is seeded
+from the rules any more. If the decision loses its caller, replace this claim
+with the not-wired retraction it superseded.
 """
 
 [[claim]]
 id = "hitl-wired-in-chat-path-only"
 scope = "public"
-symbol = "push_hitl_natives"
+symbol = "decide_call"
 status = "wired"
-proof = "crates/apollia-runtime/src/chat/manager/dispatcher.rs"
+proof = "crates/apollia-runtime/src/chat/builtin_agent/tools.rs"
 evidence = ""
 note = """
-Human approval is real and it covers the chat path only. `push_hitl_natives` has
-exactly one caller, the chat dispatcher. The three dispatchers on the agent path
-build the bare dispatcher, so an installed Python agent's `ctx.tools` calls meet
-no checkpoint.
+Human approval is real and it covers every agent. `decide_call` is called by
+the agent loop before every tool call, file writes and code included, and a
+call it does not allow is asked on the consent card. An agent is a record, and
+every agent runs through that one loop, in a conversation, in a batch and from
+a trigger alike, so no agent has a path to a tool that skips the decision. An
+unattended run waits where an attended one would ask.
 
-Three pages presented HITL as the primary gate for anything leaving a mark, one
-of them mapping it to Article 14 of the EU AI Act. The scope is a deliberate
-position, not a defect: an installed agent already runs arbitrary Python under
-the user account and can write a file without going through `ctx.tools` at all,
-so a gate on one call path would not contain a hostile agent. Wiring it is v0.2
-work. What this claim guards is that the documentation keeps saying which path is
-covered. If `push_hitl_natives` gains a second caller, the pages get to promise
-more.
+What stays outside the decision is the Python a package brings. A `@tool` or
+`@workflow` function runs in-process under the user account, with no tool
+proxy on its context, and can write a file with plain Python: installing a
+package that brings code is trusting its author, and the pages must keep saying
+so rather than presenting the approval as a containment of package code.
+
+The id of this claim dates from the time an installed agent was Python code
+that called tools through a proxy of its own, past the loop. That contract was
+removed. The id is kept because the markers of three pages carry it.
 """
 
 [[claim]]
-id = "permission-decision-is-not-recorded"
+id = "permission-decision-is-journaled"
 scope = "public"
-symbol = "PermissionAuditLog::record"
-status = "absent"
-proof = "crates/apollia-permissions/src/audit_log.rs"
-evidence = "CREATE TABLE IF NOT EXISTS permission_audit"
+symbol = "ConsentAnswered"
+status = "wired"
+proof = "crates/apollia-runtime/src/chat/builtin_agent/governed.rs"
+evidence = ""
 note = """
-The decisions chapter said the permission decision "is logged whichever way it
-goes". Nothing in a shipped binary writes to `permission_audit`.
+The decisions chapter said for a long time that the permission decision "is
+logged whichever way it goes" while nothing wrote to the `permission_audit`
+table, then said, correctly, that the decision was written nowhere. It is now
+written: the governed path of the chat loop journals the answer to a consent
+prompt, and the refusals by the policy and by a rule, as entries of the signed
+journal. The table that never had a writer is gone, dropped by a migration of
+`governance.db`.
 
-Re-anchored on 2026-08-21, once the unwired governance types were removed from
-the tree. The claim used to rest on
-`PermissionEngine::decide`, the only writer, reached through
-`ToolDispatcher::with_permission_engine`, which no production caller populated.
-That engine has been removed, so the fact is now stronger and its old anchor is
-gone: there is no writer at all, wired or otherwise.
-
-What remains is what the claim now rests on, and it is durable rather than
-transitional. `audit_log.rs` still creates the table and its index, still exposes
-`query`, and `apollia permissions audit` still reads it. A table with readers and
-no writer is the shape of this defect, and it survives any future removal of the
-code that once might have filled it.
-
-The two production callers of the table are readers. The only `INSERT INTO
-permission_audit` in the tree sits under `#[cfg(test)]` in
-`apollia-cli/src/commands/permissions.rs`, inside a fixture that seeds rows to
-test the reader.
-
-The evidence deliberately pins the same string as `permission-engine-not-wired`,
-because that is the exact fact this claim rests on: the day someone wires the
-engine, the decision starts being recorded and the corrected paragraph has to be
-corrected back. What *is* recorded is the invocation, and
-`tool-invocations-is-the-execution-record` guards that distinction. Do not merge
-the two: one says what ran, the other says who allowed it, and only the first
-exists.
+If the governed path stops journaling the answer, the paragraph promises a
+record that does not exist, which is the defect this claim was first written
+against.
 """
 
 [[claim]]
@@ -346,27 +332,28 @@ where the change gets noticed.
 [[claim]]
 id = "memory-injection-confined-to-builtin-assistant"
 scope = "public"
-symbol = "inject_memory"
+symbol = "profile_injection::switched_store"
 status = "wired"
-proof = "crates/apollia-core/src/config/autonomy.rs"
+proof = "crates/apollia-runtime/src/chat/profile_injection.rs"
 evidence = ""
 note = """
 Principle 6 said memory is never injected automatically. Three paths do inject,
-and only two of them sit in the built-in assistant. `long_autonomous` sets
-`inject_memory: true`, read in the react loop and applied by the prompt builder,
-which appends a persona brief. Separately, and not gated by any tier, the chat
-manager appends past session summaries on the first message of a free session,
-see `cross-session-recall-injects-summaries`. The third sits outside the
-assistant: the desktop prompt-rewrite command carries the Work section of the
-user profile into its own one-shot system prompt, see
+and only two of them sit in the built-in assistant. The chat manager hands the
+profile store to the executor of a free chat while the profile switch of the
+conversation is on (`switched_store`), the executor keeps it for the Apollia
+agent alone, and the prompt builder appends a brief of the profile the
+conversation designates, at every tier. Separately, the chat manager appends
+past session summaries on the first message of a free session, see
+`cross-session-recall-injects-summaries`. The third sits outside the assistant:
+the desktop prompt-rewrite command carries the role, the function and the tools
+of that profile into its own one-shot system prompt, see
 `rewrite-injects-work-context`.
 
 The invariant survives, because no agent execution path reaches any of the
-three. What was wrong is the wording, which claimed more than the code delivers,
-and which named only the first. This claim guards the boundary: if
-`inject_memory` is ever read outside the built-in assistant, or if a lower tier
-turns it on, one of the eight principles becomes false and the sentence has to
-change with it.
+three. This claim guards the gate: if the chat dispatch stops calling
+`switched_store`, either the profile is injected whatever the switch says or it
+is never injected, and in both cases the page that describes a switch the user
+controls becomes false.
 """
 
 [[claim]]
@@ -390,21 +377,23 @@ statement becomes false while everything still compiles.
 """
 
 [[claim]]
-id = "agent-contract-is-decorators-not-manifest-run"
+id = "agent-contract-is-a-manifest-read-strictly"
 scope = "public"
-symbol = "__apollia_dispatch__"
+symbol = "apollia_manifest::parse"
 status = "wired"
-proof = "crates/apollia-aip/src/bridge.rs"
+proof = "crates/apollia-tools/src/apollia_manifest/mod.rs"
 evidence = ""
 note = """
-The bridge accepts an agent only when it carries `__apollia_dispatch__`, the
-attribute the `@agent` / `@skill` / `@on_message` decorators install. The
-`manifest()` plus `run()` contract was removed and the runtime no longer calls
-any dynamic `manifest()`.
+An agent is data: an `[[agents]]` entry of the `apollia.toml` its package
+carries. The runtime reads that manifest through one parser, which refuses a
+key the schema does not know, with its full path, and then checks the rules
+the schema cannot express. No Python object stands for an agent any more: the
+bridge that looked for `__apollia_dispatch__` on a class is gone, and so is the
+dict the `@agent` decorator built.
 
-Both the root briefing and the principles page still described the removed
-contract, which is worse than a stale sentence: an author following it writes an
-agent the bridge refuses outright.
+Guarded on the callers of the parser rather than on its definition: a manifest
+read anywhere else, by a lenient reader, is how a misspelt key gets dropped in
+silence and an agent runs without what its author declared.
 """
 
 [[claim]]
@@ -461,20 +450,24 @@ status = "wired"
 proof = "crates/apollia-llm/src/types.rs"
 evidence = "pub seed: Option<u64>"
 note = """
-The request struct is the whole sampling contract: messages, tools, model,
-temperature, max_tokens, seed, grammar. `top_p`, `top_k` and
-`repetition_penalty` are not fields of it and reach no backend, while the page
-documented a four-level resolution precedence for them, hard-fallback values
-included. `seed` is a field and is read by nobody, so the reproducibility section
-promised something the code cannot deliver.
+The request struct is the whole sampling contract, and its fields reach a
+backend: temperature, max_tokens, seed, top_p, top_k, min_p, presence_penalty,
+frequency_penalty, repeat_penalty, stop, and the reasoning switches. The
+OpenAI-compatible client writes the protocol fields onto the wire, `seed`
+included, and sends the llama-server fields (`top_k`, `min_p`,
+`repeat_penalty`) under the names that server reads.
 
-More than half the page described machinery that is written and never applied:
-the curated table and the user override file are populated at download time, and
-the resolver that would consult them has no caller outside test code.
+What a call starts from is resolved by `request_defaults` in three levels, four
+inside a conversation: the defaults the publisher of the model recommends, the
+`request` of the model defaults the package of the agent declares, the preset
+the user chose, then the settings typed for one conversation. A level wins field
+by field, and a value the call itself sets is never replaced.
 
-The evidence string pins `seed` deliberately. It is the field whose presence
-makes the struct look like it supports reproducibility; if a backend ever reads
-it, this claim fails and the page gets rewritten in the other direction.
+The evidence string pins `seed`: it is the field a reproducibility promise
+stands on. The id of this claim dates from the time only the temperature
+reached a backend and the resolver had no caller; the page it guards has to
+describe the fields above. The id is kept because the marker of the page
+carries it.
 """
 
 [[claim]]
@@ -494,27 +487,23 @@ tiers are stated together, and which the code below it must keep matching.
 """
 
 [[claim]]
-id = "tier-budget-capped-at-thirty-on-agent-paths"
+id = "agent-run-budget-is-its-tier-capped-by-the-ceiling"
 scope = "public"
-symbol = "direct_path_budget"
+symbol = "StepBudget::from_capped"
 status = "wired"
-proof = "crates/apollia-cli/src/commands/start.rs"
+proof = "crates/apollia-runtime/src/chat/agent_executor.rs"
 evidence = ""
 note = """
-The tier table of 100 to 500 reasoning steps is real and it is read by the chat
-path, which runs at the default tier and never varies. An agent run reads none
-of it: both execution paths take the budget the manifest declares and cap it
-with `StepBudget::from_capped` against `StepBudgetConfig::default()`, 30 steps,
-60 tool calls, 600 seconds. On the direct path that is `direct_path_budget`, in
-`apollia-cli` and again in `apollia-desktop`; on the orchestrated path the
-engine caps against its own `runtime_config`, whose only setter has no
-production caller, so it stays at the same default.
+An agent run has one path, the agent executor, and it reads the tier table: it
+takes the budget of the tier the agent runs at and caps it with
+`StepBudget::from_capped` against the runtime ceiling the chat is started with,
+100 reasoning steps, 200 tool calls, 1200 seconds. The two paths that ran the
+Python of an agent, and capped the budget its manifest declared at 30 steps,
+are gone with that contract.
 
-An explanation page told an operator that raising the tier raises the budget
-from 100 to 500. It raises what the run may attempt, not what it gets. If
-`direct_path_budget` loses its caller, the direct path is unbounded again and
-principle #7 fails silently, which is the reason this is guarded as `wired`
-rather than stated in prose.
+If `StepBudget::from_capped` loses its caller in the executor, an agent runs on
+the budget of its tier alone, up to 500 steps, and principle #7 fails silently,
+which is the reason this is guarded as `wired` rather than stated in prose.
 """
 
 [[claim]]
@@ -565,7 +554,7 @@ proof = "crates/apollia-desktop/src/commands/model_hub.rs"
 evidence = ""
 note = """
 The install page said there is no in-app model downloader. There is one, reached
-from onboarding and from the Model Hub screen, and it is the path most first-time
+from onboarding and from the discovery window of the AI screen, and it is the path most first-time
 users take. Denying a shipped feature sends a reader hunting for a GGUF by hand
 on their first five minutes with the product.
 """
@@ -613,8 +602,9 @@ proof = "crates/apollia-desktop/src/commands/recommend.rs"
 evidence = "HubUnreachable"
 note = """
 Onboarding offered four pinned HuggingFace URLs filtered on installed RAM. The
-list is now resolved live, ranked against the machine's memory layout, and
-checked against the GGUF header of each file before it is offered. The page
+list is now drawn from the model registry, resolved live, ranked against the
+machine's memory layout, and checked against the GGUF header of each file
+before it is offered. The page
 also states the one consequence of a live catalogue an operator meets first:
 with no network there is no list, which is a different state from "nothing
 fits" and is reported as one.
@@ -911,17 +901,17 @@ nothing consults and the documented thresholds become fiction.
 # ── Tool-call governance, the real path ──────────────────────────────────────
 
 [[claim]]
-id = "orchestrated-approval-from-manifest"
+id = "plan-step-decided-by-governance"
 scope = "public"
-symbol = "tools_requiring_approval"
+symbol = "GrantedToolProxy::step_call_consent"
 status = "wired"
-proof = "crates/apollia-oria/src/actor.rs"
+proof = "crates/apollia-runtime/src/chat/agent_executor/plan_first/proxy.rs"
 evidence = ""
 note = """
-On the orchestrated path the manifest field is the whole gate. Documenting a
-policy layer here would repeat the drift this pass removed: the corpus described
-a policy aggregate in front of tool calls that no shipped binary ran. If this
-lookup disappears, every step executes unattended and nothing else in the build
+A step of a plan holds no approval of its own: the tool proxy of the run asks
+governance about each call before it reaches the tool, and that one call is the
+whole gate. If the proxy stops making it, every step of a plan runs its tool
+with no policy, no rule and no consent consulted, and nothing else in the build
 notices.
 """
 
@@ -980,21 +970,19 @@ not just this gate, when touching eviction.
 [[claim]]
 id = "module-level-agent-attribute-is-the-entry-point"
 scope = "public"
-symbol = "getattr"
-status = "wired"
-proof = "crates/apollia-aip/src/loader.rs"
+symbol = "load_agent_module_with_sys_paths"
+status = "absent"
+proof = "crates/apollia-aip/src/lib.rs"
 evidence = ""
 note = """
-The loader finds the agent by the name `agent` on the module. Rename what it
-looks for and nothing fails to compile: agents simply stop loading, with an
-error that points at the agent rather than at the loader.
+The loader that imported a Python module and looked for the name `agent` on it
+is gone: an agent is data, an `[[agents]]` entry of the `apollia.toml` of its
+package, and no Python object stands for one. The absence of the loader is the
+delivery, and nothing else in the build would notice its return.
 
-The symbol is bound by `@agent` itself, through `expose_to_module`, not by the
-agent author. The corpus used to teach a hand-written `agent = X()` at the
-bottom of every module, which built a second instance over the registered one.
-That line is gone from the examples and the tutorials; the ones that remain are
-Rust test fixtures that build the manifest by hand, without the decorator, and
-genuinely need it.
+The paragraph this identifier anchors still teaches the module-level `agent`
+symbol of the former contract. It states what the runtime no longer does, and
+it is to be rewritten with the tutorial that carries it.
 """
 
 [[claim]]
@@ -1079,17 +1067,17 @@ stored nothing.
 """
 
 [[claim]]
-id = "tool-invocations-is-the-execution-record"
+id = "journal-is-the-execution-record"
 scope = "public"
-symbol = "tool_invocations"
+symbol = "journal_call_started"
 status = "wired"
-proof = "crates/apollia-tools/src/audit.rs"
+proof = "crates/apollia-runtime/src/chat/builtin_agent/call_journal.rs"
 evidence = ""
 note = """
-The documented table and database both did not exist, and the page sent the
-reader to a settings screen that does not exist either. This is the record that
-does: it says what ran, not who approved it, and that distinction is the reason
-the page was misleading rather than merely stale.
+The page first named a table and a database that did not exist, then a flat
+table of tool invocations that only one path wrote. The record is now the signed
+journal: the chat loop announces each tool call with its run, and the journal
+subscriber chains it. The page says where an operator reads it.
 """
 
 [[claim]]
@@ -1107,33 +1095,35 @@ was to keep going locally without saying so.
 """
 
 [[claim]]
-id = "sovereignty-profile-gates-connecting-not-calling"
+id = "organisation-policy-gates-connecting-not-calling"
 scope = "public"
-symbol = "ensure_cloud_allowed"
+symbol = "PolicyAdmission"
 status = "wired"
-proof = "crates/apollia-desktop/src/commands/integrations.rs"
+proof = "crates/apollia-runtime/src/supervisor/boot.rs"
 evidence = ""
 note = """
-`local_only` was presented as a third filter on every tool call, alongside the
-manifest and the permission rules. It is checked when a cloud connection is
-opened, and not on calls through a connection that already exists. Read as a
-per-call filter it promises a containment the code does not provide.
+The cloud ban was presented as a third filter on every tool call, alongside the
+manifest and the permission rules, and later held by a profile value the
+renderer handed the command. It is a rule of the organisation policy, checked
+by the runtime when a connection is added, and not on calls through a
+connection that already exists.
 """
 
 [[claim]]
-id = "audit-export-pages-past-the-server-ceiling"
+id = "audit-export-holds-no-content-without-detail"
 scope = "public"
-symbol = "SERVER_LIMIT_CAP"
+symbol = "summary_of"
 status = "wired"
-proof = "crates/apollia-cli/src/commands/audit.rs"
+proof = "crates/apollia-runtime/src/audit_journal/export.rs"
 evidence = ""
 note = """
-The endpoint clamps one query to 500 and, until an `offset` parameter existed,
-had no way to reach anything older: the trail was structurally unexportable past
-its newest page, on a product that maps Article 14. The CLI now pages until a
-short page comes back, and this constant is the page size it respects. If the
-loop goes, the export silently becomes the newest 500 events under a filename
-that claims to be an archive.
+An export of the journal leaves the application as a file that circulates, so
+what it holds by default is the summary of each entry and its place in the
+chain: `summary_of` copies neither the payload of the entry nor the arguments
+and the output of its call, which only `detailed` adds, on request. If the
+summary ever takes the payload along, every export handed to an audit carries
+the content of the calls, personal data included, under an option the reader
+never asked for.
 """
 
 [[claim]]
@@ -1356,20 +1346,19 @@ parameter goes back to having no effect whatsoever.
 """
 
 [[claim]]
-id = "chat-file-root-is-home-without-project"
+id = "file-tools-root-is-the-granted-folders"
 scope = "public"
-symbol = "home_dir_or_temp"
+symbol = "granted_folders"
 status = "wired"
-proof = "crates/apollia-runtime/src/chat/manager/dispatcher.rs"
+proof = "crates/apollia-tools/src/folder_access.rs"
 note = """
-A chat with no project used to root its file tools at the system temp directory,
-which made the assistant unable to reach anything the user owns while protecting
-nothing: the trust model already states that an installed agent runs with the
-user's rights, and the prompt tells the model in so many words that it may read
-and write elsewhere on the machine. The root is the home directory now, and temp
-is only the fallback when home cannot be resolved. If this call reverts to
-`std::env::temp_dir`, the reference page becomes false again and the assistant
-goes back to seeing an empty machine.
+The file tools of an agent reach the folders granted to it and nothing else, on
+the chat path and on the task path. They used to reach the home folder by
+default, and in the chat also the volume and the project's folder, so the list
+of folders on an agent's sheet bounded nothing. The roots are now read from the
+agent's granted accesses and the folder connections in system.db. If a runner
+stops calling this function, its file tools fall back to no root at all, and the
+reference page that says which folders an agent reaches becomes false.
 """
 
 [[claim]]
@@ -1399,11 +1388,11 @@ status = "wired"
 proof = "crates/apollia-desktop/src/commands/onboarding.rs"
 evidence = "onboarding.completed_at"
 note = """
-The page promises that skipping the optional questions ends the interview with
-no extra AI turn. Before this command existed, the skip button sent the chat
+The page promises that skipping the questions ends the conversation with no
+extra AI turn and opens the profile form at once. Before this command existed, the skip button sent the chat
 message "C'est bon pour moi, terminons." and burned one or more inference
 turns waiting for the agent to close; there was no backend path that finalized
-without a model turn. The command stamps the exact key the wrap-up gate reads
+without a model turn. The command stamps the exact key the review gate reads
 from the agent's semantic memory. If this evidence stops matching, the button
 is back to nudging the model and the sentence overstates the flow.
 """
@@ -1472,73 +1461,52 @@ proof = "crates/apollia-llm/src/meta/rewrite_input.rs"
 evidence = "pub struct WorkContext"
 note = """
 Third exception to Principle 6 (memory injection): the prompt rewrite carries
-the Work section of the user profile when the operator triggers it. Four anchors,
+the role, the function and the tools of the profile of the conversation when the
+operator triggers it. Four anchors,
 one per page that states the exception: docs/explanation/the-8-principles.md and
 docs/architecture/07-crosscutting-concepts.md, each with its French mirror under
 i18n/fr. The exception lives in the desktop rewrite command, not in the
 assistant's prompt builder, which is what the surrounding prose says.
 """
 
-# ── The two audit registers, and what a name promises ────────────────────────
+# ── The audit register, and what a name promises ─────────────────────────────
 
 [[claim]]
-id = "audit-list-reads-the-tool-invocation-trail"
+id = "journal-records-the-tool-calls-of-a-run"
 scope = "public"
-symbol = "query_page"
+symbol = "ToolOutputCaptured"
 status = "wired"
-proof = "crates/apollia-runtime/src/api/routes_audit.rs"
+proof = "crates/apollia-runtime/src/audit_journal/subscriber.rs"
 evidence = ""
 note = """
-The corpus called one thing "the audit trail" and described the other. There are
-two registers: the flat `tool_invocations` table, which has no `prev_hash` and no
-signature, and the hash-chained journal. `audit list`, `audit stats` and
-`audit export` reach the flat one through this reader; `audit verify`,
-`audit show` and `audit anchor` reach the journal. If `query_page` ever loses its
-caller in `list_audit`, the pages that now say which command reads which register
-are describing a path that stopped existing.
-
-The same paragraphs carry a second fact the replay cannot check: a tool call made
-in a chat session reaches neither register, because `ToolInvocationRecord` is
-written only from the agent-side `ctx.tools` proxy and `map_event` has no arm for
-the `ChatToolCall*` variants. That gap is tracked as a defect, not documented as
-a feature.
-"""
-
-[[claim]]
-id = "a2a-tool-name-is-prefixed-and-encoded"
-scope = "public"
-symbol = "extract_a2a_skill_id"
-status = "wired"
-proof = "crates/apollia-aip/src/context.rs"
-evidence = ""
-note = """
-`skill_as_tool` does not hand the model a `skill_id`. It emits
-`a2a__{skill_id with . replaced by __}`, because OpenAI-compatible tool names
-reject `.` and `:`, and this function reverses the encoding before dispatch. Two
-pages published director prompts that named the raw `skill_id`, which asks the
-model for a tool it was never given. If the decoder loses its caller, the naming
-convention the prompts now follow is no longer the one the bridge accepts.
+The corpus called one thing "the audit trail" and described the other, while two
+registers existed: a flat table of tool invocations and the hash-chained
+journal. There is one register now, the journal, and every `audit` command reads
+it. The paragraph says a tool call of a conversation is recorded there with its
+output; if the chat loop stops emitting the capture, or the subscriber stops
+mapping it, the paragraph describes a record that is no longer made.
 """
 
 [[claim]]
 id = "daemon-binds-tcp-by-default"
 scope = "public"
-symbol = "DEFAULT_TCP_PORT"
+symbol = "resolve_tcp_port"
 status = "wired"
 proof = "crates/apollia-cli/src/commands/start.rs"
 evidence = ""
 note = """
 Six pages said the daemon opens a TCP port only when one is given, in six
 different formulations, so no single search found them. The code has no such
-condition: `apollia-os start` runs `port.unwrap_or(DEFAULT_TCP_PORT)` and passes
-`Some(tcp_port)` unconditionally, so `--port` chooses the number and nothing
-leaves the port closed. The embedded runtime is the one that defaults to
+condition: `apollia-os start` resolves its port with `resolve_tcp_port`
+(`--port`, then `[api].port`, then 7771) and passes `Some(tcp_port)`
+unconditionally, so the flag or the file choose the number and nothing leaves
+the port closed. The embedded runtime is the one that defaults to
 Unix-socket-only, and that page is correct.
 
-The residual this claim does not cover: `wired` proves the constant is read, not
-that it is read unconditionally. A reintroduced `if let Some(port)` would keep
-this green, because the replay resolves a symbol and never reads the value or the
-shape of the expression around it.
+The residual this claim does not cover: `wired` proves the function is called,
+not that its result is used unconditionally. A reintroduced `if let Some(port)`
+would keep this green, because the replay resolves a symbol and never reads the
+value or the shape of the expression around it.
 """
 
 [[claim]]
@@ -1549,50 +1517,36 @@ status = "wired"
 proof = "crates/apollia-llm/src/backends/openai/convert.rs"
 evidence = "json_schema_to_gbnf(schema)"
 note = """
-The structured-output page says a schema constrains decoding on the embedded
-llama-server, which only holds while something turns the schema into a grammar
-and sends it. Both halves are the risk here, and the tree already carried the
+The structured-output page says a schema constrains the answer on the embedded
+llama-server and that an inexpressible one is refused before the call. The
+schema itself travels as `response_format` and the server builds the grammar;
+what this crate still owns is the refusal, which only holds while the request
+builder translates the schema before sending. The tree already carried the
 shape of the failure: `CompletionRequest.grammar` existed, `tool_specs_to_gbnf`
-filled it, and no backend read the field, so the tool grammar was built and
-dropped for as long as nobody looked. The proof is therefore the call site in
-the request builder rather than the translator itself; a translator with no
+filled it, and no backend read the field. The proof is therefore the call site
+in the request builder rather than the translator itself; a translator with no
 caller would satisfy a symbol-only check and leave the sentence false.
 """
 
 [[claim]]
 id = "mcp-requires-approval-gates-task-path"
 scope = "public"
-symbol = "build_task_tool_executors"
-status = "wired"
-proof = "crates/apollia-cli/src/commands/start/chat_runner.rs"
-evidence = "apollia_mcp::executor::build_task_tool_executors("
-note = """
-The flag was documented as gating every call to a server and gated none: the
-only gate sat behind `McpToolExecutor::with_hitl`, which no production path
-called, and it waited on a key no route could resolve. The page now says a
-server declared `requires_approval` pauses the task on an approval, which holds
-only while the task-path runners build their MCP executors through
-`build_task_tool_executors` rather than the ungated `build_agent_tool_executors`.
-The proof is that call, in the helper both CLI task runners use; the desktop
-runner makes the same call in its own `build_mcp_executors`. If either runner
-goes back to the ungated builder, this claim is false and the page with it.
-The CLI chat-agent runner builds its set through the same helper since the page
-said an agent run from an agent chat session is gated too.
-"""
-
-[[claim]]
-id = "mcp-gated-tool-does-not-block-install"
-scope = "public"
-symbol = "register_session_tools_in_registry"
+symbol = "classify_mcp_tool"
 status = "wired"
 proof = "crates/apollia-mcp/src/manager/views.rs"
-evidence = "dangerous: false,"
+evidence = "ServerHints::Read => classify_mcp_tool("
 note = """
-An MCP tool descriptor used to carry its server's `requires_approval` as
-`dangerous`, and install-time resolution refuses a `dangerous` tool unless the
-manifest sets `dangerous_tools_allowed`, which the SDK decorator does not
-expose. Under eager loading an agent requiring a tool of a gated server was
-refused with a 400, while one requiring a tool of an ungated server installed.
-The page says such an agent installs and the approval is held per call; that
-holds while the registered descriptor is not `dangerous`.
+An MCP server used to carry an approval flag, and the task path of a Python
+agent paused on it. Both are gone: the flag, its store, its routes and its
+commands were removed, and the runners of that path went with the contract
+they served.
+
+What decides a call now is the action family of the tool, given once when the
+tool is registered, the evidence above, from the curated selection, then from
+the annotations of the server, and left unclassified otherwise. Governance
+asks on that family before the call runs, with the three answers of a consent
+prompt.
+
+The identifier keeps its historical name so the anchor of the page stays
+stable; the paragraph it anchors says what the code does.
 """

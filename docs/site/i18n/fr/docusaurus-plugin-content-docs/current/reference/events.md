@@ -59,8 +59,7 @@ sont en anglais, et la règle « une langue par fichier » interdit de les servi
 ici : la page anglaise les rend.
 
 Avant le tableau, une réserve qu'il ne porte pas. `HookDecisionRecorded` rapporte
-la décision d'un hook `PreToolUse`, et `PreToolUse` ne fait pas partie de la
-surface prise en charge de `v0.1.0-preview`. Sa décision est appliquée au mieux :
+la décision d'un hook `PreToolUse`. Cette décision est appliquée au mieux :
 un gestionnaire qui expire, dont la livraison échoue, ou qui répond quelque chose
 d'illisible retombe sur `allow`, et l'appel d'outil passe.
 
@@ -90,10 +89,7 @@ que le `request_id` porté par l'événement annonce une demande déjà tranché
 | Variante | Charge utile |
 |---|---|
 | `AgentDegraded` | champs nommés |
-| `AgentDisabled` | champs nommés |
-| `AgentEnabled` | champs nommés |
 | `AgentInstalled` | champs nommés |
-| `AgentLoadFailed` | champs nommés |
 | `AgentMessageAcked` | champs nommés |
 | `AgentMessageDelivered` | champs nommés |
 | `AgentMessageDropped` | champs nommés |
@@ -109,7 +105,7 @@ que le `request_id` porté par l'événement annonce une demande déjà tranché
 
 | Variante | Charge utile |
 |---|---|
-| `HitlFilesystemRequired` | champs nommés |
+| `BatchItemAwaitingApproval` | champs nommés |
 | `PermissionRequired` | champs nommés |
 | `TaskApprovalTimeout` | champs nommés |
 | `TaskInputRequired` | champs nommés |
@@ -154,12 +150,15 @@ que le `request_id` porté par l'événement annonce une demande déjà tranché
 | Variante | Charge utile |
 |---|---|
 | `CostCeilingReached` | champs nommés |
+| `LlmAgentModelFallback` | champs nommés |
 | `LlmCallCompleted` | champs nommés |
 | `LlmCallFailed` | champs nommés |
 | `LlmFallbackTriggered` | champs nommés |
 | `LlmModelFailed` | champs nommés |
 | `LlmModelLoading` | champs nommés |
 | `LlmModelReady` | champs nommés |
+| `LlmModelReloaded` | champs nommés |
+| `LlmModelUnloaded` | champs nommés |
 | `LlmResponseCaptured` | champs nommés |
 | `MetaLlmBudgetExceeded` | champs nommés |
 | `TokenBudgetUpdated` | champs nommés |
@@ -218,8 +217,11 @@ que le `request_id` porté par l'événement annonce une demande déjà tranché
 | Variante | Charge utile |
 |---|---|
 | `AllReady` | aucune |
+| `ConfigInvalid` | champs nommés |
+| `ConfigReloaded` | champs nommés |
 | `ContextCompacted` | champs nommés |
 | `FileModifiedSinceRead` | champs nommés |
+| `GovernanceFailClosed` | champs nommés |
 | `McpServerHealthChanged` | champs nommés |
 | `McpServerReloaded` | champs nommés |
 | `ShutdownRequested` | aucune |
@@ -232,6 +234,7 @@ que le `request_id` porté par l'événement annonce une demande déjà tranché
 | Variante | Charge utile |
 |---|---|
 | `BashFilePathsExtracted` | champs nommés |
+| `BatchEnded` | champs nommés |
 | `PlanAlternativesGenerated` | champs nommés |
 | `PlanCacheHit` | champs nommés |
 | `PlanCompleted` | champs nommés |
@@ -246,6 +249,9 @@ que le `request_id` porté par l'événement annonce une demande déjà tranché
 | `TaskStarted` | champs nommés |
 | `TodoUpdated` | champs nommés |
 | `VerificationCompleted` | champs nommés |
+| `WorkflowStepCompleted` | champs nommés |
+| `WorkflowStepFailed` | champs nommés |
+| `WorkflowStepStarted` | champs nommés |
 
 ### `trace-event`
 
@@ -256,6 +262,7 @@ que le `request_id` porté par l'événement annonce une demande déjà tranché
 | `ActionParseError` | champs nommés |
 | `AgentLog` | champs nommés |
 | `LlmCallStarted` | champs nommés |
+| `ProfileRead` | champs nommés |
 | `Retry` | champs nommés |
 | `Thought` | champs nommés |
 | `ToolCallCompleted` | champs nommés |

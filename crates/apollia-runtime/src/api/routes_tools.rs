@@ -208,7 +208,6 @@ mod tests {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -217,11 +216,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: Some(tool_registry),
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -241,6 +242,12 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
 
         Router::new()
@@ -260,7 +267,6 @@ mod tests {
             router_handle,
             registry_handle,
             event_sender: event_tx,
-            agent_loader: std::sync::Arc::new(crate::api::routes_agents::StubAgentLoader),
             backend: MockBackend,
             llm_router: crate::api::server::empty_shared_llm_router(),
             trigger_engine: None,
@@ -269,11 +275,13 @@ mod tests {
             pending_approvals: None,
             plan_gates: None,
             notification_config: None,
-            backend_factory: None,
             tool_registry_handle: None,
-            audit_trail: None,
             audit_journal: None,
+            connection_governance: Default::default(),
+            governance: None,
+            inference_governance: Default::default(),
             obs_config: apollia_core::ObservabilityConfig::default(),
+            config_reload: None,
             llm_call_repository: None,
             trigger_def_repo: None,
             notification_repo: None,
@@ -293,6 +301,12 @@ mod tests {
             resilience_layer: None,
             runner_proxy: None,
             llama_server_supervisor: None,
+            mlx_engine: None,
+            secret_store: crate::inference_servers::default_store_opener(),
+            batches: None,
+            workflows: None,
+            compat_server: None,
+            source_registry: None,
         };
 
         Router::new()
@@ -353,6 +367,28 @@ mod tests {
             !json["sandbox_profile"].is_null(),
             "sandbox_profile must be present"
         );
+    }
+
+    #[tokio::test]
+    async fn api_tools_get_by_name_carries_family_and_source() {
+        // GIVEN a registry with the native tools registered
+        let router = test_router_with_tools().await;
+
+        // WHEN GET /api/v1/tools/http_fetch
+        let req = Request::builder()
+            .uri("/api/v1/tools/http_fetch")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+
+        // THEN the descriptor carries its action family and where it comes from
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["family"], "send_external");
+        assert_eq!(json["family_source"], "builtin");
     }
 
     #[tokio::test]

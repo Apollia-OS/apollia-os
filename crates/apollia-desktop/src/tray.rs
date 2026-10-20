@@ -1,4 +1,4 @@
-//! System tray integration for Apollia OS desktop.
+//! System tray integration for Apollia Desktop.
 //!
 //! Provides a persistent tray icon with a context menu that allows the user to
 //! open the main window, see pending HITL approvals, and quit the application
@@ -14,7 +14,7 @@ use tauri::{AppHandle, Listener, Manager};
 
 use crate::i18n;
 
-/// Tray menu item identifier for "Open Apollia OS".
+/// Tray menu item identifier for "Open Apollia Desktop".
 const MENU_OPEN: &str = "open";
 
 /// Tray menu item identifier for pending approvals display.
@@ -52,9 +52,9 @@ pub fn format_tooltip(active_agents: usize, pending_approvals: usize) -> String 
     }
 
     if parts.is_empty() {
-        "Apollia OS".to_string()
+        "Apollia Desktop".to_string()
     } else {
-        format!("Apollia OS - {}", parts.join(", "))
+        format!("Apollia Desktop - {}", parts.join(", "))
     }
 }
 
@@ -96,6 +96,28 @@ pub(crate) fn close_button_action() -> CloseAction {
     }
 }
 
+/// What quitting does to the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuitPlan {
+    /// The runtime runs in this process: drain it, then exit, which stops its
+    /// child processes.
+    ShutDownEmbedded,
+    /// The runtime is a daemon, a service of the session among others: exit
+    /// and leave it serving. This process spawned no runtime child to orphan.
+    LeaveDaemonServing,
+}
+
+/// The quit for a process that does or does not hold the `embedded` runtime.
+/// The same on every OS: only the close button differs, and on Windows and
+/// Linux it routes to this quit.
+pub(crate) fn quit_plan(embedded: bool) -> QuitPlan {
+    if embedded {
+        QuitPlan::ShutDownEmbedded
+    } else {
+        QuitPlan::LeaveDaemonServing
+    }
+}
+
 /// Shows and focuses the main window.
 ///
 /// Silently ignores errors if the window is not found (defensive; should not
@@ -127,12 +149,26 @@ pub(crate) fn initiate_quit(app: &AppHandle) {
         tracing::warn!(error = %e, "stt.hotkey.unregister.failed");
     }
 
+    // Attached to a daemon, this process owns no runtime: quitting closes the
+    // window and leaves the daemon serving.
+    let embedded_port = app
+        .try_state::<apollia_runtime::embedded::RuntimeHandle>()
+        .map(|runtime| runtime.api_port);
+    let (QuitPlan::ShutDownEmbedded, Some(api_port)) =
+        (quit_plan(embedded_port.is_some()), embedded_port)
+    else {
+        app.exit(0);
+        return;
+    };
+
     let app_handle = app.clone();
     // Fire-and-forget: send POST /api/v1/shutdown then exit
     tauri::async_runtime::spawn(async move {
-        // Best-effort shutdown request to the embedded runtime
+        // Best-effort shutdown request to the embedded runtime, on the port it
+        // serves
         let _ =
-            crate::commands::http_post_json(7771, "/api/v1/shutdown", &serde_json::json!({})).await;
+            crate::commands::http_post_json(api_port, "/api/v1/shutdown", &serde_json::json!({}))
+                .await;
         app_handle.exit(0);
     });
 }
@@ -180,7 +216,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .tooltip("Apollia OS")
+        .tooltip("Apollia Desktop")
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_OPEN => show_main_window(app),
             MENU_QUIT => initiate_quit(app),
@@ -266,7 +302,7 @@ pub fn setup_app_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
         .accelerator("CmdOrCtrl+Q")
         .build(app)?;
 
-    let app_menu = SubmenuBuilder::new(app, "Apollia OS")
+    let app_menu = SubmenuBuilder::new(app, "Apollia Desktop")
         .about(None)
         .separator()
         .services()
@@ -339,7 +375,7 @@ mod tests {
         // WHEN formatting the tooltip
         let tooltip = format_tooltip(0, 0);
         // THEN it shows just the app name
-        assert_eq!(tooltip, "Apollia OS");
+        assert_eq!(tooltip, "Apollia Desktop");
     }
 
     #[test]
@@ -348,7 +384,7 @@ mod tests {
         let tooltip = format_tooltip(1, 0);
         // WHEN the tray tooltip is formatted
         // THEN it uses singular form
-        assert_eq!(tooltip, "Apollia OS - 1 agent active");
+        assert_eq!(tooltip, "Apollia Desktop - 1 agent active");
     }
 
     #[test]
@@ -357,7 +393,7 @@ mod tests {
         let tooltip = format_tooltip(3, 0);
         // WHEN the tray tooltip is formatted
         // THEN it uses plural form
-        assert_eq!(tooltip, "Apollia OS - 3 agents active");
+        assert_eq!(tooltip, "Apollia Desktop - 3 agents active");
     }
 
     #[test]
@@ -366,7 +402,10 @@ mod tests {
         let tooltip = format_tooltip(3, 2);
         // WHEN the tray tooltip is formatted
         // THEN both are shown
-        assert_eq!(tooltip, "Apollia OS - 3 agents active, 2 approvals pending");
+        assert_eq!(
+            tooltip,
+            "Apollia Desktop - 3 agents active, 2 approvals pending"
+        );
     }
 
     #[test]
@@ -375,7 +414,10 @@ mod tests {
         let tooltip = format_tooltip(1, 1);
         // WHEN the tray tooltip is formatted
         // THEN singular forms are used
-        assert_eq!(tooltip, "Apollia OS - 1 agent active, 1 approval pending");
+        assert_eq!(
+            tooltip,
+            "Apollia Desktop - 1 agent active, 1 approval pending"
+        );
     }
 
     #[test]
@@ -384,7 +426,7 @@ mod tests {
         let tooltip = format_tooltip(0, 3);
         // WHEN the tray tooltip is formatted
         // THEN only approvals are shown
-        assert_eq!(tooltip, "Apollia OS - 3 approvals pending");
+        assert_eq!(tooltip, "Apollia Desktop - 3 approvals pending");
     }
 
     #[test]
@@ -410,6 +452,18 @@ mod tests {
         assert_eq!(action, CloseAction::HideToTray);
         #[cfg(not(target_os = "macos"))]
         assert_eq!(action, CloseAction::Quit);
+    }
+
+    #[test]
+    fn test_quitting_while_attached_leaves_the_daemon_serving() {
+        // GIVEN a process attached to the service, and one embedding the runtime
+        // WHEN each quits, from the close button or any other surface
+        let attached = quit_plan(false);
+        let embedded = quit_plan(true);
+        // THEN the attached one leaves the daemon running and the embedded one
+        // shuts its own runtime down
+        assert_eq!(attached, QuitPlan::LeaveDaemonServing);
+        assert_eq!(embedded, QuitPlan::ShutDownEmbedded);
     }
 
     #[test]

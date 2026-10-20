@@ -8,9 +8,11 @@ title: Environment variables
 What the runtime reads from its environment, and what it does with it. The
 tables below cover the `APOLLIA_*` names Apollia defines. Apollia also reads
 standard variables it does not own, where their usual meaning applies:
-`XDG_CONFIG_HOME` and `EDITOR` when the CLI resolves or edits `apollia.toml`,
-`NO_COLOR` for terminal output, `PATH` when it looks for a binary, `TZ`, and
-`USERNAME` on Windows to derive the named pipe. A cloud backend reads whatever
+`EDITOR` when `apollia-os config edit` opens `apollia.toml`, `XDG_CONFIG_HOME`
+when `apollia-os doctor` looks for a configuration file left in a former place
+and when `apollia-os service install` writes a systemd user unit, `NO_COLOR` for
+terminal output, `PATH` when it looks for a binary, `TZ`, and `USERNAME` on
+Windows to derive the named pipe. An OpenAI-compatible backend reads whatever
 variable its `api_key_env` names.
 
 Most configuration belongs in `apollia.toml`, see
@@ -27,19 +29,19 @@ tune and why.
 | Variable | Default | Effect |
 |---|---|---|
 | `APOLLIA_LLAMA_SERVER_BIN` | the engine bundled with the artifact | Absolute path to a `llama-server` binary, which takes precedence over the bundled one. The way to run a build of your own, a CUDA build on Linux among them. |
-| `APOLLIA_LLAMA_MAX_LOADED` | `1` | How many models may stay resident at once. Each extra resident model holds its weights in memory until it is unloaded, so raising the ceiling is an explicit act. A zero or unparseable value keeps the default. |
-| `APOLLIA_LLAMA_N_CTX` | `32768` | Context window in tokens. The default is a fixed value, not read from the model. |
+| `APOLLIA_LLAMA_MAX_LOADED` | *(unset)* | An explicit ceiling on how many models stay resident at once. Unset, the load guardrail decides: a model is judged with the footprints of the resident ones added to its own (see `[llm.guardrails]` in the configuration reference). A zero or unparseable value is ignored. |
+| `APOLLIA_LLAMA_N_CTX` | *(unset)* | Context window in tokens, over every other source. Unset, the window is the preset's, the backend's, then the default of `[llm.defaults]` in `apollia.toml`, and 32768 last. |
 | `APOLLIA_LLAMA_N_GPU_LAYERS` | planned, else `999` | Layers offloaded to the GPU; `0` forces CPU. Left unset, the daemon plans the count from the model file on a discrete GPU, and passes `999` on Apple Silicon or with no GPU. |
 | `APOLLIA_LLAMA_N_BATCH` | engine default | Logical batch size. |
 | `APOLLIA_LLAMA_N_UBATCH` | engine default | Physical micro-batch size. |
-| `APOLLIA_LLAMA_N_PARALLEL` | `1` | Decode slots served concurrently. |
+| `APOLLIA_LLAMA_N_PARALLEL` | planned | Decode slots served concurrently. Unset, the count is planned from the model and the memory, up to `8`; set, it is used as given. |
 | `APOLLIA_LLAMA_CONT_BATCHING` | `true` | Continuous batching. |
 | `APOLLIA_LLAMA_CACHE_TYPE_K` | engine default | KV cache quantization, keys. |
 | `APOLLIA_LLAMA_CACHE_TYPE_V` | engine default | KV cache quantization, values. |
 | `APOLLIA_LLAMA_FLASH_ATTN` | `on` | Flash attention mode. |
 | `APOLLIA_LLAMA_CACHE_REUSE` | engine default | Prefix-reuse threshold. |
 | `APOLLIA_LLAMA_METRICS` | `false` | Exposes the engine's metrics endpoint. |
-| `APOLLIA_LLAMA_LOG_VERBOSITY` | `4` | Engine log level (`-lv`); `4` is where the load names its device and offload tally. |
+| `APOLLIA_LLAMA_LOG_VERBOSITY` | `4` | Engine log level (`-lv`); `4` is where the load names its device and offload tally. Wins over `[engines] log_level` of `apollia.toml` (Settings > Developer). |
 | `APOLLIA_LLAMA_EXTRA_ARGS` | empty | Extra flags passed through verbatim. |
 
 The GGUF the engine loads has no environment override, deliberately. It is
@@ -50,7 +52,7 @@ pinning it would defeat every switch made there.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `APOLLIA_TOKEN_STORAGE` | `keyring` | `keyring` uses the OS keychain. `file` stores secrets as `age`-encrypted files under `~/.apollia/secrets/`, for a headless Linux host where no keyring daemon is reachable. Connector OAuth tokens are outside this switch: they are written to the OS keyring whatever the value here, so a host with no reachable keyring cannot hold them. |
+| `APOLLIA_TOKEN_STORAGE` | `keyring` | `keyring` uses the OS keychain. `file` stores secrets as `age`-encrypted files under `~/.apollia/secrets/`, for a headless Linux host where no keyring daemon is reachable. Connector OAuth tokens follow this switch like every other secret: with `file`, the Google and Microsoft tokens are written there too. Any other value is refused. |
 | `APOLLIA_TOKEN_PASSPHRASE` | none | Passphrase for the `file` backend. **Mandatory when `APOLLIA_TOKEN_STORAGE=file`**: startup fails fast without it, rather than falling back to something weaker. |
 
 ## Connector OAuth clients
@@ -69,15 +71,18 @@ cannot hold. See
 [Connect Google Workspace](/operator-help/integrations/connect-google-workspace)
 and [Set up a Google OAuth client](/how-to/set-up-a-google-oauth-client).
 
-Either way, the supported route is Settings → OAuth integrations, which writes
-`~/.apollia/oauth-clients.toml`.
+Either way, the supported route is the page of the connection, in Connections.
+The client id entered there is written to `~/.apollia/oauth-clients.toml`; the
+client secret and the Google API key go to the secret store selected above,
+never to that file.
 
 <!-- claim:oauth-client-resolution-order -->
-The variables below are the third way in, ahead of that file, for a shell
-session, a CI job, or a host with no interface. They are read at process start,
-so they only reach an Apollia launched from the shell that exported them.
-Resolution order for each credential: environment variable, then
-`oauth-clients.toml`, then the build-time constant.
+The variables below are the other way in, ahead of what the page saved, for a
+shell session, a CI job, or a host with no interface. They are read at process
+start, so they only reach an Apollia launched from the shell that exported them.
+Resolution order for each credential: environment variable, then the value the
+page saved (`oauth-clients.toml` for a client id, the secret store for a secret
+or an API key), then the build-time constant.
 
 | Variable | Effect |
 |---|---|
@@ -89,11 +94,32 @@ Resolution order for each credential: environment variable, then
 | `APOLLIA_MICROSOFT_API_KEY` | API key, same role as above. Unused today. |
 | `APOLLIA_FIGMA_CLIENT_ID` | Client id for the Figma connector. |
 
+## Connections
+
+| Variable | Default | Effect |
+|---|---|---|
+| `APOLLIA_MCP_REGISTRY_URL` | `https://registry.modelcontextprotocol.io` | Address of the MCP registry the public catalogue is read from. Set it to point Apollia at a private registry. An empty value leaves the default in place. |
+| `APOLLIA_IMAP_PASSWORD` | none | Application password read by `apollia-os connector imap` when `--password-stdin` is not given. The password is never taken from the command line. |
+
+## Python and the MLX engine
+
+Paths that depend on the machine. A packaged install sets or finds them on its
+own; they matter when Apollia runs from a source tree or beside a bundle that is
+not where it expects it.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `APOLLIA_BUNDLED_PYTHON` | found beside the executable | Absolute path of the bundled Python interpreter. The desktop application exports it at startup. |
+| `APOLLIA_PYTHON_BUNDLE_DIR` | found beside the executable | Directory the bundled Python interpreter sits in. The command-line launchers export it instead of the variable above; both are read. |
+| `APOLLIA_MLX_ENGINE_DIR` | the newest MLX environment installed, else the bundled one | Directory holding the packages of the MLX engine. |
+| `APOLLIA_MLX_PYTHON` | the bundled interpreter | Python interpreter the MLX engine runs on. |
+
 ## Diagnostics
 
 | Variable | Default | Effect |
 |---|---|---|
 | `APOLLIA_PERF_TRACE` | unset | Path to a file receiving a per-turn performance record. Unset means no file is written and no provenance is gathered; the summary is emitted at `INFO` either way. |
+| `APOLLIA_PERF_MODEL_SHA256` | unset | Digest of the model file, written as given into the performance record instead of being computed. For a measurement campaign that reloads the same large model many times. |
 | `RUST_LOG` | `apollia=info` | Standard `tracing` filter. `apollia=trace` is what makes `[llm.observability] debug_log_prompt` visible; see [Configuration](/reference/configuration). |
 
 ## Desktop automation
@@ -101,12 +127,15 @@ Resolution order for each credential: environment variable, then
 `APOLLIA_AUTOMATION`, `APOLLIA_AUTOMATION_OUT` and
 `APOLLIA_AUTOMATION_ALLOW_DESTRUCTIVE` drive the development-only gestural test
 harness. They have no effect in a release build, where the harness is compiled
-out.
+out. `APOLLIA_POLICY_DIR`, which points the runtime at another organisation
+policy folder, follows the same rule: it is read in debug builds only.
 
 ## Not read by the runtime
 
 `APOLLIA_BUILD_*` variables are read at compile time, not at runtime; setting
-one before launching Apollia does nothing.
+one before launching Apollia does nothing. `APOLLIA_PYTHON` is of the same kind:
+it names the Python interpreter the desktop build runs to pack the documentation
+the application embeds.
 
 They are a hook for rebuilding Apollia from source against your own registered
 application, a fleet deployment being the obvious case: set them in the build

@@ -7,10 +7,12 @@
  *
  * Replaces the previous 3-second polling loop.
  */
+import { applyModelLoadEvent, modelLoadEventOf, modelLoads } from "./modelLoads";
 import { writable, get } from "svelte/store";
 import { t } from "svelte-i18n";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
+import { listLlmBackends } from "$lib/ipc/llm";
 import {
   isPermissionGranted,
   requestPermission,
@@ -26,6 +28,7 @@ import type {
   ChatSessionSummary,
 } from "$lib/types";
 import { onboardingStore } from "./onboarding";
+import { notifyBatchEvent } from "./batchNotifications";
 import { refreshSttStatus, refreshTranscriptions } from "./stt";
 import {
   appendGlobalToken,
@@ -144,14 +147,20 @@ async function refreshTasksViaIpc(): Promise<boolean> {
 
 async function refreshLlmBackendsViaIpc(): Promise<boolean> {
   try {
-    const result: LlmBackendConfig[] = await invoke("list_llm_backends");
-    llmBackends.set(result);
+    llmBackends.set(await listLlmBackends());
     llmBackendsHydrated.set(true);
     return true;
   } catch {
     // runtime not ready yet - keep current state, stay un-hydrated
     return false;
   }
+}
+
+// Force an immediate agent-list refresh, for a surface that must not take the
+// list it holds for the truth: a conversation opened right after its agent was
+// installed. Resolves to whether the runtime answered.
+export async function refreshAgents(): Promise<boolean> {
+  return refreshAgentsViaIpc();
 }
 
 // Force an immediate backend-list refresh (used by surfaces that must not wait
@@ -198,7 +207,7 @@ async function refreshPendingApprovalsViaIpc(): Promise<boolean> {
   }
 }
 
-async function refreshChatSessionsViaIpc(): Promise<boolean> {
+export async function refreshChatSessionsViaIpc(): Promise<boolean> {
   try {
     const result: ChatSessionSummary[] = await invoke("list_chat_sessions");
     chatSessions.set(result);
@@ -363,6 +372,12 @@ function handleChatApprovalRequired(event: TauriRuntimeEvent): void {
     toolCallId: asString(p.tool_call_id),
     toolName: asString(p.tool_name),
     inputPreview: asString(p.prompt),
+    answers: Array.isArray(p.answers)
+      ? p.answers.filter((a): a is string => typeof a === "string")
+      : undefined,
+    detail: asString(p.detail),
+    code: asOptionalString(p.code) ?? null,
+    workingDir: asOptionalString(p.working_dir) ?? null,
     receivedAt: new Date().toISOString(),
   });
   void sendChatApprovalNotification(sessionId, asString(p.tool_name, "tool"));
@@ -586,9 +601,11 @@ function dispatchEvent(event: TauriRuntimeEvent): void {
       break;
     }
     case "task-changed":
+      void notifyBatchEvent(event);
       void refreshTasksViaIpc();
       break;
     case "approval-changed":
+      void notifyBatchEvent(event);
       void refreshPendingApprovalsViaIpc();
       void refreshTasksViaIpc();
       break;
@@ -601,6 +618,8 @@ function dispatchEvent(event: TauriRuntimeEvent): void {
           sessionBudget.set(budget);
         }
       } else {
+        const load = modelLoadEventOf(event.event_type, event.payload);
+        if (load) modelLoads.update((loads) => applyModelLoadEvent(loads, load));
         void refreshLlmBackendsViaIpc();
       }
       break;

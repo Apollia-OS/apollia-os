@@ -31,8 +31,8 @@
 #   APOLLIA_SEED_PROJECT_ROOT  what the seeded project rows point at. Defaults to
 #                              this checkout. Override it before a public
 #                              screenshot run: that path is displayed on the
-#                              project pages, the permission cards and the audit
-#                              trail, and it is your machine's path.
+#                              project pages and the permission cards, and it is
+#                              your machine's path.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,11 +76,8 @@ trap 'rm -rf "$STAGE"' EXIT
 APOLLIA_SEED_HOME_ALIAS="$(dirname "$APOLLIA_DIR")" \
   bash "$HERE/build-seed.sh" "$STAGE" >/dev/null
 mkdir -p "$(dirname "$APOLLIA_DIR")"
-# Only `.apollia` moves. build-seed.sh also drops a copy of apollia.toml under
-# the staging `.config/apollia/`, which is deliberately left behind: the desktop
-# resolves `~/.apollia/apollia.toml` first (main.rs), that copy travels inside
-# the directory being moved, and writing into the operator's real
-# `~/.config/apollia` would be a side effect unload.sh could not undo.
+# Only `.apollia` moves, and apollia.toml travels inside it: every surface reads
+# `~/.apollia/apollia.toml` and nothing else.
 mv "$STAGE/.apollia" "$APOLLIA_DIR"
 
 # Check the seed that was just put in place, not the profile that used to be
@@ -107,8 +104,8 @@ fi
 echo ""
 echo "Two things to know before you shoot:"
 echo "  - Timestamps are relative to the moment of this build, so the timeline"
-echo "    and the audit trail have entries inside their default windows. Reload"
-echo "    the seed if you come back to it days later."
+echo "    has entries inside its default window. Reload the seed if you come"
+echo "    back to it days later."
 echo "  - The inbox pending list cannot be seeded: it lives in the runtime's"
 echo "    memory, not in a database. To photograph it, provoke an approval."
 echo ""

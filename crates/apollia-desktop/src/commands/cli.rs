@@ -35,7 +35,7 @@ pub struct CliStatus {
 }
 
 /// Resolves the path to the bundled CLI binary inside the app resources.
-fn bundled_cli_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+pub(crate) fn bundled_cli_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok()?;
     let candidate = resource_dir.join(CLI_BINARY_NAME);
     if candidate.exists() {
@@ -270,12 +270,12 @@ mod tests {
     #[test]
     fn a_single_quote_cannot_close_the_literal() {
         // GIVEN a directory name carrying a single quote, which users write with
-        // no attacker involved: "Nidal's Apps", "Disque d'Elise"
-        let path = "/Users/x/Nidal's Apps/Apollia.app";
+        // no attacker involved: "Ada's Apps", "Disque d'Elise"
+        let path = "/Users/x/Ada's Apps/Apollia.app";
         // WHEN it is quoted
         let quoted = sh_quote(path);
         // THEN the literal is closed, the quote escaped, the literal reopened
-        assert_eq!(quoted, r"'/Users/x/Nidal'\''s Apps/Apollia.app'");
+        assert_eq!(quoted, r"'/Users/x/Ada'\''s Apps/Apollia.app'");
     }
 
     #[test]

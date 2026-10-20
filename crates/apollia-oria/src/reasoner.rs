@@ -94,7 +94,26 @@ const MAX_ATTEMPTS: u32 = 3;
 // (English, single source of truth). Placeholders are filled via
 // `apollia_prompts::render` in `build_system_prompt` / `replan`.
 
+mod plan_text;
+use plan_text::{grounded, last_plan_object, model_step_hint};
+
 // Reasoner
+
+/// The most a plan answer may generate.
+///
+/// A plan is asked without free reasoning: the model writes the JSON of a
+/// few steps, a few hundred tokens. With reasoning, preparing a plan took
+/// about 30 seconds of a batch item (some 6,000 tokens at 200 tokens per
+/// second) and a loop ran until the engine gave up; the cap keeps a plan to
+/// a few seconds and ends a runaway answer early.
+const PLAN_MAX_TOKENS: u32 = 2_048;
+
+/// The temperature a plan is asked at when the caller sets none: a plan is a
+/// structured answer, wanted the same for the same request.
+const PLAN_TEMPERATURE: f32 = 0.2;
+
+/// The turn that asks for the alternative plan the replanner prompt describes.
+const REPLAN_REQUEST: &str = "Return the alternative plan as JSON only.";
 
 /// Produces and validates [`ExecutionPlan`]s via an LLM call.
 ///
@@ -115,6 +134,9 @@ pub struct Reasoner {
     /// `DecisionPointRecorded`. Opt-in via the
     /// `routines.decision_branches` toggle.
     meta_orchestrator: Option<MetaOrchestratorHandle>,
+    /// What the planner is told besides the task: the files the agent can
+    /// reach, for one. Never part of the steps or of the answer.
+    notes: Option<String>,
 }
 
 impl Reasoner {
@@ -128,7 +150,15 @@ impl Reasoner {
             max_steps,
             event_bus: None,
             meta_orchestrator: None,
+            notes: None,
         }
+    }
+
+    /// Tell the planner `notes` with every plan and replan it is asked.
+    #[must_use]
+    pub fn with_notes(mut self, notes: String) -> Self {
+        self.notes = Some(notes);
+        self
     }
 
     /// Attach an `EventBusSender` to emit the transparency events
@@ -363,12 +393,17 @@ impl Reasoner {
             };
 
             let response = match self
-                .model
-                .complete(CompletionRequest {
-                    messages: vec![ChatMessage::system(system), ChatMessage::user(user)],
-                    temperature,
-                    ..Default::default()
-                })
+                .complete_recorded(
+                    CompletionRequest {
+                        messages: vec![ChatMessage::system(system), ChatMessage::user(user)],
+                        temperature: temperature.or(Some(PLAN_TEMPERATURE)),
+                        max_tokens: Some(PLAN_MAX_TOKENS),
+                        thinking: Some(false),
+                        ..Default::default()
+                    },
+                    &turn_id,
+                    "plan",
+                )
                 .await
             {
                 Ok(r) => r,
@@ -386,7 +421,10 @@ impl Reasoner {
             total_tokens = total_tokens.saturating_add(response.usage.completion_tokens);
             last_raw.clone_from(&response.content);
 
-            match self.parse_and_validate(&response.content, &ctx.task.task_id) {
+            match self
+                .parse_and_validate(&response.content, &ctx.task.task_id)
+                .and_then(|plan| grounded(plan, &ctx.available_tools))
+            {
                 Ok(plan) => {
                     tracing::info!(
                         attempt = attempt + 1,
@@ -422,8 +460,8 @@ impl Reasoner {
     /// Generates only the remaining steps, accounting for the completed steps'
     /// outputs (`completed_outputs`) and the failure reason of `failed_step_id`.
     ///
-    /// A single LLM call without its own retry: replan retry management is the
-    /// `ActorLoop`'s responsibility.
+    /// An answer of the wrong shape is asked again up to [`MAX_ATTEMPTS`] times
+    /// with its fault; how many replans a task may make is the `ActorLoop`'s.
     pub async fn replan(
         &self,
         ctx: &ContextBundle,
@@ -434,6 +472,12 @@ impl Reasoner {
         let original_plan_json = serde_json::to_string(&ctx.task).unwrap_or_default();
         let completed_steps_json = serde_json::to_string(completed_outputs).unwrap_or_default();
 
+        let tool_names = if ctx.available_tools.is_empty() {
+            "No tools available.".to_string()
+        } else {
+            ctx.available_tools.join(", ")
+        };
+        let max_steps = self.max_steps.to_string();
         let system = apollia_prompts::render(
             apollia_prompts::blocks::REPLANNER_SYSTEM_PROMPT,
             &[
@@ -441,29 +485,98 @@ impl Reasoner {
                 ("completed_steps_json", completed_steps_json.as_str()),
                 ("failed_step_id", failed_step_id),
                 ("error_message", error_message),
+                ("max_steps", max_steps.as_str()),
+                ("tool_names", tool_names.as_str()),
             ],
         );
 
-        let response = self
-            .model
-            .complete(CompletionRequest {
-                messages: vec![ChatMessage::system(system)],
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| ReasonerError::LlmFailed(e.to_string()))?;
+        // An answer of the wrong shape is asked again, with its fault, as the
+        // first plan is: one malformed answer no longer ends the task.
+        let mut last_error = String::new();
+        for attempt in 0..MAX_ATTEMPTS {
+            // The system message alone is not a conversation: a chat template
+            // that looks for the user's query (the Qwen ones do) refuses it,
+            // and the engine answers 500 on every attempt.
+            let request = match &self.notes {
+                Some(notes) => format!("{REPLAN_REQUEST}\n\n{notes}"),
+                None => REPLAN_REQUEST.to_string(),
+            };
+            let user = if attempt == 0 {
+                request
+            } else {
+                format!(
+                    "{request}\n\nWARNING: your previous response was invalid.\nError: {last_error}\nFix it and return valid JSON only."
+                )
+            };
+            let response = self
+                .complete_recorded(
+                    CompletionRequest {
+                        messages: vec![
+                            ChatMessage::system(system.clone()),
+                            ChatMessage::user(user),
+                        ],
+                        temperature: Some(PLAN_TEMPERATURE),
+                        max_tokens: Some(PLAN_MAX_TOKENS),
+                        thinking: Some(false),
+                        ..Default::default()
+                    },
+                    ctx.task.task_id.as_str(),
+                    "replan",
+                )
+                .await
+                .map_err(|e| ReasonerError::LlmFailed(e.to_string()))?;
 
-        self.parse_and_validate(&response.content, &ctx.task.task_id)
-            .map_err(|e| ReasonerError::PlanParseError {
-                attempts: 1,
-                reason: e.to_string(),
-            })
+            match self
+                .parse_and_validate_after(&response.content, &ctx.task.task_id, completed_outputs)
+                .and_then(|plan| grounded(plan, &ctx.available_tools))
+            {
+                Ok(plan) => return Ok(plan),
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "plan.replan.invalid");
+                    last_error = e.to_string();
+                }
+            }
+        }
+        Err(ReasonerError::PlanParseError {
+            attempts: MAX_ATTEMPTS,
+            reason: last_error,
+        })
+    }
+
+    /// One call of the planner, recorded on the bus as every model call of a
+    /// run is: under the task, with its phase (`plan`, `replan`), so the time a
+    /// plan takes is measured rather than guessed.
+    async fn complete_recorded(
+        &self,
+        request: CompletionRequest,
+        task_id: &str,
+        phase: &str,
+    ) -> Result<apollia_llm::CompletionResponse, apollia_llm::LlmError> {
+        let started = std::time::Instant::now();
+        let response = self.model.complete(request).await?;
+        if let Some(bus) = &self.event_bus {
+            let context = apollia_llm::CallContext {
+                session_id: task_id.to_owned(),
+                turn_id: phase.to_owned(),
+            };
+            let measure = apollia_llm::CallMeasure::of_response(
+                &response,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+            let _ = bus.send(apollia_llm::call_completed_event(
+                self.model.backend_name(),
+                self.model.model_id(),
+                Some(&context),
+                &measure,
+            ));
+        }
+        Ok(response)
     }
 
     /// Validate a raw JSON plan returned by the LLM.
     ///
     /// 6 sequential validations, returning `Err` at the first problem encountered:
-    /// 1. Strip any Markdown backticks and parse the JSON
+    /// 1. Strip any reasoning block and Markdown backticks, and parse the JSON
     /// 2. Deserialize the [`PlanStep`] array from the `"steps"` field
     /// 3. Check that all `step_id`s are unique
     /// 4. Check that each `depends_on` references a `step_id` present in the plan
@@ -476,20 +589,45 @@ impl Reasoner {
         raw: &str,
         task_id: &str,
     ) -> Result<ExecutionPlan, PlanValidationError> {
-        // 1. Strip Markdown backticks and trim whitespace
-        let clean = raw
+        self.parse_and_validate_after(raw, task_id, &HashMap::new())
+    }
+
+    /// [`parse_and_validate`](Self::parse_and_validate) for a plan that
+    /// follows the steps in `done`: a dependency on one of them is already
+    /// met, and is dropped rather than refused as unknown.
+    fn parse_and_validate_after(
+        &self,
+        raw: &str,
+        task_id: &str,
+        done: &HashMap<String, String>,
+    ) -> Result<ExecutionPlan, PlanValidationError> {
+        // 1. Strip the reasoning blocks, then Markdown backticks and whitespace
+        let without_reasoning = strip_reasoning(raw);
+        let clean = without_reasoning
             .trim()
             .trim_start_matches("```json")
             .trim_start_matches("```")
             .trim_end_matches("```")
             .trim();
 
-        // 2. Parse JSON and extract steps array
-        let parsed: serde_json::Value = serde_json::from_str(clean)
-            .map_err(|e| PlanValidationError::InvalidJson(e.to_string()))?;
+        // 2. Parse JSON and extract steps array. A model whose reasoning is
+        // not set apart writes it in the clear before the plan: the plan is
+        // the last object of the answer that holds the steps.
+        let parsed: serde_json::Value = match serde_json::from_str(clean) {
+            Ok(value) => value,
+            Err(e) => last_plan_object(clean)
+                .ok_or_else(|| PlanValidationError::InvalidJson(e.to_string()))?,
+        };
 
         let mut steps: Vec<PlanStep> = serde_json::from_value(parsed["steps"].clone())
             .map_err(|e| PlanValidationError::InvalidStructure(e.to_string()))?;
+        let ids: std::collections::HashSet<String> =
+            steps.iter().map(|s| s.step_id.clone()).collect();
+        for step in &mut steps {
+            step.tool_hint = model_step_hint(step.tool_hint.take());
+            step.depends_on
+                .retain(|dep| ids.contains(dep) || !done.contains_key(dep));
+        }
 
         // 3-5. Unique ids, existing dependencies, no cycle.
         validate_steps(&steps)?;
@@ -542,19 +680,12 @@ impl Reasoner {
             },
         );
 
-        let llm_backend_names = if ctx.llm_backend_names.is_empty() {
-            "No LLM models available.".to_string()
-        } else {
-            ctx.llm_backend_names.join(", ")
-        };
-
         let max_steps = self.max_steps.to_string();
         apollia_prompts::render(
             apollia_prompts::blocks::PLANNER_SYSTEM_PROMPT,
             &[
                 ("max_steps", max_steps.as_str()),
                 ("tool_names", tool_names.as_str()),
-                ("llm_backend_names", llm_backend_names.as_str()),
                 ("memory_summary", memory_summary.as_str()),
                 ("recent_history", ""),
             ],
@@ -582,8 +713,41 @@ impl Reasoner {
             .collect::<Vec<_>>()
             .join("\n");
 
-        format!("Agent system prompt:\n{system_prompt}\n\nTask: {task_input}")
+        match &self.notes {
+            Some(notes) => {
+                format!("Agent system prompt:\n{system_prompt}\n\nTask: {task_input}\n\n{notes}")
+            }
+            None => format!("Agent system prompt:\n{system_prompt}\n\nTask: {task_input}"),
+        }
     }
+}
+
+/// `raw` without its reasoning: every `<think>...</think>` block, and an
+/// unclosed `<think>` with all that follows it.
+///
+/// An OpenAI-compatible server that separates the reasoning of a thinking
+/// model returns it apart from the content, and the client puts it back in
+/// front, inside these tags. The plan is what comes after.
+fn strip_reasoning(raw: &str) -> std::borrow::Cow<'_, str> {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+    if !raw.contains(OPEN) {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    let mut kept = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find(OPEN) {
+        kept.push_str(&rest[..start]);
+        match rest[start + OPEN.len()..].find(CLOSE) {
+            Some(end) => rest = &rest[start + OPEN.len() + end + CLOSE.len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    kept.push_str(rest);
+    std::borrow::Cow::Owned(kept)
 }
 
 // ─────────────────────────────────────────────
@@ -628,6 +792,8 @@ mod tests {
         queue: Mutex<VecDeque<String>>,
         fallback: String,
         call_count: AtomicU32,
+        roles: Mutex<Vec<Vec<apollia_llm::Role>>>,
+        limits: Mutex<Vec<Option<u32>>>,
     }
 
     impl MockCompletionModel {
@@ -636,6 +802,8 @@ mod tests {
                 queue: Mutex::new(responses.iter().map(|s| s.to_string()).collect()),
                 fallback: "{}".to_string(),
                 call_count: AtomicU32::new(0),
+                roles: Mutex::new(Vec::new()),
+                limits: Mutex::new(Vec::new()),
             })
         }
 
@@ -646,8 +814,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl CompletionModel for MockCompletionModel {
-        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.roles
+                .lock()
+                .expect("mock lock poisoned")
+                .push(req.messages.iter().map(|m| m.role.clone()).collect());
+            self.limits
+                .lock()
+                .expect("mock lock poisoned")
+                .push(req.max_tokens);
             let content = {
                 let mut q = self.queue.lock().expect("mock lock poisoned");
                 q.pop_front().unwrap_or_else(|| self.fallback.clone())
@@ -839,6 +1015,167 @@ mod tests {
         assert_eq!(model.calls(), 1);
     }
 
+    #[test]
+    fn test_a_step_hinted_llm_in_any_case_runs_on_the_model() {
+        // GIVEN a plan whose reasoning steps name the model in several ways
+        let reasoner = Reasoner::new(MockCompletionModel::sequence(vec![]), 10);
+        let raw = r#"{"steps":[
+            {"step_id":"s1","description":"Read","tool_hint":"file_read","depends_on":[]},
+            {"step_id":"s2","description":"Compare","tool_hint":"LLM","depends_on":["s1"]},
+            {"step_id":"s3","description":"Decide","tool_hint":" none ","depends_on":["s2"]}
+        ]}"#;
+
+        // WHEN it is read
+        let plan = reasoner
+            .parse_and_validate(raw, "task-001")
+            .expect("a plan");
+
+        // THEN the tool stays a tool, and both reasoning steps run on the model
+        let hints: Vec<Option<&str>> = plan.steps.iter().map(|s| s.tool_hint.as_deref()).collect();
+        assert_eq!(hints, vec![Some("file_read"), Some("llm"), Some("llm")]);
+    }
+
+    #[test]
+    fn test_a_plan_written_after_clear_reasoning_is_read() {
+        // GIVEN an answer that reasons in the clear, quotes a brace, then plans
+        let reasoner = Reasoner::new(MockCompletionModel::sequence(vec![]), 10);
+        let raw = "Here's a thinking process:\n1. The user wants {an audit}.\n2. Output JSON.\n\n\
+                   {\"steps\":[{\"step_id\":\"s1\",\"description\":\"Read \\\"the\\\" quote }\",\"depends_on\":[]}]}";
+
+        // WHEN it is read
+        let plan = reasoner
+            .parse_and_validate(raw, "task-001")
+            .expect("the plan");
+
+        // THEN the plan at the end of the answer is the one taken
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].description, "Read \"the\" quote }");
+    }
+
+    #[tokio::test]
+    async fn test_a_replan_may_depend_on_a_step_already_done() {
+        // GIVEN a model whose replan depends on s1, which already completed
+        let model = MockCompletionModel::sequence(vec![
+            r#"{"steps":[{"step_id":"s2","description":"Compare","depends_on":["s1"]}]}"#,
+        ]);
+        let reasoner = Reasoner::new(model.clone(), 10);
+        let done = HashMap::from([("s1".to_string(), "conditions".to_string())]);
+
+        // WHEN the alternative plan is read
+        let plan = reasoner
+            .replan(&ContextBundle::default(), &done, "s2", "failed")
+            .await
+            .expect("the plan");
+
+        // THEN the dependency on the done step is met, not refused as unknown
+        assert!(plan.steps[0].depends_on.is_empty());
+        assert_eq!(model.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_a_plan_naming_an_unknown_tool_is_asked_again_and_an_alias_is_read() {
+        // GIVEN an agent holding file_read, a first plan naming an invented
+        // tool, then one naming read_file
+        let model = MockCompletionModel::sequence(vec![
+            r#"{"steps":[{"step_id":"s1","description":"Read","tool_hint":"open_pdf","depends_on":[]}]}"#,
+            r#"{"steps":[{"step_id":"s1","description":"Read","tool_hint":"read_file","depends_on":[]}]}"#,
+        ]);
+        let reasoner = Reasoner::new(model.clone(), 10);
+        let ctx = ContextBundle {
+            available_tools: vec!["conn:folder:abc/file_read".to_string()],
+            ..ContextBundle::default()
+        };
+
+        // WHEN a plan is asked for
+        let plan = reasoner.plan(&ctx).await.expect("a plan");
+
+        // THEN the invented tool was refused before anything ran, and the
+        // alias was read as the tool the agent holds
+        assert_eq!(model.calls(), 2);
+        assert_eq!(plan.steps[0].tool_hint.as_deref(), Some("file_read"));
+    }
+
+    #[test]
+    fn test_the_planner_is_told_its_notes_with_the_task() {
+        // GIVEN a reasoner told the files the agent can reach
+        let reasoner = Reasoner::new(MockCompletionModel::sequence(vec![]), 10)
+            .with_notes("FILES THE AGENT CAN REACH:\n- Quotes/quote-01.pdf".to_string());
+
+        // WHEN the planner's turn is written
+        let turn = reasoner.build_user_prompt(&ContextBundle::default());
+
+        // THEN the files are in it
+        assert!(turn.contains("- Quotes/quote-01.pdf"), "{turn}");
+    }
+
+    #[tokio::test]
+    async fn test_a_replan_of_the_wrong_shape_is_asked_again() {
+        // GIVEN a model whose first replan lacks the step ids, then is right
+        let model = MockCompletionModel::sequence(vec![
+            r#"{"steps":[{"description":"Read the folder"}]}"#,
+            r#"{"steps":[{"step_id":"s2","description":"Read the folder","depends_on":[]}]}"#,
+        ]);
+        let reasoner = Reasoner::new(model.clone(), 10);
+
+        // WHEN an alternative plan is asked for
+        let plan = reasoner
+            .replan(
+                &ContextBundle::default(),
+                &HashMap::new(),
+                "s1",
+                "not found",
+            )
+            .await;
+
+        // THEN the second answer is taken, and the task does not end on the first
+        let plan = plan.expect("the corrected plan");
+        assert_eq!(plan.steps[0].step_id, "s2");
+        assert_eq!(model.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_plan_and_replan_answers_are_capped() {
+        // GIVEN a reasoner whose model records the token limit of each request
+        let plan = r#"{"steps":[{"step_id":"s1","description":"Read","depends_on":[]}]}"#;
+        let model = MockCompletionModel::sequence(vec![plan, plan]);
+        let reasoner = Reasoner::new(model.clone(), 10);
+        let ctx = ContextBundle::default();
+
+        // WHEN a plan, then an alternative plan, are asked for
+        reasoner.plan(&ctx).await.expect("a plan");
+        reasoner
+            .replan(&ctx, &HashMap::new(), "s1", "refused")
+            .await
+            .expect("a plan");
+
+        // THEN both requests carry the cap, so a looping reasoning ends
+        let limits = model.limits.lock().expect("mock lock poisoned").clone();
+        assert_eq!(limits, vec![Some(PLAN_MAX_TOKENS), Some(PLAN_MAX_TOKENS)]);
+    }
+
+    #[tokio::test]
+    async fn test_replan_asks_with_a_user_turn_after_the_system_prompt() {
+        // GIVEN a reasoner whose model records the roles of each request
+        let model = MockCompletionModel::sequence(vec![
+            r#"{"steps":[{"step_id":"s2","description":"Retry","depends_on":[]}]}"#,
+        ]);
+        let reasoner = Reasoner::new(model.clone(), 10);
+
+        // WHEN a step failed and an alternative plan is asked for
+        reasoner
+            .replan(&ContextBundle::default(), &HashMap::new(), "s1", "refused")
+            .await
+            .expect("a plan");
+
+        // THEN the request is a system prompt followed by a user turn, the
+        // shape every chat template accepts
+        let roles = model.roles.lock().expect("mock lock poisoned").clone();
+        assert_eq!(
+            roles,
+            vec![vec![apollia_llm::Role::System, apollia_llm::Role::User]]
+        );
+    }
+
     // Markdown backticks stripped
 
     /// GIVEN an LLM response with Markdown backticks
@@ -856,6 +1193,32 @@ mod tests {
         // THEN
         assert!(result.is_ok());
         assert_eq!(result.unwrap().steps[0].step_id, "s1");
+    }
+
+    #[test]
+    fn test_a_plan_after_a_reasoning_block_is_read() {
+        // GIVEN the content of a thinking model, its reasoning put in front
+        let reasoner = Reasoner::new(MockCompletionModel::sequence(vec![]), 10);
+        let raw = "<think>The user wants one step.\nI will read the file.</think>\n\n{\"steps\":[{\"step_id\":\"s1\",\"description\":\"d\",\"depends_on\":[]}]}";
+
+        // WHEN it is parsed as a plan
+        let result = reasoner.parse_and_validate(raw, "task-001");
+
+        // THEN the plan that follows the reasoning is read
+        assert_eq!(result.expect("plan").steps[0].step_id, "s1");
+    }
+
+    #[test]
+    fn test_a_reasoning_block_left_open_is_not_read_as_a_plan() {
+        // GIVEN a reasoning block that never closes, a plan-like text inside it
+        let reasoner = Reasoner::new(MockCompletionModel::sequence(vec![]), 10);
+        let raw = "<think>maybe {\"steps\":[]}";
+
+        // WHEN it is parsed as a plan
+        let result = reasoner.parse_and_validate(raw, "task-001");
+
+        // THEN nothing is left to read, and the answer is refused
+        assert!(matches!(result, Err(PlanValidationError::InvalidJson(_))));
     }
 
     // Cardinality ceiling: max_steps is enforced, not only a prompt hint.
@@ -1012,22 +1375,20 @@ mod tests {
         assert_eq!(steps[0].model_hint, Some("fast-7b".to_string()));
     }
 
-    // ─── Prompt contient {llm_backend_names} ───
-
     /// GIVEN the shared PLANNER_SYSTEM_PROMPT block
     /// WHEN inspecting its content
-    /// THEN it carries the {llm_backend_names} placeholder and a model_hint hint
+    /// THEN it offers no model to pick and asks for no model per step
     #[test]
-    fn test_prompt_contains_llm_backend_names_placeholder() {
-        // GIVEN / WHEN / THEN
-        assert!(
-            apollia_prompts::blocks::PLANNER_SYSTEM_PROMPT.contains("{llm_backend_names}"),
-            "PLANNER_SYSTEM_PROMPT must contain {{llm_backend_names}} placeholder"
-        );
-        assert!(
-            apollia_prompts::blocks::PLANNER_SYSTEM_PROMPT.contains("model_hint"),
-            "PLANNER_SYSTEM_PROMPT must mention model_hint"
-        );
+    fn test_planner_prompt_names_no_model_per_step() {
+        // GIVEN
+        let prompt = apollia_prompts::blocks::PLANNER_SYSTEM_PROMPT;
+
+        // WHEN
+        let offers_models = prompt.contains("{llm_backend_names}");
+        let asks_for_a_model = prompt.contains("model_hint");
+
+        // THEN
+        assert!(!offers_models && !asks_for_a_model);
     }
 
     // Two plans generated in parallel
@@ -1093,6 +1454,19 @@ mod tests {
                 assert!(ts_ms > 0);
             }
             other => panic!("expected ThinkingStarted, got {other:?}"),
+        }
+        // The plan call is recorded between the two, under the task, as `plan`.
+        let recorded = rx.recv().await.expect("recorded");
+        match recorded {
+            RuntimeEvent::LlmCallCompleted {
+                session_id,
+                turn_id,
+                ..
+            } => {
+                assert_eq!(session_id.as_deref(), Some("turn-xyz"));
+                assert_eq!(turn_id.as_deref(), Some("plan"));
+            }
+            other => panic!("expected LlmCallCompleted, got {other:?}"),
         }
         let ended = rx.recv().await.expect("ended");
         match ended {

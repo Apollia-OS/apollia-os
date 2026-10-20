@@ -2,9 +2,9 @@
  * Command palette action catalogue.
  *
  * Builds the static list of navigation and command actions offered by
- * the palette. Actions carry an optional `persona` tag so the palette
- * can hide builder-only actions from operator mode (and vice versa),
- * and an optional `shortcut` rendered as kbd chips.
+ * the palette. Actions carry an optional `developer` flag so the palette
+ * hides technical actions while the developer mode is off, and an optional
+ * `shortcut` rendered as kbd chips.
  *
  * Runtime-derived groups (Sessions, Settings sub-routes, Recently used)
  * live in `paletteIndex.ts` - this module is static data only.
@@ -12,10 +12,8 @@
 import { get } from "svelte/store";
 import { t } from "svelte-i18n";
 import {
-  LayoutDashboard,
   Bot,
-  Compass,
-  ListChecks,
+  Code,
   MessageSquare,
   ShieldCheck,
   Plug,
@@ -26,10 +24,6 @@ import {
   Activity,
   Settings as SettingsIcon,
   Mic,
-  FolderOpen,
-  Plus,
-  Play,
-  Square,
   Moon,
   Terminal,
   RefreshCcw,
@@ -38,6 +32,10 @@ import {
   ToggleRight,
   Keyboard,
   Info,
+  Library,
+  KeyRound,
+  ScrollText,
+  Layers,
 } from "lucide-svelte";
 // NOSONAR typescript:S1874 - Svelte 4 ComponentType retained for lucide-svelte compat
 import type { ComponentType } from "svelte"; // NOSONAR typescript:S1874
@@ -50,10 +48,9 @@ import type { ComponentType } from "svelte"; // NOSONAR typescript:S1874
 type SvelteComponentType = ComponentType; // NOSONAR typescript:S1874
 import { navigateTo, type Route } from "$lib/stores/navigation";
 import { navigateToSettings } from "$lib/router";
-import { uiMode, type UIMode } from "$lib/stores/mode";
+import { toggleDeveloperMode } from "$lib/stores/developerMode";
 import { themeMode } from "$lib/stores/theme";
 import { companionStore } from "$lib/stores/companion";
-import { restoreBand } from "$lib/tour/persistence";
 import { onboardingModalOpen } from "$lib/stores/onboarding";
 import { openNewChatRequested } from "$lib/stores/chat";
 
@@ -80,8 +77,8 @@ export interface PaletteAction {
   shortcut?: string[];
   /** Group bucket. */
   kind: PaletteGroupKind;
-  /** Persona scoping. `undefined` → visible in both modes. */
-  persona?: UIMode;
+  /** `true` for a technical action, shown only with the developer mode on. */
+  developer?: boolean;
   /** `true` if this is a navigation action (hidden in actions-only mode). */
   navigation?: boolean;
   /** Invoked on Enter / click. */
@@ -110,34 +107,37 @@ export function buildPaletteActions(): PaletteAction[] {
     labelKey: string,
     icon: SvelteComponentType,
     keywords: string[] = [],
-    persona?: UIMode,
+    developer?: boolean,
   ): PaletteAction => ({
     id,
     label: tr(labelKey),
     keywords: [...keywords, tr(labelKey).toLowerCase()],
     icon,
     kind: "pages",
-    persona,
+    developer,
     navigation: true,
     execute: () => navigateTo(route),
   });
 
   return [
     // ── Pages ─────────────────────────────────────────────────────
-    nav("nav.dashboard", "dashboard", "nav.dashboard", LayoutDashboard, ["home"], "operator"),
-    nav("nav.agents", "agents", "nav.agents", Bot, ["assistants", "bots"]),
-    nav("nav.projects", "projects", "nav.projects", FolderOpen, ["project", "workspaces"]),
-    nav("nav.tasks", "tasks", "nav.tasks", ListChecks, ["tasks", "activity"]),
+    // The screens of the sidebar, in its order, and nothing else: a test holds
+    // this list equal to the one the sidebar draws, in both modes.
     nav("nav.chat", "chat", "nav.chat", MessageSquare, ["chat", "conversation"]),
-    nav("nav.inbox", "inbox", "nav.inbox", ShieldCheck, ["inbox", "approvals", "hitl"]),
+    nav("nav.agents", "agents", "nav.agents", Bot, ["assistants", "bots"]),
     nav("nav.integrations", "integrations", "nav.connections", Plug, ["integrations", "mcp"]),
-    nav("nav.llm", "llm", "nav.llm", Brain, ["llm", "models"], "builder"),
+    nav("nav.llm", "llm", "nav.llm", Brain, ["llm", "models"]),
+    nav("nav.inbox", "inbox", "nav.inbox", ShieldCheck, ["inbox", "approvals", "hitl"]),
+    nav("nav.developer", "developer", "nav.developer", Code, ["developer", "server", "api"], true),
+    nav("nav.library", "library", "nav.library", Library, ["library", "packages", "installed"]),
     nav("nav.automations", "automations", "nav.automations", Timer, ["automations", "triggers", "cron"]),
-    nav("nav.memory", "memory", "nav.memory", Database, ["memory", "recall"], "builder"),
-    nav("nav.transcriptions", "transcriptions", "nav.transcriptions", Mic, ["stt", "speech"], "builder"),
-    nav("nav.notifications", "notifications", "nav.notifications", Bell, ["notifications"]),
-    nav("nav.observability", "observability", "nav.observability", Activity, ["observability", "metrics"], "builder"),
+    nav("nav.batches", "batches", "nav.batches", Layers, ["batches", "lots", "batch", "history"]),
+    nav("nav.authorizations", "authorizations", "nav.authorizations", KeyRound, ["authorizations", "autorisations", "permissions", "rules"]),
+    nav("nav.journal", "journal", "nav.journal", ScrollText, ["journal", "audit", "history", "historique", "activity"]),
     nav("nav.settings", "settings", "nav.settings", SettingsIcon, ["settings", "preferences"]),
+    nav("nav.transcriptions", "transcriptions", "nav.transcriptions", Mic, ["stt", "speech"], true),
+    nav("nav.observability", "observability", "nav.observability", Activity, ["observability", "metrics"], true),
+    nav("nav.memory", "memory", "nav.memory", Database, ["memory", "recall"], true),
 
     // ── Create / run actions ──────────────────────────────────────
     {
@@ -145,18 +145,6 @@ export function buildPaletteActions(): PaletteAction[] {
       label: tr("chat.new_chat"),
       keywords: ["chat", "new", "conversation", "nouveau"],
       icon: MessageSquare,
-      shortcut: [modKey, "K"],
-      kind: "actions",
-      execute: () => {
-        navigateTo("chat");
-        openNewChatRequested.set(Date.now());
-      },
-    },
-    {
-      id: "tasks.new",
-      label: tr("tasks.create_task_cta"),
-      keywords: ["task", "new", "create", "tâche"],
-      icon: Plus,
       shortcut: [modKey, "T"],
       kind: "actions",
       execute: () => {
@@ -170,7 +158,6 @@ export function buildPaletteActions(): PaletteAction[] {
       keywords: ["agent", "create", "new"],
       icon: Bot,
       kind: "actions",
-      persona: "builder",
       execute: () => {
         navigateTo("agents");
         globalThis.dispatchEvent(new CustomEvent("apollia:agents:create"));
@@ -188,35 +175,17 @@ export function buildPaletteActions(): PaletteAction[] {
       },
     },
     {
-      id: "agents.start_all",
-      label: tr("command.seed.agents_start_all"),
-      keywords: ["start", "run", "all", "agents"],
-      icon: Play,
-      kind: "actions",
-      persona: "builder",
-      execute: () => globalThis.dispatchEvent(new CustomEvent("apollia:agents:start-all")),
-    },
-    {
-      id: "agents.stop_all",
-      label: tr("command.seed.agents_stop_all"),
-      keywords: ["stop", "halt", "all", "agents"],
-      icon: Square,
-      kind: "actions",
-      persona: "builder",
-      execute: () => globalThis.dispatchEvent(new CustomEvent("apollia:agents:stop-all")),
-    },
-    {
       id: "mode.toggle",
-      label: tr("commandPalette.actions.toggleMode"),
-      keywords: ["operator", "builder", "toggle", "mode", "persona"],
+      label: tr("commandPalette.actions.toggleDeveloperMode"),
+      keywords: ["developer", "toggle", "mode", "builder", "operator"],
       icon: ToggleRight,
       kind: "actions",
-      execute: () => uiMode.update((m) => (m === "operator" ? "builder" : "operator")),
+      execute: () => void toggleDeveloperMode(),
     },
     {
       id: "companion.toggle",
       label: tr("commandPalette.actions.toggleCompanion"),
-      keywords: ["companion", "panel", "toggle"],
+      keywords: ["companion", "guide", "help", "aide", "panel", "toggle"],
       icon: PanelRightOpen,
       kind: "actions",
       execute: () => companionStore.toggleCompanion(),
@@ -248,7 +217,17 @@ export function buildPaletteActions(): PaletteAction[] {
       icon: Keyboard,
       kind: "settings",
       execute: () => {
-        navigateToSettings("shortcuts");
+        navigateToSettings("chat");
+      },
+    },
+    {
+      id: "settings.notifications.open",
+      label: tr("settings.nav.notifications"),
+      keywords: ["notifications", "channels", "alerts", "canaux", "alertes"],
+      icon: Bell,
+      kind: "settings",
+      execute: () => {
+        navigateToSettings("notifications");
       },
     },
     {
@@ -258,7 +237,7 @@ export function buildPaletteActions(): PaletteAction[] {
       icon: RefreshCcw,
       kind: "settings",
       execute: () => {
-        navigateToSettings("danger");
+        navigateToSettings("appearance");
       },
     },
     {
@@ -268,7 +247,7 @@ export function buildPaletteActions(): PaletteAction[] {
       icon: Brain,
       kind: "settings",
       execute: () => {
-        navigateToSettings("danger");
+        navigateToSettings("general", "clear-memories");
       },
     },
     {
@@ -278,7 +257,7 @@ export function buildPaletteActions(): PaletteAction[] {
       icon: Terminal,
       kind: "settings",
       execute: () => {
-        navigateToSettings("danger");
+        navigateToSettings("general", "clear-logs");
       },
     },
     {
@@ -288,7 +267,7 @@ export function buildPaletteActions(): PaletteAction[] {
       icon: RefreshCcw,
       kind: "settings",
       execute: () => {
-        navigateToSettings("danger");
+        navigateToSettings("general", "factory-reset");
       },
     },
     {
@@ -298,7 +277,7 @@ export function buildPaletteActions(): PaletteAction[] {
       icon: Info,
       kind: "help",
       execute: () => {
-        navigateToSettings("help");
+        navigateToSettings("general");
       },
     },
     {
@@ -308,24 +287,10 @@ export function buildPaletteActions(): PaletteAction[] {
       icon: Info,
       kind: "help",
       execute: () => {
-        navigateToSettings("about");
+        navigateToSettings("general");
       },
     },
     // Removed: help.docs action (was navigating to obsolete onboarding route)
-    {
-      // Restores the Getting started band and lands on it. Modelled on
-      // `help.onboarding_reset`, which likewise flips a store rather than
-      // navigating on its own.
-      id: "help.tour_replay",
-      label: tr("tour.palette.replay"),
-      keywords: ["tour", "visite", "guide", "onboarding", "getting started"],
-      icon: Compass,
-      kind: "help",
-      execute: () => {
-        restoreBand();
-        navigateTo("dashboard");
-      },
-    },
     {
       id: "help.onboarding_reset",
       label: tr("commandPalette.help.resetOnboarding"),

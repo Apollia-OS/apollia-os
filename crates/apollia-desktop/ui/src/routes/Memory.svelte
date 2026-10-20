@@ -1,11 +1,16 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { t } from "svelte-i18n";
-  import { searchMemory, deleteMemoryEntry } from "$lib/ipc/memory";
-  import { listMemoryNamespaces, listMemoryEntries } from "$lib/ipc/projects";
+  import {
+    searchMemory,
+    deleteMemoryEntry,
+    getMemoryEmbeddingsModel,
+    listMemoryNamespaces,
+  } from "$lib/ipc/memory";
+  import { listMemoryEntries } from "$lib/ipc/agents";
   import { listAgents } from "$lib/ipc/connections";
   import { memoryChanged } from "$lib/stores/sse";
-  import type { MemoryEntry, MemorySearchResult } from "$lib/types";
+  import type { MemoryEntry, MemorySearchResult, MemoryEmbeddings } from "$lib/types";
   import MemorySearch from "../components/memory/MemorySearch.svelte";
   import NamespaceSidebar, { type NamespaceCategory } from "../components/memory/NamespaceSidebar.svelte";
   import MemoryEntryRow from "../components/memory/MemoryEntryRow.svelte";
@@ -17,7 +22,7 @@
   import { fly } from "svelte/transition";
   import { LoadingShimmer } from "$lib/components/feedback";
   import { addToast } from "$lib/components/ui/toast/store";
-  import { DetailHeader, SplitLayout, ErrorBanner } from "$lib/components/operator";
+  import { DetailHeader, PageHeader, SplitLayout, ErrorBanner } from "$lib/components/operator";
   import { listNavigation } from "$lib/components/operator/listNavigation";
   import { Button } from "$lib/components/ui/button";
   import { Disclosure } from "$lib/components/ui/disclosure";
@@ -25,6 +30,7 @@
   import { listFlip, rowIn, rowOut } from "$lib/design/listMotion";
   import { contentIn, contentOut } from "$lib/design/routeTransition";
   import { reportError } from "$lib/errors/reportError";
+  import { navigateToSettings } from "$lib/router";
   import type { HumanizedError } from "$lib/errors/humanize";
 
   // The per-user profile is edited from `Settings -> Profile`.
@@ -241,7 +247,13 @@
     filterChips.map((c) => ({ key: c.key, label: $t(c.labelKey), count: entryCounts[c.key] })),
   );
 
+  /** The embeddings model the memory searches with; `null` reads as keywords. */
+  let embeddings = $state<MemoryEmbeddings | null>(null);
+
   onMount(async () => {
+    getMemoryEmbeddingsModel()
+      .then((model) => (embeddings = model))
+      .catch(() => (embeddings = null));
     await loadNamespaces();
     if (selectedNamespace !== "") {
       await loadEntries();
@@ -263,9 +275,10 @@
 </script>
 
 <div class="flex flex-col h-full" data-testid="memory-page">
+  <PageHeader title={$t("nav.memory")} subtitle={$t("memory.page_subtitle")} />
   <div class="flex flex-1 min-h-0 overflow-hidden">
     {#if !loadingMemory && namespaces.length === 0}
-      <div class="flex-1 px-8 py-8">
+      <div class="flex-1 px-8 py-6">
         <EmptyState
           icon={Database}
           title={$t("memory.empty_title")}
@@ -292,9 +305,14 @@
             <UserCircle2 size={14} class="text-primary mt-0.5" />
             <p class="text-caption text-muted-foreground leading-snug">
               {$t("memory.profile_banner_prefix")}
-              <a href="/settings/profile" class="text-primary underline-offset-2 hover:underline font-medium">
+              <button
+                type="button"
+                class="text-primary underline-offset-2 hover:underline font-medium"
+                onclick={() => navigateToSettings("profile")}
+                data-testid="memory-profile-link"
+              >
                 {$t("memory.profile_banner_link")}
-              </a>.
+              </button>.
               {$t("memory.profile_banner_suffix")}
             </p>
           </div>
@@ -407,6 +425,7 @@
                       {entry}
                       searching={searching}
                       relevance={searching ? searchRelevance.get(entry.id) : undefined}
+                      {embeddings}
                       selected={selectedEntry?.id === entry.id}
                       onclick={() => (selectedEntry = entry)}
                       oncopy={() => handleCopyEntry(entry)}
@@ -427,6 +446,7 @@
 <!-- Memory entry detail Sheet -->
 <MemoryEntrySheet
   entry={selectedEntry}
+  {embeddings}
   namespace={selectedNamespace}
   open={selectedEntry !== null}
   onclose={() => (selectedEntry = null)}

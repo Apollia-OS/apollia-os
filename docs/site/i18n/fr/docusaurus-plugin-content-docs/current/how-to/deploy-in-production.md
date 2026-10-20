@@ -127,6 +127,12 @@ apollia.example.com {
     reverse_proxy /api/v1/mailbox/stream 127.0.0.1:7771 {
         flush_interval -1
     }
+    reverse_proxy /api/v1/sessions/*/stream 127.0.0.1:7771 {
+        flush_interval -1
+    }
+    reverse_proxy /api/v1/events 127.0.0.1:7771 {
+        flush_interval -1
+    }
 }
 ```
 
@@ -142,7 +148,7 @@ server {
         proxy_set_header Authorization $http_authorization;
     }
     # SSE : streaming sans mise en tampon
-    location ~ ^/api/v1/(tasks/.*/stream|mailbox/stream)$ {
+    location ~ ^/api/v1/(tasks/.*/stream|sessions/.*/stream|mailbox/stream|events)$ {
         proxy_pass http://127.0.0.1:7771;
         proxy_buffering off;
         proxy_cache off;
@@ -151,8 +157,9 @@ server {
 }
 ```
 
-Les points de terminaison de streaming `GET /api/v1/tasks/{id}/stream` et
-`GET /api/v1/mailbox/stream` envoient les événements au fil de l'eau. Sans
+Les points de terminaison de streaming `GET /api/v1/tasks/{id}/stream`,
+`GET /api/v1/sessions/{id}/stream`, `GET /api/v1/mailbox/stream` et
+`GET /api/v1/events` envoient les événements au fil de l'eau. Sans
 désactivation de la mise en tampon, le proxy les retient jusqu'à la fermeture
 de la réponse, et l'hôte ne voit rien en direct. La même précaution
 s'applique côté client sous TLS natif : ne mettez pas la réponse en tampon.
@@ -160,17 +167,19 @@ s'applique côté client sous TLS natif : ne mettez pas la réponse en tampon.
 ## Vérifier après déploiement
 
 ```sh
-# Disponibilité. L'écouteur TCP exige le jeton porteur sur tous les chemins sauf
-# celui des webhooks, le contrôle de santé le porte donc aussi.
-curl -H "Authorization: Bearer $(cat ~/.apollia/api-token)" \
-  http://127.0.0.1:7771/api/v1/health             # {"status":"ok"}
+# Disponibilité. La route de santé est le seul chemin de l'API servi sans le
+# jeton porteur ; elle ne révèle que le marqueur de produit et la version.
+curl -s http://127.0.0.1:7771/api/v1/health
+# {"status":"ok","product":"apollia-os","version":"<version du runtime>"}
 
 # État du runtime et des agents
 apollia-os status
 
-# De bout en bout : installer un agent trivial et l'exécuter
-apollia-os agent install clients/examples/echo_agent.py --skip-tests
-apollia-os run echo "post-deploy check"
+# De bout en bout : construire le paquet de départ, l'installer et exécuter son agent.
+apollia-os package new postcheck
+apollia-os package build postcheck
+apollia-os package install postcheck-0.1.0.apo
+apollia-os run postcheck "post-deploy check"
 ```
 
 Les mêmes informations que lit la CLI sont disponibles via HTTP pour une

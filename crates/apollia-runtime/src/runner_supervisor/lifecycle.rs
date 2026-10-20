@@ -82,6 +82,7 @@ impl RunnerSupervisor {
                 tracing::error!(error = %e, "runner.spawn.failed");
                 RunnerError::Io(e)
             })?;
+        crate::engine_pids::record(child.id());
 
         // Parse READY <port>\n on stdout, with a timeout.
         let stdout = child
@@ -393,7 +394,7 @@ pub(super) fn locate_runner_binary(
     // This stays strict on purpose: `is_backend_available` reads it to decide
     // which backend to resolve, so answering yes for a binary that is not there
     // would make that decision lie. Degrading to another runner is the caller's
-    // job, and it happens in `resolve_backend`.
+    // job, and it happens in `boot_backend`.
 
     // Dev fallback (`cargo run -p apollia-cli`): the `apollia-runner` binary
     // is placed in target/{debug,release}/ without a backend suffix. We accept

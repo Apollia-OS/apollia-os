@@ -2,15 +2,15 @@
 //! the curated list Apollia ships. Both join their results against the servers
 //! already installed, and both fall back to cache when the network is down.
 
-use apollia_runtime::embedded::RuntimeHandle;
+use crate::attached::RuntimeLink;
 use tauri::State;
 
 use std::collections::{HashMap, HashSet};
 
 use crate::mcp::enrichments::{load_builtin_enrichments, ConnectorEnrichment};
 use crate::mcp::registry_client::{
-    McpRegistryClient, RegistryEnvVar, RegistryPackage, RegistryPackageArg, RegistryRemote,
-    RegistryRemoteHeader, RegistryTransport,
+    RegistryEnvVar, RegistryPackage, RegistryPackageArg, RegistryRemote, RegistryRemoteHeader,
+    RegistryServer, RegistryTransport,
 };
 
 use apollia_mcp::manager::McpServerStatus;
@@ -18,7 +18,6 @@ use apollia_mcp::manager::McpServerStatus;
 use super::catalog::{
     infer_category, trust_level_str, ConnectorEnrichmentView, RegistryServerView,
 };
-use crate::commands::http_get_json;
 
 /// Whether a public-registry server is already covered by an Apollia curated
 /// enrichment (by registry name, package identifier, or remote URL).
@@ -42,25 +41,27 @@ fn is_covered_by_curated(
 
 /// Fetch MCP Registry servers with enrichment and install-status join.
 ///
-/// Queries the official MCP registry, then enriches each result:
+/// Reads the official MCP registry through `GET /api/v1/mcp/registry` on the
+/// runtime this application drives, then enriches each result:
 /// - Matches package identifiers against builtin enrichments to set
 ///   `trust_level` and `enrichment` (label, category, icon, auth help).
 /// - Matches server names against currently installed MCP servers to set
 ///   `is_installed`.
 ///
-/// Falls back to cached registry data when the network is unreachable.
+/// The runtime falls back to cached registry data when the network is
+/// unreachable.
 #[tauri::command]
 pub async fn fetch_mcp_registry(
-    registry: State<'_, McpRegistryClient>,
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
     search: Option<String>,
 ) -> Result<Vec<RegistryServerView>, String> {
     // The remote MCP registry can be unreachable (offline, DNS down, registry
-    // outage, or simply not configured in this build). When that happens we
-    // still want the operator to see the 18 curated entries from
-    // enrichments.json - they are baked into the binary and require no
-    // network. Treat any registry error as an empty result and log it.
-    let raw_servers = match registry.fetch_servers(search.as_deref()).await {
+    // outage, or simply not configured in this build) with no cache to fall
+    // back on. When that happens we still want the operator to see the
+    // curated entries from enrichments.json - they are baked into the binary
+    // and require no network. Treat any registry error as an empty result and
+    // log it.
+    let raw_servers = match fetch_registry_servers(&state, search.as_deref()).await {
         Ok(servers) => servers,
         Err(e) => {
             tracing::warn!(
@@ -86,15 +87,14 @@ pub async fn fetch_mcp_registry(
             .collect();
 
     // Build set of installed server names for is_installed detection.
-    let installed_names: HashSet<String> =
-        match http_get_json(state.api_port, "/api/v1/mcp/servers").await {
-            Ok(json) => serde_json::from_value::<Vec<McpServerStatus>>(json)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.name)
-                .collect(),
-            Err(_) => HashSet::new(),
-        };
+    let installed_names: HashSet<String> = match state.get_json("/api/v1/mcp/servers").await {
+        Ok(json) => serde_json::from_value::<Vec<McpServerStatus>>(json)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.name)
+            .collect(),
+        Err(_) => HashSet::new(),
+    };
 
     // Drop public-registry entries that are already covered by an Apollia
     // curated enrichment. Otherwise the catalogue shows duplicates: e.g.
@@ -153,7 +153,7 @@ pub async fn fetch_mcp_registry(
         .collect();
 
     let mut result = views;
-    for enrichment in &enrichments {
+    for enrichment in enrichments.iter().filter(|e| e.is_listed()) {
         let already_present = enrichment
             .registry_names
             .iter()
@@ -187,7 +187,7 @@ pub async fn fetch_mcp_registry(
                     vec![RegistryPackage {
                         registry_type: reg_type.clone(),
                         identifier: enrichment.package_identifier.clone(),
-                        version: None,
+                        version: enrichment.package_version.clone(),
                         runtime_hint: enrichment.package_runtime_hint.clone(),
                         transport: RegistryTransport {
                             transport_type: "stdio".to_string(),
@@ -238,10 +238,10 @@ pub async fn fetch_mcp_registry(
                         .as_ref()
                         .and_then(|m| m.get("en").cloned()),
                     auth_help_i18n_key: enrichment.auth_help_i18n_key.clone(),
-                    default_requires_approval: enrichment.default_requires_approval,
                     oauth_pre_registered_client_id_env: enrichment
                         .oauth_pre_registered_client_id_env
                         .clone(),
+                    examples: enrichment.examples.clone(),
                 }),
                 is_installed: installed_names.contains(&enrichment.package_identifier),
                 remotes: match (&enrichment.remote_url, &enrichment.remote_transport) {
@@ -270,6 +270,20 @@ pub async fn fetch_mcp_registry(
     Ok(result)
 }
 
+/// The servers the MCP registry lists, read through the runtime's route, which
+/// shares the registry cache and its offline fallback.
+pub(crate) async fn fetch_registry_servers(
+    link: &RuntimeLink,
+    search: Option<&str>,
+) -> Result<Vec<RegistryServer>, String> {
+    let path = match search.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(term) => format!("/api/v1/mcp/registry?search={}", urlencoding::encode(term)),
+        None => "/api/v1/mcp/registry".to_owned(),
+    };
+    let json = link.get_json(&path).await?;
+    serde_json::from_value(json).map_err(|e| format!("failed to parse the registry: {e}"))
+}
+
 /// Return only the 18 curated MCP entries baked into the binary -
 /// instant, network-free path.
 ///
@@ -279,21 +293,20 @@ pub async fn fetch_mcp_registry(
 /// but skips the network call entirely.
 #[tauri::command]
 pub async fn fetch_mcp_curated(
-    state: State<'_, RuntimeHandle>,
+    state: State<'_, RuntimeLink>,
 ) -> Result<Vec<RegistryServerView>, String> {
     let enrichments = load_builtin_enrichments();
-    let installed_names: HashSet<String> =
-        match http_get_json(state.api_port, "/api/v1/mcp/servers").await {
-            Ok(json) => serde_json::from_value::<Vec<McpServerStatus>>(json)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.name)
-                .collect(),
-            Err(_) => HashSet::new(),
-        };
+    let installed_names: HashSet<String> = match state.get_json("/api/v1/mcp/servers").await {
+        Ok(json) => serde_json::from_value::<Vec<McpServerStatus>>(json)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.name)
+            .collect(),
+        Err(_) => HashSet::new(),
+    };
 
     let mut result: Vec<RegistryServerView> = Vec::with_capacity(enrichments.len());
-    for enrichment in &enrichments {
+    for enrichment in enrichments.iter().filter(|e| e.is_listed()) {
         let name = enrichment
             .registry_names
             .first()
@@ -318,7 +331,7 @@ pub async fn fetch_mcp_curated(
                 vec![RegistryPackage {
                     registry_type: reg_type.clone(),
                     identifier: enrichment.package_identifier.clone(),
-                    version: None,
+                    version: enrichment.package_version.clone(),
                     runtime_hint: enrichment.package_runtime_hint.clone(),
                     transport: RegistryTransport {
                         transport_type: "stdio".to_string(),
@@ -366,10 +379,10 @@ pub async fn fetch_mcp_curated(
                     .as_ref()
                     .and_then(|m| m.get("en").cloned()),
                 auth_help_i18n_key: enrichment.auth_help_i18n_key.clone(),
-                default_requires_approval: enrichment.default_requires_approval,
                 oauth_pre_registered_client_id_env: enrichment
                     .oauth_pre_registered_client_id_env
                     .clone(),
+                examples: enrichment.examples.clone(),
             }),
             is_installed: installed_names.contains(&enrichment.package_identifier)
                 || installed_names.contains(&name),

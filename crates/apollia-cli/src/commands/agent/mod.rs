@@ -1,50 +1,42 @@
 //! `apollia-os agent` subcommands: manage agents via the runtime API and local persistence.
 //!
-//! Provides `list`, `start`, `stop`, `info` (runtime-dependent) and
-//! `install`, `uninstall`, `enable`, `disable`, `update` (local).
+//! Provides `list`, `start`, `stop`, `show`, `set`, `reset`, `uninstall`
+//! (runtime-dependent) and `enable`, `disable` (local). An agent arrives with
+//! a package: see `apollia-os package`.
 
 use std::path::{Path, PathBuf};
 
-use apollia_aip::package_loader::{load_manifest_only, PackageLoaderError};
-use apollia_runtime::agents::registry_remote::{self, parse_install_source, AgentInstallSource};
-use apollia_runtime::api::routes_agents::AgentLoader;
-use apollia_tools::{AgentRepository, InstalledAgent, InstalledPackage, PackageRepository};
-use apollia_triggers::{
-    definition_repository::TriggerDefinitionRepository, parse_triggers_from_toml_str, OnBusy,
-    OnBusyPolicy, TriggerDefinitionRow, TriggerSourceConfig,
-};
+use apollia_tools::{AgentRepository, PackageRepository, StoredAgent};
 use clap::Subcommand;
-
-use crate::community::{validate_community_agent, AgentValidationError};
 
 use crate::client::{default_socket_path, ClientError, RuntimeClient};
 use crate::exit_codes;
 
+mod definition;
 mod display;
-mod install;
+mod export;
 mod lifecycle;
 mod package;
-mod scaffold;
-mod validate;
+mod uninstall;
 
 #[cfg(test)]
 mod tests;
 
+pub(in crate::commands::agent) use definition::{
+    print_definition_section, run_list_definitions, run_reset, run_set,
+};
 pub(in crate::commands::agent) use display::{
     build_list_json, format_a2a_agent_list, format_agent_detail, format_enriched_agent_list,
-    format_status_snapshot, handle_error, local_agent_detail, print_audit_event_row,
-    print_trust_banner, run_info_local_fallback,
+    format_status_snapshot, handle_error, local_agent_detail, run_info_local_fallback,
 };
-pub(in crate::commands::agent) use install::run_install;
+pub(in crate::commands::agent) use export::{run_export, ExportChoices};
 pub(in crate::commands::agent) use lifecycle::{
     run_info, run_list, run_logs, run_messages, run_start, run_status, run_stop,
 };
 pub(in crate::commands::agent) use package::{
-    run_disable, run_enable, run_package_info, run_package_list, run_package_uninstall, run_repair,
-    run_uninstall, run_update,
+    run_disable, run_enable, run_package_info, run_package_list,
 };
-pub(in crate::commands::agent) use scaffold::run_new;
-pub(in crate::commands::agent) use validate::run_validate;
+pub(in crate::commands::agent) use uninstall::{run_package_uninstall, run_uninstall, Erase};
 
 /// Agent subcommands: `apollia-os agent <verb>`.
 #[derive(Debug, Subcommand)]
@@ -52,23 +44,85 @@ pub enum AgentCommand {
     /// List all agents (installed and/or runtime).
     List {
         /// Show only A2A-capable agents with their skill descriptors.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "definitions")]
         supports_a2a: bool,
+        /// List the stored agents as resolved (package definition, then your
+        /// overrides) instead of the runtime inventory.
+        #[arg(long)]
+        definitions: bool,
     },
-    /// Start (register) a new agent from a Python module path.
+    /// Make a stored agent available again, after `agent stop`.
+    ///
+    /// An agent is available as soon as it is installed and enabled; this is
+    /// only needed for one that was stopped.
     Start {
-        /// Path to the agent Python module.
-        path: String,
+        /// Agent identifier.
+        agent_id: String,
     },
     /// Stop (shutdown) a running agent.
     Stop {
         /// Agent identifier.
         agent_id: String,
     },
-    /// Display detailed information about an agent.
+    /// Display detailed information about an agent, with its definition as
+    /// resolved (package defaults, then your overrides).
     Show {
         /// Agent identifier.
         agent_id: String,
+    },
+    /// Override one field of an agent's definition; a package update keeps it.
+    ///
+    /// Fields: `name`, `mission`, `autonomy`, `planning` (never, auto or
+    /// always) and `profile` (a profile identifier, see `profile list`) take
+    /// one value; `examples`, `access` and `sources` take the whole list, one
+    /// value per item (none for an empty list). A source is an identifier of
+    /// `source list`, `profile` or `memory`; the runtime refuses any other.
+    /// The source `profile` lets the agent read your profile through
+    /// `ctx.profile`: `agent set <id> sources profile` checks it, a list
+    /// without it unchecks it, and `agent reset --field sources` goes back to
+    /// the package default. Recorded in the audit journal.
+    Set {
+        /// Agent identifier.
+        agent_id: String,
+        /// Field to override: name, mission, examples, access, sources,
+        /// autonomy, planning or profile.
+        field: String,
+        /// The value, or the items of a list.
+        #[arg(num_args = 0..)]
+        values: Vec<String>,
+    },
+    /// Go back to the package defaults: remove every override of an agent,
+    /// or the override of one field. Recorded in the audit journal.
+    Reset {
+        /// Agent identifier.
+        agent_id: String,
+        /// Remove only the override of this field.
+        #[arg(long)]
+        field: Option<String>,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Export an agent created in the interface as a `.apo` package.
+    ///
+    /// Its current values become the defaults of the package. No secret, no
+    /// memory and no history is exported; the account of a connection stays
+    /// here and becomes a required connection; an access to another package,
+    /// agent or workflow is left out and listed. The publisher is the
+    /// `author.name` setting, or `--publisher`. Needs the runtime.
+    Export {
+        /// Agent identifier.
+        agent_id: String,
+        /// Sign the package with the author key, generated in the secret
+        /// store on the first signature.
+        #[arg(long)]
+        sign: bool,
+        /// Publisher name for this export only.
+        #[arg(long, value_name = "NAME")]
+        publisher: Option<String>,
+        /// File to write. Default: `<id>-<version>.apo` in the current folder.
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
     },
     /// Show a compact runtime-status snapshot for `<agent_id>`.
     ///
@@ -86,24 +140,23 @@ pub enum AgentCommand {
         #[arg(long, value_name = "N", default_value = "20")]
         limit: u32,
     },
-    /// Install an agent permanently from a local path or a Git URL.
+    /// Uninstall an agent installed on its own, through the runtime.
     ///
-    /// Accepts a local filesystem path (e.g. `./agents/my-agent.py`) or a Git
-    /// remote URL (e.g. `https://github.com/user/my-agent.git`).  An optional
-    /// `#<tag>` suffix pins the clone to a specific tag or branch
-    /// (e.g. `https://github.com/user/my-agent.git#v1.2.0`).
-    Install {
-        /// Local path to a Python module or a Git URL (with optional #tag).
-        source: String,
-
-        /// Skip the agent test suite (not recommended, reduces validation coverage).
-        #[arg(long)]
-        skip_tests: bool,
-    },
-    /// Uninstall a permanently installed agent.
+    /// Removes its definition, its overrides, its model, its triggers, its
+    /// environment and its files. Its memory and its history are kept unless
+    /// asked otherwise. An agent of an installed package goes with its
+    /// package.
     Uninstall {
         /// Agent name (as declared in manifest).
         name: String,
+
+        /// Erase the agent's memory instead of keeping it.
+        #[arg(long)]
+        clear_memory: bool,
+
+        /// Erase the agent's history (tasks, batches) instead of keeping it.
+        #[arg(long)]
+        clear_history: bool,
 
         /// Skip the interactive confirmation prompt.
         #[arg(long)]
@@ -119,23 +172,7 @@ pub enum AgentCommand {
         /// Agent name.
         name: String,
     },
-    /// Update an installed agent with a new Python module.
-    Update {
-        /// Agent name.
-        name: String,
-        /// Path to the new Python module.
-        path: PathBuf,
-    },
-    /// Create a new agent from an SDK template.
-    Create {
-        /// Agent name in kebab-case (e.g. my-agent).
-        name: String,
-
-        /// Template type: react, conversational, or orchestrated.
-        #[arg(long, default_value = "react")]
-        r#type: String,
-    },
-    /// Manage agent packages (multi-agent bundles described by agent.toml).
+    /// List, show and uninstall the installed packages.
     Package {
         #[command(subcommand)]
         cmd: PackageCommand,
@@ -153,21 +190,6 @@ pub enum AgentCommand {
         #[arg(long)]
         follow: bool,
     },
-    /// Validate an agent manifest without installing or starting the agent.
-    Validate {
-        /// Path to the Python agent module.
-        path: PathBuf,
-    },
-    /// Re-provision an installed agent's per-agent Python venv from its manifest.
-    ///
-    /// Reads `~/.apollia/agents/packages/<name>/agent.toml` (or the single-file
-    /// agent's manifest), then re-runs `setup_venv` with the declared `packages`
-    /// list. Useful when an agent was installed before per-agent venv
-    /// provisioning landed, or when a venv was deleted by hand.
-    Repair {
-        /// Installed agent name (as declared in the manifest).
-        name: String,
-    },
 }
 
 /// Package sub-subcommands: `apollia-os agent package <verb>`.
@@ -180,10 +202,24 @@ pub enum PackageCommand {
         /// Package name.
         name: String,
     },
-    /// Uninstall a package and all its agents and triggers.
+    /// Uninstall a package and everything it installed, through the runtime.
+    ///
+    /// Removes its agents with their overrides, models and triggers, its
+    /// workflows and tools, its environments, its files and the MCP servers it
+    /// brought; the connections it required stay. The memory and the history
+    /// of its agents are kept unless asked otherwise.
     Uninstall {
         /// Package name.
         name: String,
+
+        /// Erase the memory of its agents instead of keeping it.
+        #[arg(long)]
+        clear_memory: bool,
+
+        /// Erase the history of its agents and workflows (tasks, batches,
+        /// workflow runs) instead of keeping it.
+        #[arg(long)]
+        clear_history: bool,
 
         /// Skip the interactive confirmation prompt.
         #[arg(long)]
@@ -199,27 +235,68 @@ pub async fn run(cmd: &AgentCommand, socket: Option<PathBuf>, json: bool) -> i32
     let client = RuntimeClient::new(socket_path);
 
     match cmd {
-        AgentCommand::List { supports_a2a } => run_list(&client, *supports_a2a, json).await,
-        AgentCommand::Start { path } => run_start(&client, path, json).await,
+        AgentCommand::List {
+            definitions: true, ..
+        } => run_list_definitions(&client, json).await,
+        AgentCommand::List { supports_a2a, .. } => run_list(&client, *supports_a2a, json).await,
+        AgentCommand::Start { agent_id } => run_start(&client, agent_id, json).await,
         AgentCommand::Stop { agent_id } => run_stop(&client, agent_id, json).await,
         AgentCommand::Show { agent_id } => run_info(&client, agent_id, json).await,
+        AgentCommand::Set {
+            agent_id,
+            field,
+            values,
+        } => run_set(&client, agent_id, field, values, json).await,
+        AgentCommand::Reset {
+            agent_id,
+            field,
+            confirm,
+        } => run_reset(&client, agent_id, field.as_deref(), *confirm, json).await,
+        AgentCommand::Export {
+            agent_id,
+            sign,
+            publisher,
+            output,
+        } => {
+            let choices = ExportChoices {
+                sign: *sign,
+                publisher: publisher.as_deref(),
+                output: output.as_deref(),
+            };
+            run_export(&client, agent_id, choices, json).await
+        }
         AgentCommand::Status { agent_id } => run_status(&client, agent_id, json).await,
         AgentCommand::Messages { agent_id, limit } => {
             run_messages(&client, agent_id, *limit, json).await
         }
-        AgentCommand::Install { source, skip_tests } => {
-            run_install(source, &client, json, *skip_tests).await
+        AgentCommand::Uninstall {
+            name,
+            clear_memory,
+            clear_history,
+            confirm,
+        } => {
+            let erase = Erase {
+                memory: *clear_memory,
+                history: *clear_history,
+            };
+            run_uninstall(&client, name, erase, *confirm, json).await
         }
-        AgentCommand::Uninstall { name, confirm } => run_uninstall(name, *confirm, json),
         AgentCommand::Enable { name } => run_enable(&client, name, json).await,
         AgentCommand::Disable { name } => run_disable(&client, name, json).await,
-        AgentCommand::Update { name, path } => run_update(name, path, json),
-        AgentCommand::Create { name, r#type } => run_new(name, r#type, json),
         AgentCommand::Package { cmd } => match cmd {
             PackageCommand::List => run_package_list(json),
             PackageCommand::Show { name } => run_package_info(name, json),
-            PackageCommand::Uninstall { name, confirm } => {
-                run_package_uninstall(name, *confirm, json).await
+            PackageCommand::Uninstall {
+                name,
+                clear_memory,
+                clear_history,
+                confirm,
+            } => {
+                let erase = Erase {
+                    memory: *clear_memory,
+                    history: *clear_history,
+                };
+                run_package_uninstall(&client, name, erase, *confirm, json).await
             }
         },
         AgentCommand::Logs {
@@ -227,8 +304,6 @@ pub async fn run(cmd: &AgentCommand, socket: Option<PathBuf>, json: bool) -> i32
             last,
             follow,
         } => run_logs(&client, agent_id, *last, *follow, json).await,
-        AgentCommand::Validate { path } => run_validate(path, json),
-        AgentCommand::Repair { name } => run_repair(name, json).await,
     }
 }
 
@@ -239,7 +314,7 @@ pub async fn run(cmd: &AgentCommand, socket: Option<PathBuf>, json: bool) -> i32
 /// Return true if `arg` looks like a file path rather than an agent name or UUID.
 ///
 /// Detects the common mistake of passing a Python module path (e.g. `agents/foo.py`)
-/// to commands that expect a name or UUID (e.g. `apollia-guide`).
+/// to commands that expect a name or UUID (e.g. `onboarding-agent`).
 fn looks_like_file_path(arg: &str) -> bool {
     arg.contains('/') || arg.contains('\\') || arg.ends_with(".py")
 }
@@ -274,6 +349,17 @@ fn open_repository_or_create(data_dir: &Path) -> Result<AgentRepository, String>
 }
 
 /// Try to open the agent repository (returns `None` if file or DB unavailable).
+/// The stored agents of the local store, the Apollia agent left out: it is
+/// the built-in chat, never started, stopped nor uninstalled.
+fn stored_agents() -> Vec<StoredAgent> {
+    open_repository()
+        .and_then(|repo| repo.list_stored().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|agent| !apollia_tools::is_built_in_agent(&agent.name))
+        .collect()
+}
+
 fn open_repository() -> Option<AgentRepository> {
     let data_dir = apollia_data_dir();
     let db_path = apollia_core::paths::DataFile::Agents.path(&data_dir);
@@ -281,31 +367,6 @@ fn open_repository() -> Option<AgentRepository> {
         return None;
     }
     AgentRepository::open(&db_path).ok()
-}
-
-/// Real agent loader using PyO3 AIPLoader + validate_agent.
-///
-/// Loads a Python module, validates AIP duck typing, and returns the manifest.
-struct CliAgentLoader;
-
-impl AgentLoader for CliAgentLoader {
-    fn load_and_validate(&self, path: &Path) -> Result<apollia_core::AgentManifest, String> {
-        // Share the community validation helper so `apollia-os agent
-        // validate` benefits from the same sys.path injection as
-        // `agent install`: per-agent venv + enclosing package root +
-        // workspace SDK fallback.
-        let extras = crate::community::validation_sys_paths(path);
-        let module = apollia_aip::loader::load_agent_module_with_sys_paths(path, &extras)
-            .map_err(|e| e.to_string())?;
-        let validated =
-            apollia_aip::validator::validate_agent(&module).map_err(|e| e.to_string())?;
-        Ok(validated.manifest)
-    }
-}
-
-/// Current timestamp in RFC 3339 format.
-fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
 }
 
 /// Print an error message (human or JSON) and return `GENERAL_ERROR`.

@@ -1,0 +1,532 @@
+//! The stored agents: their definition, the user's overrides, and the agent
+//! that results.
+//!
+//! - `GET    /api/v1/agent-definitions`                         , list the agents, resolved
+//! - `POST   /api/v1/agent-definitions`                         , create an agent without code
+//! - `GET    /api/v1/agent-definitions/{name}`                  , read one agent, resolved
+//! - `PUT    /api/v1/agent-definitions/{name}/overrides/{field}`, set an override
+//! - `DELETE /api/v1/agent-definitions/{name}/overrides/{field}`, remove an override
+//! - `DELETE /api/v1/agent-definitions/{name}/overrides`        , back to defaults
+//! - `POST   /api/v1/agent-definitions/{name}/export`           , the agent as a `.apo` package
+//!
+//! A resolved agent is its package definition, then the user's overrides
+//! field by field, with the model assigned to it in `system.db`. Every write
+//! is recorded in the audit journal through the governance contract; without
+//! a journal, the write is refused rather than left unrecorded.
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{get, put};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+
+use apollia_tools::{
+    AgentOrigin, AgentRepository, AgentRepositoryError, OverrideField, ResolvedAgent,
+};
+
+use crate::agents::overrides::{record_model_change, AgentOverrideError, OverrideWriter};
+use crate::api::routes_llm::backends::map_backend_error;
+use crate::api::routes_llm::presets::AgentModelResponse;
+use crate::api::routes_llm::servers::{api_err, ApiError};
+use crate::api::server::AppState;
+use crate::coordinator::ExecutionBackend;
+use crate::governance::{GovernanceHandle, OverrideChange};
+
+/// Who the journal names for a change made through the API.
+const API_ACTOR: &str = "api";
+
+/// Where an agent comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOriginDto {
+    /// Installed from a package or an agent file.
+    Package,
+    /// Created in the interface, without code.
+    Interface,
+}
+
+impl From<AgentOrigin> for AgentOriginDto {
+    fn from(origin: AgentOrigin) -> Self {
+        match origin {
+            AgentOrigin::Package => AgentOriginDto::Package,
+            AgentOrigin::Interface => AgentOriginDto::Interface,
+        }
+    }
+}
+
+/// An agent in force: its definition, then the user's overrides.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ResolvedAgentResponse {
+    /// Identifier.
+    pub id: String,
+    /// Where the agent comes from.
+    pub origin: AgentOriginDto,
+    /// Package the agent came with.
+    pub package: Option<String>,
+    /// Version of the definition.
+    pub version: String,
+    /// Whether the agent is active.
+    pub enabled: bool,
+    /// Display name.
+    pub name: String,
+    /// What the agent is for, used as its instructions.
+    pub mission: String,
+    /// Example requests.
+    pub examples: Vec<String>,
+    /// Tools granted.
+    pub access: Vec<String>,
+    /// Sources checked.
+    pub sources: Vec<String>,
+    /// The model assigned to the agent, if any.
+    pub model: Option<AgentModelResponse>,
+    /// Autonomy tier the agent runs at: `assisted`, `supervised`,
+    /// `bounded_autonomous` or `long_autonomous`. The user's, else the
+    /// package's, else the global default.
+    pub autonomy: String,
+    /// Whether the agent plans a task before acting on it: `never`, `auto` or
+    /// `always`. The user's, else the package's, else `auto`.
+    pub planning: String,
+    /// Identifier of the user profile designated for the agent; absent when
+    /// it runs with the default profile.
+    pub profile: Option<String>,
+    /// Fields whose value is the user's rather than the package's:
+    /// `name`, `mission`, `examples`, `access`, `sources`, `autonomy`,
+    /// `planning`, `profile`.
+    pub overridden: Vec<String>,
+    /// The definition as the package declares it, before any override.
+    #[schema(value_type = Object)]
+    pub definition: serde_json::Value,
+}
+
+impl From<ResolvedAgent> for ResolvedAgentResponse {
+    fn from(agent: ResolvedAgent) -> Self {
+        Self {
+            id: agent.id,
+            origin: agent.origin.into(),
+            package: agent.package,
+            version: agent.version,
+            enabled: agent.enabled,
+            name: agent.name,
+            mission: agent.mission,
+            examples: agent.examples,
+            access: agent.access,
+            sources: agent.sources,
+            model: agent.model.map(Into::into),
+            autonomy: agent.autonomy.as_str().to_owned(),
+            planning: agent.planning.as_str().to_owned(),
+            profile: agent.profile,
+            overridden: agent
+                .overridden
+                .into_iter()
+                .map(|field| field.as_str().to_owned())
+                .collect(),
+            definition: agent.definition,
+        }
+    }
+}
+
+/// Body of `PUT /api/v1/agent-definitions/{name}/overrides/{field}`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetOverrideRequest {
+    /// The user's value: a string for `name` and `mission`, a tier name for
+    /// `autonomy`, a mode for `planning`, a profile identifier for `profile`,
+    /// a list of strings for `examples`, `access` and `sources`.
+    /// A `sources` entry is a source identifier of `GET /api/v1/sources`, `profile` or `memory`.
+    #[schema(value_type = Object)]
+    pub value: serde_json::Value,
+}
+
+fn open_agents<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+) -> Result<AgentRepository, ApiError> {
+    let path = apollia_core::paths::DataFile::Agents.path(&state.data_dir);
+    AgentRepository::open(&path).map_err(|e| {
+        api_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot open agents.db: {e}"),
+        )
+    })
+}
+
+fn store_error(err: AgentRepositoryError) -> ApiError {
+    match err {
+        AgentRepositoryError::NotFound(name) => {
+            api_err(StatusCode::NOT_FOUND, format!("agent '{name}' not found"))
+        }
+        AgentRepositoryError::InvalidOverride(e) => api_err(StatusCode::UNPROCESSABLE_ENTITY, e),
+        other => api_err(StatusCode::INTERNAL_SERVER_ERROR, other),
+    }
+}
+
+fn override_error(err: AgentOverrideError) -> ApiError {
+    match err {
+        AgentOverrideError::Store(e) => store_error(e),
+        other => api_err(StatusCode::INTERNAL_SERVER_ERROR, other),
+    }
+}
+
+fn parse_field(raw: &str) -> Result<OverrideField, ApiError> {
+    OverrideField::parse(raw).map_err(|e| api_err(StatusCode::UNPROCESSABLE_ENTITY, e))
+}
+
+fn governance<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+) -> Result<GovernanceHandle, ApiError> {
+    state
+        .governance
+        .clone()
+        .filter(GovernanceHandle::journaled)
+        .ok_or_else(|| {
+            api_err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "audit journal not available: an override is not written without its record",
+            )
+        })
+}
+
+/// The override writer of an API call.
+fn writer<'a>(repo: &'a AgentRepository, governance: &'a GovernanceHandle) -> OverrideWriter<'a> {
+    OverrideWriter {
+        repo,
+        governance,
+        actor: API_ACTOR,
+    }
+}
+
+/// The agent `name` resolved, with the model `system.db` assigns it.
+fn resolved<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+    repo: &AgentRepository,
+    name: &str,
+) -> Result<ResolvedAgent, ApiError> {
+    let model = match state.llm_backend_repo.as_ref() {
+        Some(llm) => {
+            let guard = llm.lock().map_err(|_| {
+                api_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "repository lock poisoned",
+                )
+            })?;
+            guard.agent_model(name).map_err(map_backend_error)?
+        }
+        None => None,
+    };
+    repo.resolved(name, model, crate::agents::global_default_autonomy())
+        .map_err(store_error)?
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, format!("agent '{name}' not found")))
+}
+
+/// The default access in force: `[tools.new_agent]` of the configuration
+/// file read now, the reading family when the runtime was given no file or
+/// the file cannot be read.
+fn default_access_setting<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+) -> apollia_tools::DefaultAccess {
+    use apollia_core::config::{
+        resolve_setting, NewAgentConfig, PolicySettings, NEW_AGENT_ACCESS_KEY,
+        NEW_AGENT_FAMILIES_KEY,
+    };
+    let Some(path) = state.config_path.as_ref() else {
+        return apollia_tools::DefaultAccess::default();
+    };
+    let names = |key: &str| -> Option<Vec<String>> {
+        match resolve_setting(path, key, &PolicySettings::none()) {
+            Ok(setting) => serde_json::from_value(setting.value).ok(),
+            Err(error) => {
+                tracing::event!(
+                    tracing::Level::WARN,
+                    key = key,
+                    error = %error,
+                    detail = "the reading family stands in",
+                    "agents.default_access.setting_unreadable"
+                );
+                None
+            }
+        }
+    };
+    match (names(NEW_AGENT_FAMILIES_KEY), names(NEW_AGENT_ACCESS_KEY)) {
+        (Some(families), Some(access)) => {
+            apollia_tools::DefaultAccess::from_config(&NewAgentConfig { families, access })
+        }
+        _ => apollia_tools::DefaultAccess::default(),
+    }
+}
+
+/// `agent` as its card shows it: an agent created without code nobody chose
+/// an access for lists the default access, read against the machine.
+async fn shown<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+    agent: ResolvedAgent,
+) -> ResolvedAgentResponse {
+    match state.tool_registry_handle.as_ref() {
+        Some(registry) => {
+            apollia_tools::with_default_access(agent, registry, &default_access_setting(state))
+                .await
+                .into()
+        }
+        None => agent.into(),
+    }
+}
+
+/// Refuses a `sources` list naming an entry that is neither a source of the
+/// registry nor `profile` nor `memory`. A value that is not a list of strings
+/// is left to the shape check of the write.
+async fn check_sources<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+    value: &serde_json::Value,
+) -> Result<(), ApiError> {
+    let Some(entries) = value.as_array().and_then(|items| {
+        items
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+    }) else {
+        return Ok(());
+    };
+    if crate::agents::sources::only_token_kinds(&entries) {
+        return Ok(());
+    }
+    crate::api::routes_sources::registry(state)?
+        .check_entries(entries)
+        .await
+        .map_err(crate::api::routes_sources::sources_error)
+}
+
+/// `GET /api/v1/agent-definitions`: every stored agent, resolved.
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-definitions",
+    tag = "agents",
+    responses(
+        (status = 200, description = "Stored agents, by identifier", body = Vec<ResolvedAgentResponse>),
+        (status = 500, description = "Store error", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn list_agent_definitions<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+) -> Result<Json<Vec<ResolvedAgentResponse>>, ApiError> {
+    let repo = open_agents(&state)?;
+    let stored = repo.list_stored().map_err(store_error)?;
+    let agents = stored
+        .iter()
+        .map(|agent| resolved(&state, &repo, &agent.name))
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(repo);
+    let mut shown_agents = Vec::with_capacity(agents.len());
+    for agent in agents {
+        shown_agents.push(shown(&state, agent).await);
+    }
+    Ok(Json(shown_agents))
+}
+
+/// `GET /api/v1/agent-definitions/{name}`: one agent, resolved.
+#[utoipa::path(
+    get,
+    path = "/api/v1/agent-definitions/{name}",
+    tag = "agents",
+    params(("name" = String, Path, description = "Agent identifier")),
+    responses(
+        (status = 200, description = "The agent in force", body = ResolvedAgentResponse),
+        (status = 404, description = "Agent not found", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn get_agent_definition<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+    Path(name): Path<String>,
+) -> Result<Json<ResolvedAgentResponse>, ApiError> {
+    let repo = open_agents(&state)?;
+    let agent = resolved(&state, &repo, &name)?;
+    drop(repo);
+    Ok(Json(shown(&state, agent).await))
+}
+
+/// `PUT /api/v1/agent-definitions/{name}/overrides/{field}`: set the user's
+/// value of a field. Kept through every update of the package.
+#[utoipa::path(
+    put,
+    path = "/api/v1/agent-definitions/{name}/overrides/{field}",
+    tag = "agents",
+    params(
+        ("name" = String, Path, description = "Agent identifier"),
+        ("field" = String, Path, description = "name, mission, examples, access, sources, autonomy, planning or profile"),
+    ),
+    request_body = SetOverrideRequest,
+    responses(
+        (status = 200, description = "Override set; the agent in force", body = ResolvedAgentResponse),
+        (status = 404, description = "Agent not found", body = crate::api::openapi::ApiErrorBody),
+        (status = 422, description = "Unknown field, a value of the wrong shape, or a source the registry does not hold", body = crate::api::openapi::ApiErrorBody),
+        (status = 503, description = "Audit journal, or the source registry a sources list needs, not available", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn set_agent_override<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+    Path((name, field)): Path<(String, String)>,
+    Json(req): Json<SetOverrideRequest>,
+) -> Result<Json<ResolvedAgentResponse>, ApiError> {
+    let field = parse_field(&field)?;
+    if field == OverrideField::Sources {
+        check_sources(&state, &req.value).await?;
+    }
+    let governance = governance(&state)?;
+    let repo = open_agents(&state)?;
+    writer(&repo, &governance)
+        .set(&name, field, &req.value)
+        .map_err(override_error)?;
+    tracing::event!(
+        tracing::Level::INFO,
+        agent = %name,
+        field = %field.as_str(),
+        "agents.override.set"
+    );
+    let agent = resolved(&state, &repo, &name)?;
+    drop(repo);
+    Ok(Json(shown(&state, agent).await))
+}
+
+/// `DELETE /api/v1/agent-definitions/{name}/overrides/{field}`: remove the
+/// user's value of a field; the package default applies again.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/agent-definitions/{name}/overrides/{field}",
+    tag = "agents",
+    params(
+        ("name" = String, Path, description = "Agent identifier"),
+        ("field" = String, Path, description = "name, mission, examples, access, sources, autonomy, planning or profile"),
+    ),
+    responses(
+        (status = 200, description = "Override removed, or there was none; the agent in force", body = ResolvedAgentResponse),
+        (status = 404, description = "Agent not found", body = crate::api::openapi::ApiErrorBody),
+        (status = 422, description = "Unknown field", body = crate::api::openapi::ApiErrorBody),
+        (status = 503, description = "Audit journal not available", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn remove_agent_override<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+    Path((name, field)): Path<(String, String)>,
+) -> Result<Json<ResolvedAgentResponse>, ApiError> {
+    let field = parse_field(&field)?;
+    let governance = governance(&state)?;
+    let repo = open_agents(&state)?;
+    let removed = writer(&repo, &governance)
+        .remove(&name, field)
+        .map_err(override_error)?;
+    tracing::event!(
+        tracing::Level::INFO,
+        agent = %name,
+        field = %field.as_str(),
+        removed = removed,
+        "agents.override.removed"
+    );
+    let agent = resolved(&state, &repo, &name)?;
+    drop(repo);
+    Ok(Json(shown(&state, agent).await))
+}
+
+/// `DELETE /api/v1/agent-definitions/{name}/overrides`: back to defaults,
+/// every override of the agent removed.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/agent-definitions/{name}/overrides",
+    tag = "agents",
+    params(("name" = String, Path, description = "Agent identifier")),
+    responses(
+        (status = 200, description = "Back to defaults; the agent in force", body = ResolvedAgentResponse),
+        (status = 404, description = "Agent not found", body = crate::api::openapi::ApiErrorBody),
+        (status = 503, description = "Audit journal not available", body = crate::api::openapi::ApiErrorBody),
+    )
+)]
+pub async fn reset_agent_overrides<B: ExecutionBackend + Clone>(
+    State(state): State<AppState<B>>,
+    Path(name): Path<String>,
+) -> Result<Json<ResolvedAgentResponse>, ApiError> {
+    let governance = governance(&state)?;
+    let repo = open_agents(&state)?;
+    let fields = writer(&repo, &governance)
+        .reset(&name)
+        .map_err(override_error)?;
+    // The model assigned in `system.db` is not an override, but going back
+    // to defaults removes it with them, and records its removal.
+    let model_cleared = clear_model(&state, &governance, &name)?;
+    tracing::event!(
+        tracing::Level::INFO,
+        agent = %name,
+        removed = fields.len(),
+        model_cleared = model_cleared,
+        "agents.override.reset"
+    );
+    let agent = resolved(&state, &repo, &name)?;
+    drop(repo);
+    Ok(Json(shown(&state, agent).await))
+}
+
+/// Removes the model assigned to `name`, recording the removal; `false` when
+/// none was assigned or no model store is open.
+fn clear_model<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+    governance: &GovernanceHandle,
+    name: &str,
+) -> Result<bool, ApiError> {
+    let Some(llm) = state.llm_backend_repo.as_ref() else {
+        return Ok(false);
+    };
+    let cleared = {
+        let guard = llm.lock().map_err(|_| {
+            api_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "repository lock poisoned",
+            )
+        })?;
+        guard.clear_agent_model(name).map_err(map_backend_error)?
+    };
+    if cleared {
+        record_model_change(governance, name, OverrideChange::Removed, API_ACTOR)
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
+    Ok(cleared)
+}
+
+/// Routes of the stored agents.
+pub fn agent_definition_routes<B: ExecutionBackend + Clone>() -> Router<AppState<B>> {
+    Router::new()
+        .route(
+            "/api/v1/agent-definitions",
+            get(list_agent_definitions::<B>).post(create::create_agent_definition::<B>),
+        )
+        .route(
+            "/api/v1/agent-definitions/:name",
+            get(get_agent_definition::<B>),
+        )
+        .route(
+            "/api/v1/agent-drafts/offer",
+            get(draft::get_agent_draft_offer::<B>),
+        )
+        .route(
+            "/api/v1/agent-drafts",
+            axum::routing::post(draft::check_agent_draft::<B>),
+        )
+        .route(
+            "/api/v1/agent-definitions/:name/overrides",
+            axum::routing::delete(reset_agent_overrides::<B>),
+        )
+        .route(
+            "/api/v1/agent-definitions/:name/overrides/:field",
+            put(set_agent_override::<B>).delete(remove_agent_override::<B>),
+        )
+        .route(
+            "/api/v1/agent-definitions/:name/export",
+            axum::routing::post(export::export_agent_definition::<B>),
+        )
+}
+
+pub mod create;
+pub mod draft;
+pub mod export;
+
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod tests_create;
+#[cfg(test)]
+mod tests_draft;
+#[cfg(test)]
+mod tests_export;

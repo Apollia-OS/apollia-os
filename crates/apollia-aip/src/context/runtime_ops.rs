@@ -4,11 +4,10 @@
 //! the parent, the methods the runtime calls to build and equip a context
 //! live here.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use apollia_core::events::{AgentId, EventBusSender, RuntimeEvent};
-use apollia_llm::{LlmRouter, ObservabilityConfig, StepBudgetView, ToolCallHelper};
+use apollia_llm::{LlmRouter, ObservabilityConfig, StepBudgetView};
 use apollia_runtime::a2a::A2AInvoker;
 use apollia_runtime::mailbox::AgentMailboxHandle;
 
@@ -31,12 +30,14 @@ impl RuntimeContext {
     ///
     /// The context never panics at construction: degradation is signaled, but
     /// the agent decides whether the absence of a capability is fatal.
-    // REASON: test constructor mirroring the production bridge wiring, handle by handle.
+    // TEST-ONLY: production builds the context of a tool or a workflow through
+    // `package_tools`; this constructor builds one handle by handle for the
+    // tests of the context services.
+    // REASON: one argument per handle of the context it builds.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_llm(
         llm_router: Option<Arc<LlmRouter>>,
         budget_view: Arc<StepBudgetView>,
-        tool_helper: Arc<ToolCallHelper>,
         obs_config: Arc<ObservabilityConfig>,
         event_bus: EventBusSender,
         agent_id: AgentId,
@@ -44,7 +45,6 @@ impl RuntimeContext {
         memory_interface: Option<crate::memory::MemoryInterface>,
         mailbox: Option<AgentMailboxHandle>,
         agent_name: String,
-        user_context: Option<HashMap<String, Vec<(String, String)>>>,
         a2a_invoker: Option<Arc<A2AInvoker>>,
         user_memory_writable: bool,
     ) -> Self {
@@ -62,7 +62,6 @@ impl RuntimeContext {
             } else {
                 Some(LlmProxy::new(
                     router,
-                    tool_helper,
                     budget_view,
                     obs_config,
                     Some(event_bus),
@@ -80,23 +79,15 @@ impl RuntimeContext {
 
         // Build the nested surfaces.
         // All are built systematically (at worst in no-op mode) so that
-        // `ctx.a2a`, `ctx.events`, etc. are always accessible without
+        // `ctx.events`, `ctx.secrets`, etc. are always accessible without
         // branching on the Python side. The gating values (datasources,
         // templates, secrets) default to empty; the bridge overrides them
         // after reading the manifest via the dedicated builders.
         let bus_for_iface = bus_for_token.clone();
         let agent_id_for_iface = agent_id_stored.clone();
-        let agent_name_for_iface = agent_name.clone();
-        let a2a_invoker_for_iface = a2a_invoker.clone();
 
-        let (a2a_iface, events_iface, datasources_iface, templates_iface, secrets_iface) =
+        let (events_iface, datasources_iface, templates_iface, secrets_iface) =
             pyo3::Python::with_gil(|py| {
-                let a2a = crate::a2a::A2AInterface::new(
-                    a2a_invoker_for_iface,
-                    agent_name_for_iface,
-                    0,
-                    None,
-                );
                 let events = crate::events::EventsInterface::new(
                     Some(bus_for_iface),
                     None,
@@ -108,7 +99,6 @@ impl RuntimeContext {
                 let tp = crate::templates::TemplatesInterface::new(Vec::new());
                 let sc = crate::secrets::SecretsInterface::new(None, Vec::new());
                 (
-                    pyo3::Py::new(py, a2a).ok(),
                     pyo3::Py::new(py, events).ok(),
                     pyo3::Py::new(py, ds).ok(),
                     pyo3::Py::new(py, tp).ok(),
@@ -126,7 +116,6 @@ impl RuntimeContext {
             mailbox_allowlist: None,
             mailbox_send_requires_approval: false,
             agent_name,
-            user_context,
             a2a_invoker,
             user_memory_writable,
             workspace: None,
@@ -139,7 +128,6 @@ impl RuntimeContext {
             profile: None,
             agent_id: agent_id_stored,
             task_id: None,
-            a2a_iface,
             events_iface,
             datasources_iface,
             templates_iface,
@@ -149,27 +137,44 @@ impl RuntimeContext {
             input_response: None,
         }
     }
+    /// The context a package tool runs with, on behalf of the agent `caller`
+    /// that called it: `ctx.agent_name` is the caller, `ctx.logger` and
+    /// `ctx.log` report under its name. No LLM, no tool proxy and no memory
+    /// are attached: the calling agent's engine runs those, not the tool.
+    pub fn for_package_tool(caller: &str) -> Self {
+        Self::bare(caller.to_string())
+    }
+
+    /// The context a package workflow runs with: the one of a package tool,
+    /// with `ctx.llm` attached. A workflow is its own caller, so the steps of
+    /// its body call the models themselves, each call charged to the budget
+    /// the proxy was built with.
+    pub fn for_package_workflow(workflow: &str, llm: LlmProxy) -> Self {
+        let mut context = Self::bare(workflow.to_string());
+        context.llm = Some(llm);
+        context
+    }
+
     /// Builds a minimal context for intra-crate unit tests.
     ///
     /// All optional fields are `None`. Must never be called in production code.
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
-        let test_agent_id = AgentId::new_v4();
-        let (a2a_iface, events_iface, datasources_iface, templates_iface, secrets_iface) =
+        Self::bare("test-agent".to_string())
+    }
+
+    /// A context with every optional surface left unset and the nested ones
+    /// built in no-op mode.
+    fn bare(agent_name: String) -> Self {
+        let agent_id = AgentId::new_v4();
+        let (events_iface, datasources_iface, templates_iface, secrets_iface) =
             pyo3::Python::with_gil(|py| {
-                let a2a = crate::a2a::A2AInterface::new(None, "test-agent".to_string(), 0, None);
-                let events = crate::events::EventsInterface::new(
-                    None,
-                    None,
-                    test_agent_id.clone(),
-                    None,
-                    None,
-                );
+                let events =
+                    crate::events::EventsInterface::new(None, None, agent_id.clone(), None, None);
                 let ds = crate::datasources::DatasourcesInterface::new(Vec::new());
                 let tp = crate::templates::TemplatesInterface::new(Vec::new());
                 let sc = crate::secrets::SecretsInterface::new(None, Vec::new());
                 (
-                    pyo3::Py::new(py, a2a).ok(),
                     pyo3::Py::new(py, events).ok(),
                     pyo3::Py::new(py, ds).ok(),
                     pyo3::Py::new(py, tp).ok(),
@@ -185,8 +190,7 @@ impl RuntimeContext {
             supports_mailbox: false,
             mailbox_allowlist: None,
             mailbox_send_requires_approval: false,
-            agent_name: "test-agent".to_string(),
-            user_context: None,
+            agent_name,
             a2a_invoker: None,
             user_memory_writable: false,
             workspace: None,
@@ -197,9 +201,8 @@ impl RuntimeContext {
             notify: None,
             stt: None,
             profile: None,
-            agent_id: test_agent_id,
+            agent_id,
             task_id: None,
-            a2a_iface,
             events_iface,
             datasources_iface,
             templates_iface,
@@ -247,13 +250,35 @@ impl RuntimeContext {
         self.stt = pyo3::Python::with_gil(|py| pyo3::Py::new(py, stt).ok());
         self
     }
-    /// Attaches a user profile interface to this context.
+    /// Attaches a user profile interface to this context, when the agent's
+    /// profile source is checked.
     ///
-    /// Called after [`new_with_llm`](RuntimeContext::new_with_llm) when a
-    /// `MemoryManager` targeting `__user__` is available. If not called,
-    /// `ctx.profile` is `None`.
-    pub fn with_profile(mut self, profile: crate::profile::ProfileInterface) -> Self {
+    /// The source resolves from the package default of the agent's `sources`,
+    /// then the user's override ([`crate::profile::ProfileInterface::source_checked`]);
+    /// unchecked, or never called, `ctx.profile` is `None`. The interface
+    /// reports each read on the bus of this context, tied to the task bound by
+    /// [`with_task_id`](RuntimeContext::with_task_id).
+    pub fn with_profile(mut self, mut profile: crate::profile::ProfileInterface) -> Self {
+        if !profile.source_checked() {
+            tracing::event!(
+                tracing::Level::DEBUG,
+                agent = %self.agent_name,
+                "profile.source.unchecked"
+            );
+            self.profile = None;
+            return self;
+        }
+        profile.report_reads_on(self.event_bus.clone());
+        if let Some(task_id) = &self.task_id {
+            profile.report_reads_for_task(task_id.clone());
+        }
         self.profile = pyo3::Python::with_gil(|py| pyo3::Py::new(py, profile).ok());
+        self
+    }
+    /// Attaches a memory interface to a context built without one, such as
+    /// the context of a package tool under a host grant.
+    pub(crate) fn with_memory(mut self, memory: crate::memory::MemoryInterface) -> Self {
+        self.memory = pyo3::Python::with_gil(|py| pyo3::Py::new(py, memory).ok());
         self
     }
     /// Propagates the total wall-clock budget (in seconds) from the manifest
@@ -280,6 +305,15 @@ impl RuntimeContext {
         self.chat_message_id = Some(message_id.into());
         self
     }
+    /// Binds `ctx.llm` to the model this agent asks for: the user's
+    /// assignment, else the manifest's backend, resolved again at each call
+    /// that names no backend. A context without `ctx.llm` is left unchanged.
+    pub fn with_agent_model(mut self, binding: apollia_llm::AgentModelBinding) -> Self {
+        if let Some(llm) = self.llm.take() {
+            self.llm = Some(llm.with_agent_model(binding));
+        }
+        self
+    }
     /// Binds this context to the current task id.
     ///
     /// Must be called before `bridge.call_run()` so that `ctx.log()` can tag
@@ -290,6 +324,16 @@ impl RuntimeContext {
     /// emitting `LlmCallStarted`.
     pub fn with_task_id(mut self, task_id: impl Into<String>) -> Self {
         let task_id_str = task_id.into();
+        if let Some(profile) = &self.profile {
+            pyo3::Python::with_gil(|py| match profile.try_borrow_mut(py) {
+                Ok(mut profile) => profile.report_reads_for_task(task_id_str.clone()),
+                Err(e) => tracing::event!(
+                    tracing::Level::WARN,
+                    error = %e,
+                    "profile.trace.task_unbound"
+                ),
+            });
+        }
         // Propagate to the LlmProxy for observability.
         if let Some(llm) = self.llm.take() {
             self.llm = Some(llm.with_task_context(task_id_str.clone(), self.agent_id.to_string()));

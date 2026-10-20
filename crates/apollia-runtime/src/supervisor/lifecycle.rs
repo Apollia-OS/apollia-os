@@ -1,6 +1,7 @@
 use super::*;
 
 use super::bootstrap::{migrate_mcp_from_toml, start_mcp_manager};
+use crate::agents::available::{make_available, stored_agents_to_register, Availability};
 
 impl Supervisor {
     /// Create a new Supervisor with the given configuration.
@@ -8,34 +9,30 @@ impl Supervisor {
         Self { config }
     }
 
-    /// Phase 3b: open `mcp.db`, run the one-shot `mcp.toml` migration when
-    /// empty, and start the MCP client manager (always, even with no servers).
-    pub(in crate::supervisor) async fn start_mcp(
+    /// Phase 3b, first half: open `mcp.db`, run the one-shot `mcp.toml`
+    /// migration when empty, and read the declared servers. `None` when the
+    /// store cannot be opened: the runtime continues without MCP.
+    pub(in crate::supervisor) fn open_mcp_store(
         &self,
-        tool_registry_handle: &ToolRegistryHandle,
-        event_sender: &EventBusSender,
-    ) -> (
-        Option<McpClientManagerHandle>,
-        Option<Arc<std::sync::Mutex<McpServerRepository>>>,
-    ) {
+    ) -> Option<(
+        McpServerRepository,
+        Vec<apollia_mcp::config::McpServerConfig>,
+    )> {
         let mcp_db_path = self
             .config
             .data_dir
             .join(apollia_core::paths::DataFile::Mcp.file_name());
-        let mcp_config_path = self.config.data_dir.join("mcp.toml");
-
         let repo = match McpServerRepository::open(&mcp_db_path) {
             Ok(repo) => repo,
             Err(e) => {
                 warn!(error = %e, detail = "continuing without MCP", "mcp.store.open.failed");
-                return (None, None);
+                return None;
             }
         };
 
         // One-shot migration from mcp.toml when the database is empty.
-        migrate_mcp_from_toml(&repo, &mcp_config_path);
+        migrate_mcp_from_toml(&repo, &self.config.data_dir.join("mcp.toml"));
 
-        // Load server list and start the manager.
         let server_configs = match repo.list() {
             Ok(v) => v,
             Err(e) => {
@@ -43,12 +40,63 @@ impl Supervisor {
                 Vec::new()
             }
         };
+        Some((repo, server_configs))
+    }
+
+    /// Phase 3a: submit every existing connection (the servers of `mcp_store`,
+    /// `native_accounts`, the mailboxes of the data directory) to `admission`,
+    /// and keep the ones it refuses.
+    pub(in crate::supervisor) fn forbidden_connections(
+        &self,
+        admission: &dyn crate::governance::ConnectionAdmission,
+        mcp_store: Option<&(
+            McpServerRepository,
+            Vec<apollia_mcp::config::McpServerConfig>,
+        )>,
+        native_accounts: &[crate::connections::NativeAccounts],
+    ) -> crate::governance::ForbiddenConnections {
+        let mailboxes =
+            apollia_connectors::imap::ImapAccountStore::accounts_in(&self.config.data_dir)
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "connections.imap.unreadable");
+                    Vec::new()
+                });
+        crate::governance::ForbiddenConnections::compute(
+            admission,
+            mcp_store.map_or(&[][..], |(_, configs)| configs),
+            native_accounts,
+            &mailboxes,
+        )
+    }
+
+    /// Phase 3b, second half: start the MCP client manager (always, even with
+    /// no servers) on every declared server the policy did not forbid.
+    pub(in crate::supervisor) async fn start_mcp(
+        &self,
+        tool_registry_handle: &ToolRegistryHandle,
+        event_sender: &EventBusSender,
+        store: Option<(
+            McpServerRepository,
+            Vec<apollia_mcp::config::McpServerConfig>,
+        )>,
+        forbidden: &crate::governance::ForbiddenConnections,
+    ) -> (
+        Option<McpClientManagerHandle>,
+        Option<Arc<std::sync::Mutex<McpServerRepository>>>,
+    ) {
+        let Some((repo, server_configs)) = store else {
+            return (None, None);
+        };
+        let server_configs = server_configs
+            .into_iter()
+            .filter(|config| !forbidden.contains_mcp_server(&config.name))
+            .collect();
 
         let handle = start_mcp_manager(
             server_configs,
             tool_registry_handle,
             event_sender,
-            &mcp_config_path,
+            &self.config.data_dir.join("mcp.toml"),
             self.config.mcp_loading,
         )
         .await;
@@ -86,13 +134,16 @@ impl Supervisor {
         } else {
             self.config.api_config.bind_addr.clone()
         };
-        // When TCP is disabled (Unix-socket-only host), fall back to the nominal
+        // When TCP is disabled (Unix-socket-only host), fall back to the default
         // port for the callback URL string; webhook callbacks are only reachable
         // when a TCP listener is actually bound.
         let api_base_url = format!(
             "http://{}:{}",
             connect_addr,
-            self.config.api_config.tcp_port.unwrap_or(7771)
+            self.config
+                .api_config
+                .tcp_port
+                .unwrap_or(apollia_core::config::DEFAULT_API_PORT)
         );
         let engine = NotificationEngine::new(
             notif_config.clone(),
@@ -108,7 +159,11 @@ impl Supervisor {
 
     /// Phase 4c: open `runtime_events.db` and spawn the runtime-events
     /// subscriber. Best-effort: failures are logged, never fatal.
-    pub(in crate::supervisor) async fn spawn_event_persistor(&self, event_sender: &EventBusSender) {
+    pub(in crate::supervisor) async fn spawn_event_persistor(
+        &self,
+        event_sender: &EventBusSender,
+        observability: &crate::config_reload::Live<apollia_core::ObservabilityConfig>,
+    ) {
         let db_path = self
             .config
             .data_dir
@@ -128,7 +183,7 @@ impl Supervisor {
                 crate::observability::spawn_runtime_events_subscriber(
                     handle,
                     event_sender,
-                    self.config.obs_config.clone(),
+                    observability.clone(),
                 );
                 info!(
                     path = %db_path.display(),
@@ -205,6 +260,8 @@ impl Supervisor {
         &self,
         system_db_path: &std::path::Path,
         llama_server_supervisor: &Option<Arc<crate::llama_server::LlamaServerSupervisor>>,
+        mlx_engine: &Option<Arc<crate::mlx_engine::MlxEngineSupervisor>>,
+        governance: &crate::governance::InferenceGovernance,
     ) -> (
         Option<Arc<LlmRouter>>,
         Option<Arc<std::sync::Mutex<LlmBackendRepository>>>,
@@ -223,20 +280,62 @@ impl Supervisor {
         // setup_local_llm writes only to TOML, not to system.db.
         self.migrate_llm_backends_from_toml(&repo);
 
+        // Declared inference servers: a key the schema migration left in clear
+        // moves into the secret store, then every enabled server is resolved
+        // so its models route as `<server>/<model>`.
+        crate::inference_servers::adopt_pending_keys(
+            &repo,
+            crate::inference_servers::default_store,
+        );
+        // Then every key a backend row still holds in clear leaves
+        // `config_json` for the store.
+        crate::backend_keys::seal_stored_backend_keys(
+            &repo,
+            crate::inference_servers::default_store,
+        );
+        let server_endpoints = crate::inference_servers::server_endpoints(
+            &repo,
+            crate::inference_servers::default_store,
+            governance,
+        );
+
         // Override instantiation of `LlamaCpp` backends so they route through
-        // the managed llama-server. Cloud backends keep their standard
-        // `instantiate_from_config` path. The factory is shared with the reload
-        // paths (see `llama_server_backend::llama_server_override`).
+        // the local engine their model's format calls for. Cloud backends keep
+        // their standard `instantiate_from_config` path. The factory is shared
+        // with the reload paths (see `local_engine::local_engine_override`).
         let router_result = {
-            let factory =
-                crate::llama_server_backend::llama_server_override(llama_server_supervisor.clone());
-            LlmRouter::from_repository_with_override(&repo, factory).await
+            let factory = crate::local_engine::local_engine_override(
+                llama_server_supervisor.clone(),
+                mlx_engine.clone(),
+                Some(crate::installed_models::models_dir(&self.config.data_dir)),
+            );
+            match crate::backend_keys::routable_configs(
+                &repo,
+                crate::inference_servers::default_store,
+                governance,
+            ) {
+                Ok((configs, Some(default))) => {
+                    LlmRouter::from_backend_configs_with_override(configs, default, factory).await
+                }
+                Ok((_, None)) => Err(apollia_llm::LlmError::BackendUnavailable {
+                    backend: "default".to_string(),
+                    reason:
+                        "no default LLM backend in system.db - configure one with is_default=true"
+                            .to_string(),
+                }),
+                Err(e) => Err(apollia_llm::LlmError::BackendUnavailable {
+                    backend: apollia_core::paths::DataFile::System
+                        .file_name()
+                        .to_string(),
+                    reason: e.to_string(),
+                }),
+            }
         };
 
         let repo = Arc::new(std::sync::Mutex::new(repo));
         match router_result {
             Ok(router) => {
-                let router = self.finalize_llm_router(router);
+                let router = self.finalize_llm_router(router.with_servers(server_endpoints));
                 info!("supervisor.llm_router.ready");
                 (Some(Arc::new(router)), Some(repo))
             }
@@ -282,10 +381,18 @@ impl Supervisor {
         }
     }
 
-    /// Propagate the `[llm.routing]` TOML section onto the freshly built router
-    /// and log the ready backends. `system.db` does not store routing.
-    fn finalize_llm_router(&self, mut router: LlmRouter) -> LlmRouter {
+    /// Propagate the `[llm.routing]` and `[llm.observability]` TOML sections
+    /// onto the freshly built router and log the ready backends. `system.db`
+    /// stores neither.
+    pub(in crate::supervisor) fn finalize_llm_router(&self, mut router: LlmRouter) -> LlmRouter {
         if let Some(llm_cfg) = self.config.llm_config.as_ref() {
+            router = router.with_observability(llm_cfg.observability.clone());
+            if llm_cfg.observability.debug_log_prompt {
+                tracing::info!(
+                    detail = "every prompt is logged at trace level",
+                    "llm.observability.debug_log_prompt.on"
+                );
+            }
             if let Some(routing) = llm_cfg.routing.as_ref() {
                 router = router.with_routing(routing.clone());
                 tracing::info!(
@@ -305,9 +412,12 @@ impl Supervisor {
         router
     }
 
-    /// Phase 11: load every enabled installed agent, register it, install its
-    /// venv packages, and wire an [`ExecutionCoordinator`] into the router.
-    /// Errors are logged, never fatal.
+    /// Phase 11: make every enabled stored agent available.
+    ///
+    /// Each agent is registered from the definition its store holds. An agent
+    /// is data: nothing is imported. A disabled agent is not registered, so
+    /// it is not listed among the available ones. Errors are logged, never
+    /// fatal.
     pub(in crate::supervisor) async fn auto_load_installed_agents<
         B: ExecutionBackend + Clone + From<crate::coordinator::DynBackend>,
     >(
@@ -316,7 +426,7 @@ impl Supervisor {
         let Some(repo) = ctx.agent_repository else {
             return;
         };
-        let agents = match repo.list_enabled() {
+        let agents = match stored_agents_to_register(repo) {
             Ok(agents) => agents,
             Err(e) => {
                 warn!(error = %e, detail = "skipping the auto-load", "agent.list.failed");
@@ -326,141 +436,17 @@ impl Supervisor {
         if agents.is_empty() {
             info!("agent.autoload.empty");
         }
+        let runtime = Availability {
+            registry: ctx.registry_handle,
+            router: ctx.router_handle,
+            event_sender: ctx.event_sender,
+            backend: ctx.base_backend,
+            task_repository: ctx.task_repository,
+            observability: ctx.obs_config.clone(),
+        };
         for agent in &agents {
-            Self::load_one_installed_agent(agent, &ctx).await;
-        }
-    }
-
-    /// Load and wire a single installed agent. Skips disabled agents and logs
-    /// (never propagates) any per-agent failure.
-    async fn load_one_installed_agent<
-        B: ExecutionBackend + Clone + From<crate::coordinator::DynBackend>,
-    >(
-        agent: &apollia_tools::InstalledAgent,
-        ctx: &AutoLoadCtx<'_, B>,
-    ) {
-        if !agent.enabled {
-            warn!(name = %agent.name, "agent.autoload.skipped");
-            return;
-        }
-        let manifest = match ctx.agent_loader.load_and_validate(&agent.install_path) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(name = %agent.name, error = %e, "agent.load.failed");
-                let _ = ctx.event_sender.send(RuntimeEvent::AgentLoadFailed {
-                    name: agent.name.clone(),
-                    error: e.to_string(),
-                });
-                return;
-            }
-        };
-
-        let max_concurrent = manifest.max_concurrent_tasks;
-        let agent_name = manifest.name.clone();
-
-        // Install pip packages into the agent's venv before registration.
-        // On failure the agent continues in Degraded state, boot is never blocked.
-        let degraded_reason = Self::setup_agent_venv(ctx.data_dir, &manifest).await;
-
-        // Register in AgentRegistry (state = Initializing).
-        let agent_id = match ctx.registry_handle.register(manifest).await {
-            Ok(id) => id,
-            Err(e) => {
-                warn!(name = %agent_name, error = %e, "agent.register.failed");
-                return;
-            }
-        };
-
-        // Transition: Initializing → Active (required by state machine).
-        if let Err(e) = ctx
-            .registry_handle
-            .update_state(agent_id.as_str(), ProcessState::Active)
-            .await
-        {
-            warn!(name = %agent_name, error = %e, "agent.activate.failed");
-            return;
-        }
-
-        // If package installation failed: Active → Degraded.
-        if degraded_reason.is_some() {
-            ctx.registry_handle
-                .update_state(agent_id.as_str(), ProcessState::Degraded)
-                .await
-                .unwrap_or_else(
-                    |e| warn!(name = %agent_name, error = %e, "agent.state.degraded.failed"),
-                );
-        }
-
-        // Create ExecutionCoordinator with backend factory.
-        let agent_backend: B = match ctx.backend_factory {
-            Some(factory) => {
-                let dyn_backend = factory.create_for_agent(&agent.install_path, &agent.manifest);
-                B::from(dyn_backend)
-            }
-            None => ctx.base_backend.clone(),
-        };
-        let mut coordinator = ExecutionCoordinator::new(
-            agent_id.clone(),
-            max_concurrent,
-            ctx.event_sender.clone(),
-            agent_backend,
-        )
-        .with_agent_name(agent_name.clone());
-        if let Some(repo) = ctx.task_repository {
-            coordinator =
-                coordinator.with_task_repository(Arc::clone(repo), ctx.obs_config.clone());
-        }
-
-        // Register coordinator in TaskRouter.
-        let _ = ctx
-            .router_handle
-            .register_coordinator(agent_id.clone(), coordinator)
-            .await;
-
-        info!(name = %agent_name, id = %agent_id, "agent.autoloaded");
-    }
-
-    /// Install an agent's pip packages into its venv. Returns `Some(reason)`
-    /// when the agent should start in a Degraded state, `None` on success or
-    /// when there are no packages to install.
-    async fn setup_agent_venv(
-        data_dir: &std::path::Path,
-        manifest: &apollia_core::AgentManifest,
-    ) -> Option<String> {
-        if manifest.packages.is_empty() {
-            return None;
-        }
-        let venv_base = data_dir.join("venvs");
-        let executor = match apollia_tools::tools::python_executor::PythonExecutor::new(
-            &manifest.name,
-            &venv_base,
-        ) {
-            Ok(executor) => executor,
-            Err(e) => {
-                warn!(
-                    agent = %manifest.name,
-                    error = %e,
-                    detail = "the agent starts degraded", "agent.venv.create.failed"
-                );
-                return Some(e.to_string());
-            }
-        };
-        match executor.setup_venv(&manifest.packages).await {
-            Ok(()) => {
-                info!(
-                    agent = %manifest.name,
-                    packages = ?manifest.packages,
-                    "agent.packages.installed"
-                );
-                None
-            }
-            Err(e) => {
-                warn!(
-                    agent = %manifest.name,
-                    error = %e,
-                    detail = "the agent starts degraded", "agent.packages.install.failed"
-                );
-                Some(e.to_string())
+            if let Err(e) = make_available(agent, &runtime).await {
+                warn!(name = %agent.name, error = %e, "agent.register.failed");
             }
         }
     }

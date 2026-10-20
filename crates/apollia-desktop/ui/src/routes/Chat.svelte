@@ -1,31 +1,32 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { t, locale } from "svelte-i18n";
-  import { Plus, Search } from "lucide-svelte";
-  import { connectionStatus } from "$lib/stores/sse";
-  import {
-    activeChatSessions,
-    closedChatSessions,
-    pendingChatSessionId,
-    openNewChatRequested,
-  } from "$lib/stores/chat";
+  import { Plus, Search, Trash2 } from "lucide-svelte";
+  import { connectionStatus, refreshChatSessionsViaIpc } from "$lib/stores/sse";
+  import { pendingChatSessionId, openNewChatRequested } from "$lib/stores/chat";
   import { chatSessions } from "$lib/stores/sse";
+  import { createChatSession } from "$lib/ipc/agents";
   import { Skeleton } from "$lib/components/ui/skeleton";
-  import type { ChatSessionSummary, ProjectSummary } from "$lib/types";
-  import { deleteChatSession, renameChatSession } from "$lib/ipc/chat";
-  import { listProjects } from "$lib/ipc/projects";
-  import ChatConversation from "../components/chat/ChatConversation.svelte";
-  import EmptySessionsState from "../components/chat/EmptySessionsState.svelte";
-  import QuickPicker from "../components/chat/QuickPicker.svelte";
-  import ChatConfigPanelBody from "../components/chat/ChatConfigPanelBody.svelte";
+  import type { ChatSessionSummary } from "$lib/types";
+  import { renameChatSession } from "$lib/ipc/chat";
+  import { removeConversation } from "$lib/stores/chatTrash";
+  import ChatPanes from "../components/chat/ChatPanes.svelte";
+  import { activeSessionId, chatPanes } from "$lib/stores/chatPanes";
+  import ChatIntegrationsTab from "../components/chat/ChatIntegrationsTab.svelte";
+  import SessionSettingsTab from "../components/chat/settings/SessionSettingsTab.svelte";
   import {
     decoratedSessions,
+    sessionActivityAt,
     markSessionRead,
-    type DecoratedSession,
+    sessionSort,
+    sidebarDensity,
+    sidebarSessions,
   } from "$lib/stores/chatSessions";
+  import ConversationList from "../components/chat/ConversationList.svelte";
+  import ConversationSortMenu from "../components/chat/ConversationSortMenu.svelte";
+  import ConversationTrash from "../components/chat/ConversationTrash.svelte";
   import {
     toggleSessionsSidebar,
-    openSessionsDrawer,
     closeSessionsDrawer,
     chatViewport,
     sessionsDrawerOpen,
@@ -42,34 +43,46 @@
   } from "$lib/shortcuts/chatShortcuts";
   import { focusMessage } from "$lib/shortcuts/messageNav";
   import { commandPaletteOpen } from "$lib/stores/commandPalette";
+  import { developerMode } from "$lib/stores/developerMode";
   import { registerShortcuts } from "$lib/stores/shortcuts";
+  import { requestChatTargetSelector } from "$lib/stores/chatTargetSelector";
+  import { showReloadLast } from "$lib/chat/modelLoad";
+  import { emptyConversationToReopen, regenerateChord } from "$lib/chat/chatBehaviours";
+  import { chatRegenerateShortcut, chatSingleEmpty } from "$lib/stores/chatBehaviours";
+  import { requestRegenerateLast } from "$lib/stores/chatRegenerate";
+  import { lastLoadedModel, loadedModels, requestReloadLast } from "$lib/stores/modelResidency";
+  import ModelLoadDialog from "../components/chat/ModelLoadDialog.svelte";
   import CommandPalette from "../components/chat/CommandPalette.svelte";
-  import ShortcutsHelpDialog from "../components/chat/ShortcutsHelpDialog.svelte";
 
   // Operator design-system primitives - V3 Chat Refonte v2.
   import {
-    ConversationRow,
     Journal,
     PlanDagPanel,
     type JournalEvent,
     type JournalMode,
-    type ConversationState,
   } from "$lib/components/operator";
+  import { llmJournalEvents, readGeneration } from "$lib/chat/generationStats";
+  import { loadTurnCalls, turnCallsOf } from "$lib/chat/turnCalls.svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
 
-  let selectedSessionId = $state<string | null>(null);
+  // The conversation of the active pane: the list, the shortcuts and the
+  // right panel act on it.
+  const selectedSessionId = $derived($activeSessionId);
   let showNewChatPicker = $state(false);
-  let showShortcutsHelp = $state(false);
   let sessionSearchQuery = $state("");
-  let journalMode = $state<JournalMode>("operator");
-  let railTab = $state<"journal" | "plan" | "config">("journal");
+  // The left rail shows the trash in place of the list while this is on.
+  let showTrash = $state(false);
+  // The journal follows the developer mode: the technical reading when it
+  // is on, the plain one otherwise. There is no per-screen switch.
+  const journalMode = $derived<JournalMode>($developerMode ? "builder" : "operator");
+  let railTab = $state<"journal" | "plan" | "integrations" | "settings">("journal");
 
-  // Open the inspector on the Config tab (from a row "..." action or the header
-  // gear). The config panel reads the active session via `currentSession`.
+  // Open the inspector on the Settings tab (from a row "..." action or the
+  // header gear). The tab reads the active session via `currentSession`.
   function openConfig(sessionId?: string): void {
     if (sessionId && sessionId !== selectedSessionId) navigateToSession(sessionId);
-    railTab = "config";
+    railTab = "settings";
     contextDrawerOpen.set(true);
   }
 
@@ -110,6 +123,36 @@
       run: () => commandPaletteOpen.update((v) => !v),
     },
     {
+      id: "chat.target_selector",
+      chord: { code: "KeyL", modifiers: ["mod"] },
+      group: "chat.shortcut_group.chat",
+      descriptionKey: "chat.shortcut.target_selector",
+      keys: [MOD_LABEL, "L"],
+      allowInTextarea: true,
+      run: () => requestChatTargetSelector(),
+    },
+    {
+      id: "chat.reload_last_model",
+      chord: { code: "KeyR", modifiers: ["mod"] },
+      group: "chat.shortcut_group.chat",
+      descriptionKey: "chat.shortcut.reload_last_model",
+      keys: [MOD_LABEL, "R"],
+      allowInTextarea: true,
+      // One chord, two meanings: with no model in memory it loads the last
+      // one again; otherwise, when Settings > Chat asks for it, it
+      // regenerates the last answer of the conversation shown.
+      run: () => {
+        const action = regenerateChord({
+          reloadShown: showReloadLast($loadedModels, $lastLoadedModel),
+          enabled: $chatRegenerateShortcut,
+          conversationOpen: selectedSessionId !== null,
+        });
+        if (action === "reload") requestReloadLast();
+        else if (action === "regenerate" && selectedSessionId) requestRegenerateLast(selectedSessionId);
+        return action !== null;
+      },
+    },
+    {
       id: "chat.search",
       chord: { code: "KeyF", modifiers: ["mod"] },
       group: "chat.shortcut_group.navigation",
@@ -128,15 +171,6 @@
       descriptionKey: "chat.shortcut.toggle_sidebar",
       keys: [MOD_LABEL, "B"],
       run: () => toggleSessionsSidebar(),
-    },
-    {
-      id: "chat.help",
-      chord: { code: "Slash", modifiers: ["mod"] },
-      group: "chat.shortcut_group.navigation",
-      descriptionKey: "chat.shortcut.help",
-      keys: [MOD_LABEL, "/"],
-      allowInTextarea: true,
-      run: () => (showShortcutsHelp = !showShortcutsHelp),
     },
     {
       id: "chat.next_message",
@@ -165,10 +199,6 @@
           commandPaletteOpen.set(false);
           return;
         }
-        if (showShortcutsHelp) {
-          showShortcutsHelp = false;
-          return;
-        }
         // Streaming abort + per-modal Esc are handled by the owning
         // components - fall through so they keep working.
         return false;
@@ -176,25 +206,9 @@
     },
   ];
 
-  // Projects loaded once so we can render a small "Project X" chip on
-  // each conversation row (mirrors the badge in the open conversation
-  // header). Refreshed when the user creates/links sessions elsewhere.
-  let projectList = $state<ProjectSummary[]>([]);
-  const projectNameById = $derived(
-    new Map(projectList.map((p) => [p.id, p.name])),
-  );
-  async function reloadProjectList(): Promise<void> {
-    try {
-      projectList = await listProjects();
-    } catch {
-      // Non-blocking - the chip just won't render.
-    }
-  }
-
   onMount(() => {
-    void reloadProjectList();
     const unsub = pendingChatSessionId.subscribe((id) => {
-      if (id) { selectedSessionId = id; pendingChatSessionId.set(null); }
+      if (id) { chatPanes.show(id); pendingChatSessionId.set(null); }
     });
     const uninstall = installChatShortcuts(SHORTCUT_BINDINGS);
     const unregisterHelp = registerShortcuts(SHORTCUT_BINDINGS.map(describeBinding));
@@ -209,7 +223,38 @@
   // preset prop yet. We accept and
   // ignore it so the palette wiring stays forward-compatible.
   function openNewChatPicker(_preset?: { templateId?: string; agentName?: string }) {
-    showNewChatPicker = true;
+    // One empty conversation at a time: the one that exists opens again, and
+    // its agent or model is chosen from the top bar.
+    const empty = emptyConversationToReopen(
+      $decoratedSessions,
+      $sessionActivityAt,
+      $chatSingleEmpty,
+    );
+    if (empty !== null) {
+      navigateToSession(empty);
+      return;
+    }
+    void startConversation();
+  }
+
+  // A new chat is a conversation, open across the page at once: its agent or
+  // its model is chosen from the top bar, as on any conversation. The picker
+  // stays as the way out when the conversation cannot be created.
+  let startingConversation = false;
+  async function startConversation(): Promise<void> {
+    if (startingConversation) return;
+    startingConversation = true;
+    try {
+      const session = await createChatSession({ mode: "libre" });
+      chatSessions.update((sessions) =>
+        sessions.some((s) => s.id === session.id) ? sessions : [session, ...sessions],
+      );
+      handleSessionCreated(session);
+    } catch {
+      showNewChatPicker = true;
+    } finally {
+      startingConversation = false;
+    }
   }
 
   // External triggers (sidebar button, command palette) push Date.now() into
@@ -228,7 +273,7 @@
   }
 
   function openSessionFromPalette(id: string): void {
-    selectedSessionId = id;
+    chatPanes.show(id);
     markSessionRead(id);
   }
 
@@ -241,26 +286,27 @@
   }
 
   function handleSessionCreated(session: ChatSessionSummary): void {
-    selectedSessionId = session.id;
+    chatPanes.show(session.id);
     showNewChatPicker = false;
   }
 
   function navigateToSession(sessionId: string) {
     showNewChatPicker = false;
-    selectedSessionId = sessionId;
+    chatPanes.show(sessionId);
     markSessionRead(sessionId);
   }
-  function closeConversation() { selectedSessionId = null; }
 
   async function handleDeleteSession(sessionId: string): Promise<void> {
+    // To the trash when the choice of Settings > Chat is on, for good otherwise.
     try {
-      await deleteChatSession(sessionId);
+      await removeConversation(sessionId);
     } catch (err: unknown) {
-      console.error("delete_chat_session failed:", err);
+      console.error("removing the chat session failed:", err);
       return;
     }
     chatSessions.update((sessions) => sessions.filter((s) => s.id !== sessionId));
-    if (selectedSessionId === sessionId) selectedSessionId = null;
+    // The pane that showed it closes, and gives back the model it held.
+    chatPanes.forget(sessionId);
   }
 
   async function handleRenameSession(sessionId: string, newTitle: string): Promise<void> {
@@ -281,44 +327,12 @@
   // Re-uses the existing `decoratedSessions` store: the SSE wiring stays
   // owned by `chatSessions` upstream - this view is purely presentational.
 
-  function relativeTime(iso: string | null | undefined): string {
-    if (!iso) return "-";
-    const d = new Date(iso).getTime();
-    if (Number.isNaN(d)) return "-";
-    const diffSec = Math.max(1, Math.round((Date.now() - d) / 1000));
-    if (diffSec < 60) return `${diffSec}s`;
-    const min = Math.round(diffSec / 60);
-    if (min < 60) return `${min}min`;
-    const h = Math.round(min / 60);
-    if (h < 24) return `${h}h`;
-    const day = Math.round(h / 24);
-    return `${day}j`;
-  }
-
-  function rowState(s: DecoratedSession, isSelected: boolean): ConversationState {
-    if (isSelected) return "active";
-    if (s.archived) return "archived";
-    if (s.status === "closed") return "closed";
-    if (s.pinned) return "pinned";
-    if (s.unread) return "unread";
-    return "default";
-  }
-
   const filteredSessions = $derived(
-    $decoratedSessions
-      .filter((s) => !s.archived)
-      .filter((s) => {
-        if (!sessionSearchQuery.trim()) return true;
-        const q = sessionSearchQuery.toLowerCase();
-        const hay = [
-          s.title ?? "",
-          s.agent_name ?? "",
-          s.last_message_preview ?? "",
-          s.mode,
-        ].join(" ").toLowerCase();
-        return hay.includes(q);
-      }),
+    sidebarSessions($decoratedSessions, sessionSearchQuery, $sessionSort),
   );
+  // Every conversation the list can show: a search in the messages may find
+  // one the title filter left out.
+  const listedSessions = $derived(sidebarSessions($decoratedSessions, "", $sessionSort));
 
   // Live agent activity events for the right Journal panel.
   // Source: `currentSession` (set by ChatConversation.applySessionDetail on every
@@ -336,6 +350,7 @@
   }
 
   function buildJournalFromMessages(
+    sessionId: string,
     messages: ChatMessageView[],
     mode: JournalMode,
   ): JournalEvent[] {
@@ -343,6 +358,18 @@
     const out: JournalEvent[] = [];
     for (const m of messages) {
       const time = fmtTime(m.created_at);
+      // The model calls of the turn, once read: one event per call.
+      const held = m.role === "assistant" ? turnCallsOf(sessionId, m.id) : undefined;
+      if (held?.status === "ready") {
+        out.push(
+          ...llmJournalEvents(held.calls, {
+            developer: isBuilder,
+            loc: $locale ?? "en",
+            time,
+            translate: $t,
+          }),
+        );
+      }
       // Tool calls - surface each one as a dedicated tool event.
       const calls = m.tool_calls ?? [];
       for (const tc of calls) {
@@ -425,9 +452,26 @@
 
   const journalEvents = $derived<JournalEvent[]>(
     $currentSession && $currentSession.id === selectedSessionId
-      ? buildJournalFromMessages($currentSession.messages ?? [], journalMode)
+      ? buildJournalFromMessages($currentSession.id, $currentSession.messages ?? [], journalMode)
       : [],
   );
+
+  // The panel reads the model calls of the latest turns when it is shown; an
+  // older turn joins once its detail was opened under its answer.
+  const JOURNAL_TURNS_READ = 12;
+  $effect(() => {
+    const session = $currentSession;
+    if (!session || session.id !== selectedSessionId) return;
+    if (railTab !== "journal" || !$contextDrawerOpen) return;
+    const answers = (session.messages ?? [])
+      .filter((m) => m.role === "assistant" && readGeneration(m.metadata) !== null)
+      .slice(-JOURNAL_TURNS_READ);
+    untrack(() => {
+      for (const m of answers) {
+        if (turnCallsOf(session.id, m.id) === undefined) void loadTurnCalls(session.id, m.id);
+      }
+    });
+  });
 </script>
 
 <!-- Chat-route command palette enrichment + Help dialog. -->
@@ -436,7 +480,6 @@
   onnewChat={openNewChatPicker}
   onslashCommand={appendSlashCommand}
 />
-<ShortcutsHelpDialog bind:open={showShortcutsHelp} />
 
 <!--
   V3 Operator chat layout: left sessions rail / center thread / right journal.
@@ -476,13 +519,22 @@
     aria-label={$t("chat.conversations_aria")}
     aria-hidden={!panesInline && !$sessionsDrawerOpen}
   >
+    {#if showTrash}
+      <ConversationTrash
+        onback={() => (showTrash = false)}
+        onrestored={() => void refreshChatSessionsViaIpc()}
+      />
+    {:else}
     <div class="px-3.5 pt-4 pb-2">
-      <h2
-        class="mb-3 text-heading-sm font-semibold tracking-[-0.2px] text-foreground"
-        data-testid="chat-header"
-      >
-        {$t("chat.title")}
-      </h2>
+      <div class="mb-3 flex items-center justify-between gap-2">
+        <h2
+          class="text-heading-sm font-semibold tracking-[-0.2px] text-foreground"
+          data-testid="chat-header"
+        >
+          {$t("chat.title")}
+        </h2>
+        <ConversationSortMenu />
+      </div>
 
       <div class="relative mb-2.5">
         <Search
@@ -510,7 +562,7 @@
       </Button>
     </div>
 
-    <div class="min-h-0 flex-1 overflow-y-auto" data-testid="chat-active-list">
+    <div class="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="chat-active-list">
       {#if $connectionStatus === "connecting"}
         <div class="space-y-1 px-3 py-2">
           {#each { length: 4 } as _}
@@ -521,100 +573,42 @@
             </div>
           {/each}
         </div>
-      {:else if filteredSessions.length === 0}
-        <div class="px-4 py-6 text-center text-caption text-muted-foreground">
-          {#if sessionSearchQuery.trim()}
-            {$t("chat.no_results")}
-          {:else}
-            {$t("chat.no_sessions")}
-          {/if}
-        </div>
       {:else}
-        {#each filteredSessions as session (session.id)}
-          <ConversationRow
-            title={session.title ?? session.agent_name ?? $t("chat.untitled_session")}
-            lastMessage={session.last_message_preview ?? undefined}
-            timestamp={relativeTime(session.lastActivityAt)}
-            state={rowState(session, session.id === selectedSessionId)}
-            live={session.status === "processing"}
-            projectLabel={session.project_id
-              ? (projectNameById.get(session.project_id) ?? undefined)
-              : undefined}
-            onclick={() => { navigateToSession(session.id); closeSessionsDrawer(); }}
-            onrename={(newTitle) => void handleRenameSession(session.id, newTitle)}
-            ondelete={() => void handleDeleteSession(session.id)}
-            onconfigure={() => { openConfig(session.id); closeSessionsDrawer(); }}
-          />
-        {/each}
+        <ConversationList
+          sessions={filteredSessions}
+          listed={listedSessions}
+          query={sessionSearchQuery}
+          {selectedSessionId}
+          density={$sidebarDensity}
+          onselect={(id) => { navigateToSession(id); closeSessionsDrawer(); }}
+          onrename={(id, title) => void handleRenameSession(id, title)}
+          ondelete={(id) => void handleDeleteSession(id)}
+          onconfigure={(id) => { openConfig(id); closeSessionsDrawer(); }}
+        />
       {/if}
     </div>
+    <button
+      type="button"
+      class="flex items-center gap-2 border-t border-border px-3.5 py-2.5 text-left text-body-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60"
+      onclick={() => (showTrash = true)}
+      data-testid="chat-trash-open"
+    >
+      <Trash2 size={13} strokeWidth={1.75} aria-hidden="true" />
+      {$t("chat.trash.open")}
+    </button>
+    {/if}
   </aside>
 
-  <!-- ── Center: thread + composer ─────────────────────────────────────── -->
-  <main class="relative flex h-full min-h-0 min-w-0 flex-1 flex-col bg-background">
-    {#if showNewChatPicker}
-      <!-- Picker fills the column and scrolls internally; mutually exclusive
-           with the active conversation so they never stack. -->
-      <div
-        class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-4"
-        data-testid="new-chat-picker"
-      >
-        <QuickPicker
-          oncreated={handleSessionCreated}
-          onclose={closeNewChatPicker}
-        />
-      </div>
-    {:else if $connectionStatus === "connecting" && !selectedSessionId}
-      <div class="flex flex-1 items-center justify-center">
-        <div class="flex flex-col items-center gap-3 text-muted-foreground">
-          <Skeleton variant="text" class="h-3 w-32" />
-          <Skeleton variant="text" class="h-3 w-24" />
-        </div>
-      </div>
-    {:else if selectedSessionId}
-      <!--
-        ChatConversation owns the message thread, SSE subscriptions,
-        composer, slash commands, mention handling, and the markdown/code
-        rendering pipeline. We drop it directly into the center column so
-        all that wiring is preserved verbatim.
-      -->
-      <div class="flex h-full min-h-0 flex-1 flex-col">
-        <ChatConversation
-          sessionId={selectedSessionId}
-          onclose={closeConversation}
-          onsessionsopen={openSessionsDrawer}
-          oncontextopen={toggleContextDrawer}
-          onconfigtoggle={() => openConfig()}
-          ondelete={handleDeleteSession}
-          onnewChat={() => { closeConversation(); openNewChatPicker(); }}
-        />
-      </div>
-    {:else if $activeChatSessions.length === 0 && $closedChatSessions.length === 0}
-      <div class="flex flex-1 items-center justify-center px-6 py-10">
-        <EmptySessionsState onnewChat={() => openNewChatPicker()} />
-      </div>
-    {:else}
-      <!-- No session selected but list is non-empty: prompt the user. -->
-      <div class="flex flex-1 items-center justify-center px-6 py-10">
-        <div class="max-w-sm text-center">
-          <h3
-            class="mb-3 text-heading-lg font-semibold tracking-[-0.3px] text-foreground"
-          >
-            {$t("chat.subtitle")}
-          </h3>
-          <p class="mb-5 text-body-sm text-muted-foreground">
-            {$t("chat.select_or_start")}
-          </p>
-          <div class="inline-flex">
-            <Button variant="primary-solid" size="sm" onclick={() => openNewChatPicker()}>
-              {#snippet icon()}<Plus size={12} />{/snippet}
-              {$t("chat.new_chat")}
-            </Button>
-          </div>
-        </div>
-      </div>
-    {/if}
-  </main>
+  <!-- ── Center: the panes, each with its thread and its composer ────── -->
+  <ChatPanes
+    narrow={!panesInline}
+    showPicker={showNewChatPicker}
+    oncreated={handleSessionCreated}
+    onpickerclose={closeNewChatPicker}
+    onnewchat={() => openNewChatPicker()}
+    onconfig={() => openConfig()}
+    ondelete={handleDeleteSession}
+  />
 
   <!-- ── Inspector (on-demand): live journal / plan. Closed by default at every
        width so the conversation stays the hero; opens inline (docked) at lg and
@@ -657,48 +651,38 @@
         <button
           type="button"
           role="tab"
-          aria-selected={railTab === "config"}
-          class="rounded px-2 py-0.5 transition-colors {railTab === 'config'
+          aria-selected={railTab === "integrations"}
+          class="rounded px-2 py-0.5 transition-colors {railTab === 'integrations'
             ? 'bg-primary/10 text-primary'
             : 'text-muted-foreground hover:text-foreground'}"
-          onclick={() => (railTab = "config")}
-          data-testid="chat-inspector-config-tab"
+          onclick={() => (railTab = "integrations")}
+          data-testid="chat-inspector-integrations-tab"
         >
-          {$t("chat.config_title")}
+          {$t("chat.session_panel.integrations")}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={railTab === "settings"}
+          class="rounded px-2 py-0.5 transition-colors {railTab === 'settings'
+            ? 'bg-primary/10 text-primary'
+            : 'text-muted-foreground hover:text-foreground'}"
+          onclick={() => (railTab = "settings")}
+          data-testid="chat-inspector-settings-tab"
+        >
+          {$t("chat.session_panel.settings")}
         </button>
       </div>
-      {#if railTab === "journal"}
-        <div class="inline-flex rounded-md border border-border p-0.5 text-micro-lg">
-          <button
-            type="button"
-            class="rounded px-2 py-0.5 transition-colors {journalMode === 'operator'
-              ? 'bg-primary/10 text-primary'
-              : 'text-muted-foreground hover:text-foreground'}"
-            onclick={() => (journalMode = "operator")}
-          >
-            {$t("chat.journal_mode_operator")}
-          </button>
-          <button
-            type="button"
-            class="rounded px-2 py-0.5 transition-colors {journalMode === 'builder'
-              ? 'bg-primary/10 text-primary'
-              : 'text-muted-foreground hover:text-foreground'}"
-            onclick={() => (journalMode = "builder")}
-          >
-            {$t("chat.journal_mode_builder")}
-          </button>
-        </div>
-      {/if}
     </div>
 
-    {#if railTab === "config"}
-      <div class="min-h-0 flex-1 overflow-y-auto" data-testid="chat-inspector-config">
+    {#if railTab === "integrations" || railTab === "settings"}
+      <div class="min-h-0 flex-1 overflow-hidden" data-testid="chat-inspector-session">
         {#if $currentSession && $currentSession.id === selectedSessionId}
-          <ChatConfigPanelBody
-            session={$currentSession}
-            showHeader={false}
-            onupdated={() => {}}
-          />
+          {#if railTab === "integrations"}
+            <ChatIntegrationsTab session={$currentSession} onupdated={() => {}} />
+          {:else}
+            <SessionSettingsTab session={$currentSession} />
+          {/if}
         {:else}
           <div class="px-4 py-6 text-center text-caption text-muted-foreground">
             {$t("chat.subtitle")}
@@ -727,4 +711,5 @@
 
   </aside>
   {/if}
+  <ModelLoadDialog />
 </div>

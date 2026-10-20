@@ -259,7 +259,6 @@ OUT_OF_SCOPE = (
 FRENCH_DOCUMENTS = (
     "crates/apollia-desktop/ui/figma/GUIDE-FIGMA-FIRST.md",
     "crates/apollia-desktop/ui/src/lib/design/breakpoints.md",
-    "crates/apollia-desktop/ui/src/lib/i18n/operator-glossary.md",
     "docs/README.md",
     "packaging/README.md",
 )
@@ -273,6 +272,13 @@ BILINGUAL_DATA = (
     "crates/apollia-desktop/src/mcp/enrichments.json",
     "crates/apollia-desktop/ui/src/lib/i18n/en.json",
     "crates/apollia-desktop/ui/src/lib/i18n/fr.json",
+    "crates/apollia-desktop/ui/src/lib/i18n/glossary.json",
+    # Model cards: one description and one explanation per locale.
+    "crates/apollia-llm/src/model_cards/fixtures/",
+    "crates/apollia-llm/src/model_cards/shipped-index.json",
+    # The sentence of a generated model card, one template per locale.
+    "crates/apollia-llm/src/hf_registry/generated_sentences.json",
+    "registry/models/",
     "scripts/automation/",
 )
 
@@ -288,29 +294,43 @@ BILINGUAL_DATA = (
 #   prompt     French text sent to a model, because the operator writes French
 FRENCH_DATA: dict[str, int] = {
     # locale: the French half of a bilingual surface
-    "crates/apollia-desktop/src/i18n.rs": 9,
-    "crates/apollia-desktop/ui/src/lib/i18n/identicalLocales.ts": 4,
+    "crates/apollia-desktop/src/i18n.rs": 17,
+    # The French labels and explanations of the trash row and of the chat
+    # behaviour rows of Settings > Chat, pinned word for word by their tests.
+    "crates/apollia-desktop/ui/src/routes/settings/ChatSettings.test.ts": 8,
+    "crates/apollia-desktop/ui/src/lib/i18n/identicalLocales.ts": 1,
     "crates/apollia-desktop/ui/src/components/settings/stt/SttEssentialSection.svelte": 2,
-    "crates/apollia-memory/src/profile_schema.rs": 26,
+    "crates/apollia-memory/src/profile_schema.rs": 10,
+    "crates/apollia-memory/src/user_memory/persona.rs": 1,
+    # The copy of a batch's results is named in the language of the interface.
+    "crates/apollia-sources/src/table/results.rs": 1,
+    # The synthesis of a batch is named in the language of the interface,
+    # and its test pins the French name.
+    "crates/apollia-runtime/src/batch/synthesis.rs": 2,
     "scripts/check_release_artifacts.py": 1,
+    # The headings of the mission the agent workshop lays out, in the language
+    # of the person, and the French request its test feeds it.
+    "agents/system/agent-builder/workflows/draft.py": 5,
+    "tests/test_agent_builder_workflow.py": 1,
     # parser: French words the code matches on, or folds
-    "agents/system/onboarding-agent/agent.py": 36,
     # The typed-pause payload keys are the product's wire vocabulary (`genre`,
     # `libelle`, `autre`...): the parser and the TypedDict declaring them match on
     # those names. Only `autre` is a word the detector knows.
     "crates/apollia-core/src/hitl_payload.rs": 3,
     "sdk/apollia/hitl.py": 1,
+    # The type of a model card author field is written `liste` or `booleen` in
+    # the card files, and the readers of those files match on those values.
+    "crates/apollia-desktop/ui/src/lib/ipc/modelHub.ts": 1,
+    "crates/apollia-llm/src/model_cards/mod.rs": 1,
+    "scripts/check-model-families.py": 1,
     "crates/apollia-cli/src/commands/chat_stream.rs": 3,
     "crates/apollia-cli/src/commands/chat_stream/classify.rs": 1,
     "crates/apollia-cli/src/commands/run.rs": 2,
-    "crates/apollia-desktop/ui/src/components/settings/profile/profileForm.ts": 1,
-    "crates/apollia-desktop/ui/src/lib/command-palette/actions.ts": 1,
     "crates/apollia-desktop/ui/tests/settings/hotkey-capture.spec.ts": 1,
     "crates/apollia-llm/src/meta/parse_automation.rs": 30,
     "crates/apollia-memory/src/lib.rs": 1,
     "crates/apollia-memory/src/search.rs": 2,
     "crates/apollia-memory/src/store.rs": 1,
-    "crates/apollia-memory/src/user_memory.rs": 1,
     "scripts/check_docs_lang.py": 8,
     "scripts/check_docs_routes.py": 4,
     # This file: its own French word list, and the French lines its self-test
@@ -318,36 +338,38 @@ FRENCH_DATA: dict[str, int] = {
     # the first place a French line could hide.
     "scripts/check_file_language.py": 44,
     "scripts/check_i18n_catalogue.py": 20,
-    # parser: the French vocabulary of the method reference it reads, the
-    # bracketed location tokens and the column header, plus the fixture table
-    # its self-test parses. The table is French; a guard that read it in
-    # English would match nothing.
-    "scripts/check_method_references.py": 18,
     "scripts/check_python_rules.py": 4,
     "tests/cli/seed/files/agents/onboarding-agent/agent.py": 28,
-    "tests/test_onboarding_heuristic_recovery.py": 9,
     # prompt: French text sent to a model, because the operator writes French
-    "crates/apollia-desktop/src/commands/chat/title.rs": 17,
-    # fixture: French user text, or a multi-byte character, a test feeds to the
-    # code under test
-    "tests/hitl/hitl_e2e_agent.py": 1,
+    "crates/apollia-runtime/src/chat/title.rs": 17,
+    # The accented French words recognition must give back from a scanned page.
+    "crates/apollia-sources/tests/ocr_reader.rs": 9,
+    "crates/apollia-sources/src/indexer/tests/recognition.rs": 2,
     "crates/apollia-cli/src/commands/mod.rs": 2,
     "crates/apollia-core/src/observability.rs": 1,
     "crates/apollia-core/src/utils.rs": 2,
     "crates/apollia-desktop/ui/src/lib/automations/humanize.test.ts": 20,
+    "crates/apollia-llm/src/model_cards/tests.rs": 2,
     "crates/apollia-desktop/ui/src/lib/chat/attachments.test.ts": 1,
     "crates/apollia-desktop/ui/src/lib/i18n/audit-i18n.test.ts": 12,
     "crates/apollia-desktop/ui/src/lib/i18n/i18n-locale-switch.test.ts": 1,
     "crates/apollia-desktop/ui/src/lib/utils/slugify.test.ts": 3,
+    "crates/apollia-desktop/ui/src/lib/connections/tryConnectorPrompt.test.ts": 4,
+    "crates/apollia-desktop/ui/src/components/connections/tryConnection.test.ts": 4,
+    # The French texts the card of a model must show, word for word: the
+    # test reads them from the French catalogue and compares.
+    "crates/apollia-desktop/ui/src/components/ai/discoverCard.test.ts": 8,
     "crates/apollia-llm/tests/interval_junction.rs": 3,
+    "crates/apollia-sources/tests/office_reader.rs": 3,
+    "crates/apollia-sources/tests/results.rs": 4,
+    "crates/apollia-sources/src/table/results/tests.rs": 1,
+    "crates/apollia-sources/tests/pdf_reader.rs": 3,
     "crates/apollia-mcp/src/sanitize.rs": 1,
     "crates/apollia-notifications/src/channels/webhook.rs": 2,
     "crates/apollia-runtime/src/api/routes_timeline.rs": 1,
     "sdk/tests/test_formatting.py": 2,
     "tests/integration/test_chat_memory.rs": 4,
     "tests/integration/test_onboarding.rs": 9,
-    "tests/test_onboarding_agent.py": 41,
-    "tests/test_onboarding_contracts.py": 2,
     # Latin, not French: the lorem ipsum of a search-result fixture shares its
     # function words with French ("et", "est", "qui", "in"). Named rather than
     # taught to the detector, because a Latin lexicon would blunt it.

@@ -1,49 +1,28 @@
-//! Tauri IPC commands for managing LLM backends.
+//! Tauri IPC commands for the engines the runtime routes requests to.
 //!
-//! Each command delegates to the internal REST API (`/api/v1/llm/*`) via the
-//! parent module's HTTP helpers. CRUD operations target
-//! `/api/v1/llm/backends`; ping and statistics use their own dedicated routes.
+//! Each command delegates to the runtime's REST API (`/api/v1/llm/*`) through
+//! [`RuntimeLink`], so it serves the runtime in this process and the daemon
+//! alike: the list of the configured engines, and the reload of the router.
+//! The inference servers have their own commands in `llm_servers.rs`.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
+use crate::attached::RuntimeLink;
 use apollia_core::LlmBackendRepository;
 use apollia_llm::LlmRouter;
 use apollia_runtime::embedded::RuntimeHandle;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use super::{http_delete_json, http_get_json, http_post_json, http_put_json};
+use super::http_post_json;
 use crate::SharedLlmRouter;
 
-/// Snapshot of the most recent ping result for a single backend.
-///
-/// Kept in memory only; re-evaluated on the next ping after a restart.
-#[derive(Debug, Clone, Serialize)]
-pub struct PingState {
-    /// Error message returned by the last ping, `None` if the last ping succeeded.
-    pub last_error: Option<String>,
-    /// Round-trip latency of the last ping in milliseconds.
-    pub last_latency_ms: Option<u64>,
-    /// RFC 3339 timestamp of the last ping (UTC).
-    pub last_ping_at: Option<String>,
-    /// `true` if the last ping reported the backend as reachable.
-    pub last_available: bool,
-}
-
-/// Process-wide cache of last ping outcomes, keyed by backend name.
-///
-/// Populated by `ping_llm_backend` and projected onto `LlmBackendView`
-/// entries returned by `list_llm_backends` so the UI can surface the
-/// most recent error without a fresh ping.
-pub type LlmPingCache = Arc<RwLock<HashMap<String, PingState>>>;
-
-/// View of an LLM backend for CRUD operations.
+/// One configured engine, as the list of the interface reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmBackendView {
     /// Unique logical backend name (e.g. `"local-code"`).
     pub name: String,
-    /// Provider: `"llama-cpp"`, `"openai"`, `"mistral"`, `"anthropic"`, `"ollama"`.
+    /// Provider: `"llama-cpp"`, `"openai"` (OpenAI-compatible server), `"ollama"`.
     pub provider: String,
     /// Configured model identifier.
     pub model: String,
@@ -53,81 +32,6 @@ pub struct LlmBackendView {
     pub enabled: bool,
     /// `true` if this is the default backend.
     pub is_default: bool,
-    /// Error message from the last ping (`None` if the last ping was OK or never pinged).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub last_ping_error: Option<String>,
-    /// RFC 3339 timestamp of the last ping (`None` if never pinged).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub last_ping_at: Option<String>,
-}
-
-/// Request body for creating an LLM backend.
-#[derive(Debug, Deserialize)]
-pub struct CreateLlmBackendPayload {
-    /// Unique backend name (pattern `^[a-z0-9_-]+$`).
-    pub name: String,
-    /// Backend provider.
-    pub provider: String,
-    /// Model identifier.
-    pub model: String,
-    /// Extra JSON configuration (must be a JSON object).
-    pub config_json: serde_json::Value,
-    /// Enable the backend on creation.
-    pub enabled: bool,
-    /// Set as the default backend on creation.
-    pub is_default: bool,
-}
-
-/// Request body for updating an existing LLM backend.
-#[derive(Debug, Deserialize)]
-pub struct UpdateLlmBackendPayload {
-    /// New provider.
-    pub provider: String,
-    /// New model identifier.
-    pub model: String,
-    /// New JSON configuration (must be a JSON object).
-    pub config_json: serde_json::Value,
-    /// Enable or disable the backend.
-    pub enabled: bool,
-    /// Mark as the default backend.
-    pub is_default: bool,
-}
-
-/// Result of a ping on an LLM backend.
-#[derive(Debug, Serialize)]
-pub struct PingResult {
-    /// Name of the pinged backend.
-    pub backend: String,
-    /// `true` if the backend responded.
-    pub available: bool,
-    /// Latency in milliseconds (if available).
-    pub latency_ms: Option<u64>,
-    /// Error message if the ping failed.
-    pub error: Option<String>,
-}
-
-/// Cost/token statistics row for a backend+model.
-#[derive(Debug, Serialize)]
-pub struct CostStatsRow {
-    /// Backend name.
-    pub backend: String,
-    /// Model identifier.
-    pub model: String,
-    /// Number of LLM calls.
-    pub call_count: u64,
-    /// Total tokens (prompt + completion).
-    pub total_tokens: u64,
-    /// Estimated total cost in USD.
-    pub total_cost_usd: f64,
-}
-
-/// Aggregated cost/token statistics response.
-#[derive(Debug, Serialize)]
-pub struct CostStatsResponse {
-    /// Rows per backend+model.
-    pub rows: Vec<CostStatsRow>,
-    /// Number of aggregated days.
-    pub days: u32,
 }
 
 /// Deserializes a JSON value into an `LlmBackendView`.
@@ -137,220 +41,24 @@ fn parse_backend_view(json: serde_json::Value) -> Result<LlmBackendView, String>
 
 /// Lists all configured LLM backends.
 ///
-/// Delegates to `GET /api/v1/llm/backends`, then enriches each view with the
-/// latest ping data from the in-memory `LlmPingCache`.
+/// Delegates to `GET /api/v1/llm/backends`.
 #[tauri::command]
 pub async fn list_llm_backends(
-    state: State<'_, RuntimeHandle>,
-    cache: State<'_, LlmPingCache>,
+    link: State<'_, RuntimeLink>,
 ) -> Result<Vec<LlmBackendView>, String> {
-    let json = http_get_json(state.api_port, "/api/v1/llm/backends").await?;
+    listed_backends(&link).await
+}
 
-    let backends = json
-        .get("backends")
+/// The backends of the runtime `link` drives.
+pub(crate) async fn listed_backends(link: &RuntimeLink) -> Result<Vec<LlmBackendView>, String> {
+    let json = link.get_json("/api/v1/llm/backends").await?;
+    json.get("backends")
         .and_then(|v| v.as_array())
         .cloned()
-        .unwrap_or_default();
-
-    let mut views: Vec<LlmBackendView> = backends
+        .unwrap_or_default()
         .into_iter()
         .map(parse_backend_view)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if let Ok(guard) = cache.read() {
-        for view in views.iter_mut() {
-            if let Some(ping) = guard.get(&view.name) {
-                view.last_ping_error = ping.last_error.clone();
-                view.last_ping_at = ping.last_ping_at.clone();
-            }
-        }
-    }
-
-    Ok(views)
-}
-
-/// Creates a new LLM backend.
-///
-/// Delegates to `POST /api/v1/llm/backends`.
-#[tauri::command]
-pub async fn create_llm_backend(
-    state: State<'_, RuntimeHandle>,
-    payload: CreateLlmBackendPayload,
-) -> Result<LlmBackendView, String> {
-    let body = serde_json::json!({
-        "name": payload.name,
-        "provider": payload.provider,
-        "model": payload.model,
-        "config_json": payload.config_json,
-        "enabled": payload.enabled,
-        "is_default": payload.is_default,
-    });
-
-    let json = http_post_json(state.api_port, "/api/v1/llm/backends", &body).await?;
-    parse_backend_view(json)
-}
-
-/// Updates an existing LLM backend.
-///
-/// Delegates to `PUT /api/v1/llm/backends/:name`.
-#[tauri::command]
-pub async fn update_llm_backend(
-    state: State<'_, RuntimeHandle>,
-    name: String,
-    payload: UpdateLlmBackendPayload,
-) -> Result<LlmBackendView, String> {
-    let path = format!("/api/v1/llm/backends/{name}");
-    let body = serde_json::json!({
-        "provider": payload.provider,
-        "model": payload.model,
-        "config_json": payload.config_json,
-        "enabled": payload.enabled,
-        "is_default": payload.is_default,
-    });
-
-    let json = http_put_json(state.api_port, &path, &body).await?;
-    parse_backend_view(json)
-}
-
-/// Deletes an LLM backend.
-///
-/// Delegates to `DELETE /api/v1/llm/backends/:name`.
-/// Returns a 409 error if the backend is the default backend.
-#[tauri::command]
-pub async fn delete_llm_backend(
-    state: State<'_, RuntimeHandle>,
-    name: String,
-) -> Result<(), String> {
-    let path = format!("/api/v1/llm/backends/{name}");
-    http_delete_json(state.api_port, &path).await?;
-    Ok(())
-}
-
-/// Sets an LLM backend as the default backend.
-///
-/// Delegates to `POST /api/v1/llm/backends/:name/set-default`.
-#[tauri::command]
-pub async fn set_default_llm_backend(
-    state: State<'_, RuntimeHandle>,
-    name: String,
-) -> Result<(), String> {
-    let path = format!("/api/v1/llm/backends/{name}/set-default");
-    let body = serde_json::json!({});
-    http_post_json(state.api_port, &path, &body).await?;
-    Ok(())
-}
-
-/// Pings an LLM backend and returns the latency.
-///
-/// Delegates to `POST /api/v1/llm/ping`. The result is also written to the
-/// shared `LlmPingCache` so `list_llm_backends` can project
-/// `last_ping_error` / `last_ping_at` onto the returned views.
-#[tauri::command]
-pub async fn ping_llm_backend(
-    state: State<'_, RuntimeHandle>,
-    cache: State<'_, LlmPingCache>,
-    name: String,
-) -> Result<PingResult, String> {
-    let body = serde_json::json!({ "backend": name });
-    let json = http_post_json(state.api_port, "/api/v1/llm/ping", &body).await;
-
-    let result = match json {
-        Ok(resp) => PingResult {
-            backend: resp
-                .get("backend")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&name)
-                .to_string(),
-            available: resp
-                .get("available")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            latency_ms: resp.get("latency_ms").and_then(|v| v.as_u64()),
-            error: resp.get("error").and_then(|v| v.as_str()).map(String::from),
-        },
-        Err(e) => PingResult {
-            backend: name.clone(),
-            available: false,
-            latency_ms: None,
-            error: Some(e),
-        },
-    };
-
-    if let Ok(mut guard) = cache.write() {
-        guard.insert(
-            name.clone(),
-            PingState {
-                last_error: result.error.clone(),
-                last_latency_ms: result.latency_ms,
-                last_ping_at: Some(chrono::Utc::now().to_rfc3339()),
-                last_available: result.available,
-            },
-        );
-    }
-
-    Ok(result)
-}
-
-/// Returns the configured LLM cost-alert threshold in USD.
-///
-/// Returns `None` if `cost_alert_threshold_usd` is not configured in `apollia.toml`.
-#[tauri::command]
-pub async fn get_cost_alert_threshold(
-    state: State<'_, RuntimeHandle>,
-) -> Result<Option<f64>, String> {
-    Ok(state
-        .llm_router
-        .as_ref()
-        .and_then(|router| router.cost_alert_threshold_usd()))
-}
-
-/// Fetches the cost/token statistics aggregated over N days.
-///
-/// Delegates to `GET /api/v1/llm/costs?days=N`.
-#[tauri::command]
-pub async fn get_llm_cost_stats(
-    state: State<'_, RuntimeHandle>,
-    days: Option<u32>,
-) -> Result<CostStatsResponse, String> {
-    let d = days.unwrap_or(7);
-    let path = format!("/api/v1/llm/costs?days={d}");
-    let json = http_get_json(state.api_port, &path).await;
-
-    match json {
-        Ok(resp) => {
-            let rows = resp
-                .get("rows")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| CostStatsRow {
-                    backend: r
-                        .get("backend")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    model: r
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    call_count: r.get("call_count").and_then(|v| v.as_u64()).unwrap_or(0),
-                    total_tokens: r.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                    total_cost_usd: r
-                        .get("total_cost_usd")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0),
-                })
-                .collect();
-
-            Ok(CostStatsResponse { rows, days: d })
-        }
-        Err(_) => Ok(CostStatsResponse {
-            rows: vec![],
-            days: d,
-        }),
-    }
+        .collect()
 }
 
 /// Reloads the LLM router from `system.db`.
@@ -359,43 +67,71 @@ pub async fn get_llm_cost_stats(
 /// frontend callers. All LLM configuration now lives in `system.db`;
 /// `apollia.toml` is no longer the source of truth.
 #[tauri::command]
-pub async fn reload_llm(
-    shared: State<'_, SharedLlmRouter>,
-    runtime: State<'_, RuntimeHandle>,
-) -> Result<(), String> {
-    reload_llm_from_db(shared, runtime).await
+pub async fn reload_llm(app: tauri::AppHandle, link: State<'_, RuntimeLink>) -> Result<(), String> {
+    reload_llm_from_db(app, link).await
 }
 
 /// Rebuilds the `SharedLlmRouter` from `system.db` (SQLite).
 ///
-/// Called by the Settings frontend after `create_llm_backend` / `update_llm_backend`
+/// Called by the interface after a change of the default model
 /// so agents immediately use the new configuration. Unlike `reload_llm` (which
 /// reads TOML), this reads the CRUD repository in `system.db`.
 ///
 /// The old `Arc<LlmRouter>` is explicitly dropped before writing the new one,
 /// which frees the GGUF model from RAM as soon as no requests are in flight.
+///
+/// Attached to a daemon, this window holds no router: the daemon rebuilds its
+/// own through `POST /api/v1/llm/reload`, and its refusal is the error shown.
 #[tauri::command]
 pub async fn reload_llm_from_db(
-    shared: State<'_, SharedLlmRouter>,
-    runtime: State<'_, RuntimeHandle>,
+    app: tauri::AppHandle,
+    link: State<'_, RuntimeLink>,
+) -> Result<(), String> {
+    match &*link {
+        RuntimeLink::Embedded(runtime) => {
+            let shared = tauri::Manager::try_state::<SharedLlmRouter>(&app)
+                .ok_or_else(|| "LLM router not available".to_string())?;
+            rebuild_desktop_router(&shared, runtime).await
+        }
+        RuntimeLink::Attached(_) => reload_runtime_router(&link).await,
+    }
+}
+
+/// Asks the runtime `link` drives to rebuild its router from `system.db`.
+pub(crate) async fn reload_runtime_router(link: &RuntimeLink) -> Result<(), String> {
+    link.post_json("/api/v1/llm/reload", &serde_json::json!({}))
+        .await
+        .map(|_| ())
+}
+
+/// Rebuilds the router of this process, then the embedded runtime's.
+pub(crate) async fn rebuild_desktop_router(
+    shared: &SharedLlmRouter,
+    runtime: &RuntimeHandle,
 ) -> Result<(), String> {
     let home = apollia_core::paths::home_dir_or_temp();
     let db_path = apollia_core::paths::data_dir_under(home)
         .join(apollia_core::paths::DataFile::System.file_name());
+
+    // A row naming a server the organisation policy refuses is turned off.
+    let governance =
+        apollia_runtime::governance::InferenceGovernance::new(runtime.org_policy.clone());
 
     // LlmBackendRepository is !Send (uses RefCell<Connection>), so all DB work
     // must stay inside spawn_blocking. We extract the raw configs and return them.
     let (all_configs, default_name) = tokio::task::spawn_blocking(move || {
         let repo = LlmBackendRepository::open(&db_path)
             .map_err(|e| format!("failed to open system.db: {e}"))?;
-        let all = repo
-            .list()
-            .map_err(|e| format!("failed to list LLM backends: {e}"))?;
-        let default_cfg = repo
-            .find_default()
-            .map_err(|e| format!("failed to find default backend: {e}"))?
+        // A key kept in the secret store is put back in memory for the router.
+        let (all, default_name) = apollia_runtime::backend_keys::routable_configs(
+            &repo,
+            apollia_runtime::inference_servers::default_store,
+            &governance,
+        )
+        .map_err(|e| format!("failed to list LLM backends: {e}"))?;
+        let default_name = default_name
             .ok_or_else(|| "no default LLM backend configured in system.db".to_string())?;
-        Ok::<_, String>((all, default_cfg.name))
+        Ok::<_, String>((all, default_name))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
@@ -422,10 +158,18 @@ pub async fn reload_llm_from_db(
     // the reload would rebuild a router without the local backend (local
     // inference would become unreachable). We reuse the same factory as the
     // supervisor at boot.
-    let factory = apollia_runtime::llama_server_backend::llama_server_override(
+    let factory = apollia_runtime::local_engine::local_engine_override(
         runtime.llama_server_supervisor.clone(),
+        runtime.mlx_engine.clone(),
+        apollia_core::paths::data_dir().map(|d| apollia_runtime::installed_models::models_dir(&d)),
     );
 
+    // `system.db` holds neither `[llm.routing]` nor the agents' last
+    // fallbacks: both come from the router this one replaces.
+    let previous = shared
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let new_router = match LlmRouter::from_backend_configs_with_override(
         all_configs,
         default_name.clone(),
@@ -433,7 +177,10 @@ pub async fn reload_llm_from_db(
     )
     .await
     {
-        Ok(router) => Arc::new(router),
+        Ok(router) => Arc::new(match previous.as_ref() {
+            Some(previous) => router.carry_over_from(previous),
+            None => router,
+        }),
         Err(e) => {
             let reason = format!("failed to build LLM router: {e}");
             emit_reload_outcome(
@@ -454,13 +201,18 @@ pub async fn reload_llm_from_db(
         let mut guard = shared.write().map_err(|e| format!("lock poisoned: {e}"))?;
         let old = guard.take();
         drop(old);
-        *guard = Some(new_router);
+        *guard = Some(Arc::clone(&new_router));
+    }
+    // A running agent holds the router it started with; it reaches this one
+    // at its next call.
+    if let Some(previous) = previous {
+        previous.supersede(&new_router);
     }
 
     // The runtime keeps its OWN LlmRouter cell, consumed by the REST API
     // (`/api/v1/llm/ping`, `/chat`, `/complete`). It is rebuilt only by
     // `POST /api/v1/llm/reload`; the desktop cell swap above does not touch it.
-    // Without this, Settings "test/ping" reports "no LLM router configured" even
+    // Without this, a request through those routes reports "no LLM router configured" even
     // after a backend is created. Best-effort: a failure here must not fail the
     // desktop reload, which already succeeded.
     if let Err(e) = http_post_json(
@@ -575,84 +327,5 @@ mod tests {
         // THEN an error is returned
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid backend response"));
-    }
-
-    #[test]
-    fn test_ping_result_serializes_success() {
-        // GIVEN a successful ping result
-        let result = PingResult {
-            backend: "local".to_string(),
-            available: true,
-            latency_ms: Some(42),
-            error: None,
-        };
-
-        // WHEN serialized
-        let json = serde_json::to_value(&result).expect("serialize");
-
-        // THEN latency_ms is present and error is null
-        assert_eq!(json["available"], true);
-        assert_eq!(json["latency_ms"], 42);
-        assert!(json["error"].is_null());
-    }
-
-    #[test]
-    fn test_ping_result_serializes_failure() {
-        // GIVEN a failed ping result
-        let result = PingResult {
-            backend: "anthropic".to_string(),
-            available: false,
-            latency_ms: None,
-            error: Some("connection refused".to_string()),
-        };
-
-        // WHEN serialized
-        let json = serde_json::to_value(&result).expect("serialize");
-
-        // THEN available is false and error is set
-        assert_eq!(json["available"], false);
-        assert!(json["latency_ms"].is_null());
-        assert_eq!(json["error"], "connection refused");
-    }
-
-    #[test]
-    fn test_cost_stats_response_serializes() {
-        // GIVEN a CostStatsResponse with one row
-        let resp = CostStatsResponse {
-            rows: vec![CostStatsRow {
-                backend: "anthropic".to_string(),
-                model: "sonnet".to_string(),
-                call_count: 15,
-                total_tokens: 3000,
-                total_cost_usd: 0.045,
-            }],
-            days: 7,
-        };
-
-        // WHEN serialized
-        let json = serde_json::to_value(&resp).expect("serialize");
-
-        // THEN rows and days are correct
-        assert_eq!(json["days"], 7);
-        let rows = json["rows"].as_array().expect("rows is array");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["call_count"], 15);
-        assert_eq!(rows[0]["total_tokens"], 3000);
-    }
-
-    #[test]
-    fn test_cost_stats_response_empty() {
-        // GIVEN an empty CostStatsResponse
-        let resp = CostStatsResponse {
-            rows: vec![],
-            days: 30,
-        };
-
-        // WHEN serialized
-        let json = serde_json::to_value(&resp).expect("serialize");
-
-        // THEN rows is empty array
-        assert_eq!(json["days"], 30);
-        assert_eq!(json["rows"].as_array().expect("rows").len(), 0);
     }
 }

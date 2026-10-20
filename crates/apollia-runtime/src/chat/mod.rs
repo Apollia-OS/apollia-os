@@ -4,28 +4,39 @@
 //! chat hybride feature. The `ChatSessionManager` actor and
 //! `BuiltInChatAgent` build on top of these primitives.
 //! `AgentChatExecutor` handles Chat Agent mode via Python agents.
+//! `AgentExecutor` is the only constructor of `BuiltInChatAgent` outside tests.
 
 pub mod a2a_tools;
 pub mod agent_chat;
+pub mod agent_executor;
 pub mod builtin_agent;
+pub mod documents;
 pub mod extractor;
+pub mod generation;
+pub mod images;
 pub mod manager;
 pub mod native_wrappers;
 pub mod plan_actor;
 pub mod plan_prompt;
 pub mod plan_tool;
-pub mod project_context;
+pub mod profile_injection;
 pub mod repository;
 pub(crate) mod schema;
+pub mod session_settings;
 pub mod summarizer;
+pub mod title;
 pub mod todo_actor;
 pub mod todo_handle;
 pub mod todo_tool;
 pub mod turn_router;
 pub mod types;
 
-pub use a2a_tools::{generate_a2a_tool_specs, CompositeToolInvoker};
+pub use a2a_tools::CompositeToolInvoker;
 pub use agent_chat::{AgentChatExecutor, ChatAgentRunner};
+pub use agent_executor::{
+    AgentExecutor, AgentExecutorDeps, AgentRunSpec, ApolliaContext, Composition, RunInput,
+    SessionWiring,
+};
 pub use builtin_agent::{
     BuiltInChatAgent, BuiltInChatAgentDeps, ChatAgentResponse, NativeChatToolInvoker,
     DEFAULT_CONTEXT_WINDOW_SIZE, DEFAULT_SYSTEM_PROMPT,
@@ -34,23 +45,27 @@ pub use extractor::{
     extract_user_memory, spawn_extraction, ExtractionError, ExtractionResult, UserMemoryExtractor,
 };
 pub use manager::{
-    ChatPlanSnapshot, ChatSessionManagerHandle, ChatToolsConfig, InjectError, PauseError,
-    PendingUserInputView, SessionAuthorizationView, APOLLIA_CHAT_AGENT_ID,
+    AgentTaskRun, ChatPlanSnapshot, ChatSessionManagerHandle, ChatToolsConfig, Continuation,
+    ContinuationRefusal, InjectError, PauseError, PendingUserInputView, APOLLIA_CHAT_AGENT_ID,
 };
 pub use plan_actor::{spawn_plan_actor, PlanHandle, PlanStoreError};
-pub use project_context::DefaultProjectContextProvider;
 pub use repository::{
-    AppendMessageParams, ChatApprovalLogRow, ChatSessionRepository, MessageRow, SessionRow,
+    AppendMessageParams, ChatApprovalLogRow, ChatFolder, ChatSessionRepository, MessageRow,
+    MessageSearchHit, SessionRow, TrashedSession, FOLDER_NAME_MAX_CHARS,
+    MESSAGE_SEARCH_MAX_RESULTS,
+};
+pub use session_settings::{
+    ContextOverflowSetting, SessionSettings, SessionSettingsError, SESSION_NOTES_MAX_CHARS,
 };
 pub use summarizer::{summarize, SummarizerError};
+pub use title::TitleError;
 pub use todo_actor::spawn_todo_actor;
 pub use todo_handle::TodoHandle;
 pub use types::PastSessionSummary;
 pub use types::RecentSessionSummary;
 pub use types::{
-    AlwaysAcceptScope, ChatError, ChatMessage, ChatMode, ChatRole, ChatSession, ChatSessionConfig,
-    ExchangeState, FsHitlDecision, InjectedInstruction, MessageId, PauseState,
-    PendingChatApprovals, ProjectContextProvider, SessionDetail, SessionId, SessionInfo,
-    SessionMetrics, SessionStatus, ToolCallRecord, ToolCallStatus, ToolDecision, ToolStatEntry,
-    TurnOutcome,
+    ChatApprovalAsked, ChatError, ChatMessage, ChatMode, ChatRole, ChatSession, ChatSessionConfig,
+    ExchangeState, InjectedInstruction, MessageId, PauseState, PendingChatApprovals,
+    SessionConfigUpdate, SessionDetail, SessionId, SessionInfo, SessionMetrics, SessionStatus,
+    ToolCallRecord, ToolCallStatus, ToolDecision, ToolStatEntry, TurnOutcome,
 };

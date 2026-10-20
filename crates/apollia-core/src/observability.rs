@@ -22,6 +22,7 @@ const DEFAULT_MAX_TOOL_OUTPUT_BYTES: usize = 10_240;
 /// Controls the size limits for data persisted in SQLite. The defaults are
 /// reasonable for common usage; they can be overridden via `apollia.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// Max size of task/step inputs in bytes (default 32768).
     #[serde(default = "default_max_input_bytes")]
@@ -54,7 +55,7 @@ pub struct ObservabilityConfig {
     #[serde(default = "default_capture_on")]
     pub capture_agent_logs: bool,
     /// Retention period in days for `runtime_events` before automatic purge
-    /// (default 90, consistent with audit.db).
+    /// (default 90).
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
 }

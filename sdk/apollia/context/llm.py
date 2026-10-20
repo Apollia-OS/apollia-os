@@ -45,10 +45,12 @@ class LlmResponse(Protocol):
 class LlmProxy(Protocol):
     """``ctx.llm`` - LLM backend access.
 
-    Five methods: :meth:`complete` for single-shot, :meth:`chat` for the
+    Four methods: :meth:`complete` for single-shot, :meth:`chat` for the
     system-plus-user case, :meth:`map` for a batch sharing one prefix,
-    :meth:`stream` for token iteration, :meth:`run_tools` for the built-in
-    tool loop.  Stream cleanup propagates cancellation to the Rust backend.
+    :meth:`stream` for token iteration.  Stream cleanup propagates
+    cancellation to the Rust backend. The loop that alternates model calls and
+    tool calls belongs to an agent: a workflow step that needs one hands the
+    message to an agent with ``ctx.agents.run``.
 
     :meth:`complete` and :meth:`chat` take an optional ``schema``: a JSON
     Schema the answer must satisfy. The call then returns the validated value
@@ -76,7 +78,15 @@ class LlmProxy(Protocol):
         temperature: float | None = None,
         max_tokens: int | None = None,
         seed: int | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        repeat_penalty: float | None = None,
+        stop: list[str] | None = None,
         schema: dict[str, Any] | None = None,
+        thinking: bool | None = None,
     ) -> LlmResponse | StructuredValue:
         """Run a single-shot completion over a message list.
 
@@ -87,6 +97,23 @@ class LlmProxy(Protocol):
             max_tokens: Cap on generated tokens, or None for the backend default.
             seed: Sampling seed, for reproducible output where the backend
                 supports it.
+            top_p: Nucleus sampling mass, or None for the engine default.
+            top_k: Number of most likely tokens kept before sampling, or None
+                for the engine default.
+            min_p: Minimum probability, relative to the most likely token, a
+                token needs to be kept, or None for the engine default.
+            presence_penalty: Penalty on tokens already present in the output,
+                or None for the engine default.
+            frequency_penalty: Penalty growing with how often a token already
+                appeared, or None for the engine default.
+            repeat_penalty: Multiplicative penalty on repeated tokens, or None
+                for the engine default.
+            stop: Strings that end generation when produced, or None for none.
+                Each setting left to None is not sent, so the call behaves the
+                same on the embedded engine and on a remote server. ``top_k``,
+                ``min_p`` and ``repeat_penalty`` are not part of the OpenAI
+                protocol: they are sent as given, and a server that does not
+                know them may refuse the call.
             schema: JSON Schema the answer must satisfy, or None for free-form
                 generation. With it the call constrains generation, validates
                 what comes back against the same schema, and returns the
@@ -95,6 +122,11 @@ class LlmProxy(Protocol):
                 ``number``, ``integer``, ``boolean``, ``null``, ``enum``,
                 ``required``. ``anyOf``, ``oneOf``, ``allOf`` and ``$ref`` are
                 refused by name.
+            thinking: Whether the model reasons before it answers, or None to
+                leave the choice to the chat template of the model. A model
+                that reasons spends ``max_tokens`` on its reasoning first: a
+                short call that must fit its cap passes ``False``. A model
+                without a reasoning mode ignores it.
 
         Returns:
             The completed response, with its content, latency and usage; or the
@@ -192,31 +224,5 @@ class LlmProxy(Protocol):
                 ctx.events.emit_token(token)
 
         Cancellation propagates to the Rust backend on iterator close.
-        """
-        ...
-
-    async def run_tools(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        max_iterations: int = 5,
-    ) -> str:
-        """Run the built-in tool loop and return the final answer.
-
-        The loop alternates model call and tool call until the model answers
-        without asking for a tool.
-
-        Args:
-            messages: Chat messages, ``{"role", "content"}`` each.
-            tools: Tool descriptors, ``{"name", "description", "parameters"}``
-                each. :meth:`A2AInterface.skill_as_tool` builds one.
-            max_iterations: Guard rail on the number of model calls.
-
-        Returns:
-            The model's final answer, after every tool call has run.
-
-        Raises:
-            RuntimeError: The step budget is exhausted, or ``max_iterations``
-                was reached.
         """
         ...

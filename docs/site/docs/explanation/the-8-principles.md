@@ -6,8 +6,8 @@ description: The eight principles Apollia is built on, from local-first to safeg
 
 # The 8 principles
 
-Apollia is a sovereign runtime for autonomous AI agents. It runs any Python agent
-in isolation, locally, with tools, and without a cloud dependency. Eight
+Apollia is a sovereign runtime for autonomous AI agents. It runs agents
+locally, under governance it enforces, with tools, and without a cloud dependency. Eight
 principles hold that promise together. They are not style preferences; each one
 was forced by a real constraint, and each one shapes a default you can rely on as
 an adopter. This page explains what each principle is and why it matters to you.
@@ -36,18 +36,25 @@ reason about and one thing to keep running.
 
 ## 3. Minimal contract
 
-<!-- claim:agent-contract-is-decorators-not-manifest-run -->
-An agent is a class decorated with `@agent`, holding at least one async method
-decorated with `@skill` or `@on_message`. There is no base class to inherit and
-no framework to adopt. The point is to keep the surface an author must learn
-small, so the runtime can carry the hard parts (governance, budgets, tools)
-rather than pushing them into every agent. For the exact contract an agent sees,
-read the [SDK reference](/reference/sdk).
+<!-- claim:agent-contract-is-a-manifest-read-strictly -->
+An agent is a record: a mission, a model, tools, sources and rights. A package
+writes it as an `[[agents]]` entry of its `apollia.toml` manifest, and no Python
+object stands for it. Code is optional: a package brings tools (`@tool`) and
+workflows (`@workflow`), two decorators over async functions, and nothing else.
+The point is to keep the surface an author must learn small, so the runtime can
+carry the hard parts (governance, budgets, tools) rather than pushing them into
+every agent. It also keeps an agent in the hands of the person who uses it: what
+a package declares is a set of defaults, and a tool, a right or a model is
+changed from the interface without a new version of the code. For the exact
+contract the Python of a package sees, read the [SDK reference](/reference/sdk).
 
-The earlier contract, a `manifest()` method plus an async `run()`, is gone
-(see [the agent contract](/architecture/decisions#agent-contract)). The bridge refuses any object without `__apollia_dispatch__`, the
-attribute the decorators install, so an agent written the old way does not load
-at all rather than half-working.
+The runtime refuses a package whose manifest does not validate. A key the schema
+does not know is refused with its full path, and so is what the schema cannot
+express, such as an agent granted a package tool that the package does not
+deliver. A misspelt key stops the package rather than leaving an agent running
+without what its author declared. The earlier contract, a class decorated with
+`@agent` holding `@skill` or `@on_message` methods, is gone (see
+[the agent contract](/architecture/decisions#agent-contract)).
 
 ## 4. Fail fast
 
@@ -69,27 +76,43 @@ behind this is in [Solution strategy](/architecture/solution-strategy).
 ## 6. Memory at agent initiative
 
 <!-- claim:memory-injection-confined-to-builtin-assistant -->
-Apollia never injects memory into an agent's prompt. An agent recalls what it
-decides to recall, when it decides to, through `ctx.memory`. Automatic memory
+Apollia never injects memory into an agent's prompt, and writes nothing to
+memory on its behalf. An agent recalls what it decides to recall, when it
+decides to, with the tool `memory_search`, and keeps a note with
+`memory_write`. Both tools come from one gesture, checking Memory on the sheet
+of the agent, and neither asks for consent: the space is the agent's own, one
+space named after it and kept across its conversations and its tasks, which
+reaches neither your data nor the machine. Automatic memory
 injection is convenient and quietly corrosive: it makes a run's inputs opaque and
 its behaviour hard to attribute. Leaving recall to the agent's initiative keeps
 the record of what fed a decision honest.
 
-Three exceptions exist, and none is reachable from a Python agent you install.
+Your profile is the opposite case. It follows you into every conversation it is
+switched on for, so an agent never writes it. An agent whose Profile source is
+checked may propose a fact with `profile_propose`, and the proposal is put to
+you every time, with no "always".
+
+Three exceptions exist, and none is reachable from an agent you install.
 The first two are confined to the built-in conversational assistant, the one
 behind the chat window, and live in its own prompt builder and chat manager. The
 third lives elsewhere, in the desktop prompt-rewrite command, which never touches
 the assistant's prompt at all: it answers the composer, not a run. No agent
 execution path goes through any of the three.
 
-The first is written into the assistant and unreachable in this release. At the
-highest autonomy tier only, `long_autonomous`, the assistant appends a short
-user-persona brief to its system prompt. Free chat rebuilds the default tier on
-every exchange, so it always runs at `assisted`, and that brief is never
-appended.
+The first is the profile of the conversation, and it is the one you control. A
+conversation designates one of your profiles, or follows the default one. On
+every turn, at every autonomy tier, the assistant appends a short brief of that
+profile to its system prompt: name, role, function, tools, preferences and
+notes, whatever you filled in. It sits under a switch, "Apollia knows my
+profile", in the Integrations tab of the right panel of the conversation. The
+switch is on when a conversation is created, it is stored with the conversation,
+and turning it off takes effect on the next message. The context gauge of the
+composer says whether the prompt carries the profile, so what you read there
+is what the model received. Companion sessions and sessions that run an installed agent never
+receive it, switch or not.
 
 <!-- claim:cross-session-recall-injects-summaries -->
-The second is not tier-gated, and is worth stating plainly. On the **first
+The second has no switch, and is worth stating plainly. On the **first
 message of a free chat session**, the runtime searches an index of past session
 summaries with that message and appends up to three matches to the system prompt,
 under a heading naming them as previous conversations. Messages shorter than 20
@@ -100,15 +123,16 @@ not inherit personal history.
 Read that second one for what it is. Inside the chat window, a new conversation
 can start already carrying a trace of older ones, and the operator did not ask
 for it per session. It buys continuity in a product surface where a user
-reasonably expects to be remembered. It is also the one place in the runtime
-where the "at agent initiative" rule genuinely does not hold, which is why it is
-written here rather than left implicit.
+reasonably expects to be remembered. With the profile brief, it is one of the two
+places in the runtime where the "at agent initiative" rule genuinely does not
+hold, and the only one you cannot turn off, which is why it is written here
+rather than left implicit.
 
 <!-- claim:rewrite-injects-work-context -->
 The third exception is also operator-initiated, and happens only when explicitly
 triggered. When the operator clicks the "Improve prompt" button in a chat
-composer, the rewrite request includes the Work section of their user profile
-(sector, tech stack, daily tools) if it has been filled. This is not automatic
+composer, the rewrite request includes three fields of the profile of the
+conversation (role, function, tools) if they have been filled. This is not automatic
 injection: nothing happens until the operator clicks, and they see the rewritten
 result before choosing to send it. The context helps the rewrite stay grounded in
 the operator's actual environment rather than inventing tools they don't use.
@@ -120,12 +144,12 @@ sovereignty as much as to agency.
 
 Every autonomous run is bounded by a step budget the runtime enforces: a ceiling
 on reasoning steps, tool calls, and wall-clock time. An agent cannot raise or
-remove it from its own code. Autonomy is only delegable if it has a hard edge, so
+remove it. Autonomy is only delegable if it has a hard edge, so
 the edge lives in the runtime rather than in the agent's good intentions. This
 page does not re-explain the mechanism; it is one of the pillars of the
 [accountability model](/explanation/accountability-model). One honest detail: the
-ceiling ships with a safe default, and reading a custom ceiling from `apollia.toml`
-at runtime is a follow-up rather than a finished path. The full ledger of what is
+ceiling of an agent run is fixed in the code, and no key of `apollia.toml`
+changes it. The full ledger of what is
 partial is in [Risks and technical debt](/architecture/risks-and-technical-debt).
 
 ## 8. Human CLI, machine API

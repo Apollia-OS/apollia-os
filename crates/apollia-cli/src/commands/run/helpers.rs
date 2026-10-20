@@ -63,38 +63,6 @@ pub(super) fn report_detached_submission(task_id: &str, agent_id: &str, json: bo
     exit_codes::SUCCESS
 }
 
-/// Build the `session_config` fragment from the tool allow/deny lists.
-///
-/// Returns `Value::Null` when no restrictions are specified.
-pub(super) fn build_session_filter(
-    allowed_tools: &[String],
-    disallowed_tools: &[String],
-) -> serde_json::Value {
-    if allowed_tools.is_empty() && disallowed_tools.is_empty() {
-        return serde_json::Value::Null;
-    }
-    let allowed = if allowed_tools.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::Array(
-            allowed_tools
-                .iter()
-                .map(|t| serde_json::Value::String(t.clone()))
-                .collect(),
-        )
-    };
-    let disallowed = serde_json::Value::Array(
-        disallowed_tools
-            .iter()
-            .map(|t| serde_json::Value::String(t.clone()))
-            .collect(),
-    );
-    serde_json::json!({
-        "allowed_tools": allowed,
-        "disallowed_tools": disallowed,
-    })
-}
-
 /// Map a `submit_task` failure to a user-facing error and exit code.
 pub(super) fn handle_submit_error(err: ClientError, agent_id: &str, json: bool) -> i32 {
     match err {
@@ -109,8 +77,8 @@ pub(super) fn handle_submit_error(err: ClientError, agent_id: &str, json: bool) 
         ClientError::ServerError { status: 404, body } => {
             let hint = format!(
                 "{body}\n\
-                 Hint: install + enable + load the agent first:\n\
-                 \t apollia-os agent install <path>   # if it's not yet installed\n\
+                 Hint: install or enable the agent first:\n\
+                 \t apollia-os package install <file.apo>   # if it's not yet installed\n\
                  \t apollia-os agent enable {agent_id} # if it's disabled\n\
                  \t apollia-os agent list             # to see current state"
             );
@@ -228,9 +196,6 @@ pub(super) fn report_completed_task(
 ///
 /// When `terminal_only` is `true`, intermediate events are suppressed and only
 /// the final agent output is printed (used by the default non-`--stream` path).
-///
-/// When `alternatives` is `true`, the stream pauses on `plan_alternatives_generated`
-/// and prompts the operator for a plan choice before continuing.
 /// Parameters for [`stream_task`].
 pub(super) struct StreamTaskArgs<'a> {
     /// Connected runtime client.
@@ -243,8 +208,6 @@ pub(super) struct StreamTaskArgs<'a> {
     pub(super) start: Instant,
     /// Suppress intermediate events, surfacing only the final output.
     pub(super) terminal_only: bool,
-    /// Pause on `plan_alternatives_generated` and prompt for a choice.
-    pub(super) alternatives: bool,
     /// Pause on `plan_approval_required` and prompt for an approve/reject decision.
     pub(super) plan: bool,
 }
@@ -256,7 +219,6 @@ pub(super) async fn stream_task(args: StreamTaskArgs<'_>) -> i32 {
         json,
         start,
         terminal_only,
-        alternatives,
         plan,
     } = args;
 
@@ -275,9 +237,7 @@ pub(super) async fn stream_task(args: StreamTaskArgs<'_>) -> i32 {
         }
     };
 
-    let mut state = if alternatives {
-        RunDisplayState::with_alternatives(json)
-    } else if plan {
+    let mut state = if plan {
         RunDisplayState::with_plan(json)
     } else {
         RunDisplayState::new(json, terminal_only)

@@ -11,26 +11,41 @@ is not implicit. Every crossing must be explicit, logged, and revocable.
 
 ## 0. The agent trust model (read this first)
 
-Agent Python code runs in-process through the PyO3 bridge, with the full rights
-of the runtime process, which are the rights of the current user. There is no
-OS sandbox around agent code: no process-per-agent isolation, no seccomp, no
-namespaces confining the agent itself. A deliberately malicious or buggy agent
-can read the filesystem, open sockets, spawn processes, and read credentials
-from the keyring, regardless of what it declares in its manifest. This is the
-recorded v0.1.0 trust model, and it is deliberate: the audience is
-advanced builders who write or audit their own agents.
+An agent is a record, not code: a mission, a model, accesses, sources, an
+autonomy tier, declared in the `apollia.toml` of a package or created in the
+desktop application. It acts only by calling tools, and every tool call gets
+one governance decision before it runs (section 5). An agent cannot grant
+itself a right.
+
+The code a package brings is another matter. Its `@tool` and `@workflow`
+functions run in-process through the PyO3 bridge, with the full rights of the
+runtime process, which are the rights of the current user. There is no OS
+sandbox around package code: no process-per-package isolation, no seccomp, no
+namespaces confining it. A deliberately malicious or buggy package tool can
+read the filesystem, open sockets, spawn processes, and read credentials from
+the keyring, regardless of the action family it declares in its manifest. This
+is the recorded trust model, and it is deliberate: installing a package that
+brings code is trusting its author.
 
 What this means in practice:
 
-- Security is procedural before it is technical. The operator audits an agent
-  before installing it. The install path prints a trust banner to that effect.
-- The real gate for sensitive actions is HITL: the chat path asks by default,
-  so a write or an external call surfaces an approval rather than executing
-  silently. See section 5.
-- Manifest capability allowlists (`tools_required`, `secrets`, `datasources`,
-  `mailbox`) gate the `ctx.*` convenience interfaces. They are least-privilege
-  ergonomics, not an OS boundary: an unsandboxed agent can bypass `ctx.secrets`
-  with raw `os.environ` or `open()`. Never describe them as isolation.
+- Security is procedural before it is technical. The operator reads what a
+  package contains before installing it. The preview shows the agents, the
+  tools and the workflows, what each agent asks to use, and its notices:
+  `unsigned`, `untrusted_publisher`, `missing_connection`,
+  `server_already_present`
+  (`crates/apollia-cli/src/commands/package/remote.rs`).
+- The real gate for sensitive actions is the governance decision: every tool
+  call of every agent, in the chat and outside it, asks for a sensitive family
+  unless a standing consent covers it, so a write or an external call surfaces
+  an approval rather than executing silently. See section 5.
+- The context handed to package code is narrow, and that is ergonomics, not an
+  OS boundary. A tool gets no model, no tool proxy and no memory
+  (`RuntimeContext::for_package_tool`,
+  `crates/apollia-aip/src/context/runtime_ops.rs`); a workflow adds `ctx.llm`,
+  `ctx.agents`, `ctx.workflows` and `ctx.user`. Unsandboxed Python can still
+  reach the machine with raw `os.environ` or `open()`. Never describe the
+  context as isolation.
 - Native tools (`bash_executor`, `python_executor`) are the confined surface,
   not the agent. On Linux they run under PID and mount namespaces via `unshare`;
   on macOS there is no OS sandbox and a per-invocation warning is emitted. On
@@ -41,7 +56,7 @@ What this means in practice:
   `PATH` (Git Bash, MSYS2 or WSL), refusing with an actionable error without
   one. See sections 6 and 7.
 
-Never imply, in code, comments, or public docs, that agent code is sandboxed.
+Never imply, in code, comments, or public docs, that package code is sandboxed.
 The honest posture is a feature for a regulated adopter; overstating it is a
 liability.
 
@@ -49,34 +64,41 @@ liability.
 
 ## 1. The sovereignty boundary
 
-Two operator-controlled profiles :
-
-| Profile | Behavior |
-|---|---|
-| `local_only` | no outbound network calls to LLM/MCP cloud, OAuth disabled, only local backends (llama-cpp, Ollama) allowed |
-| `cloud_allowed` | cloud LLMs (Anthropic, OpenAI, Vertex) and OAuth-backed connectors enabled |
+Forbidding the cloud is a rule of the organisation policy, checked in Rust by
+the runtime. There is no per-user sovereignty switch that gates a call.
 
 State :
-- The setting is **read-only in the v0.1.0 UI**. Neither
-  `crates/apollia-desktop/ui/src/routes/Connections.svelte` nor
-  `crates/apollia-desktop/ui/src/routes/settings/Integrations.svelte` carries
-  the value: `resolveSovereignty()` in
-  `crates/apollia-desktop/ui/src/lib/ipc/connections.ts` reads
-  `constraints.sovereignty` from the user profile and maps anything that is not
-  an explicitly cloud-permitting entry to `local_only`.
-- **Enforcement is wired for OAuth only.** `ensure_cloud_allowed` in
-  `crates/apollia-desktop/src/commands/integrations.rs` returns
-  `IntegrationsError::SovereigntyBlocked` before an OAuth flow starts on a
-  `local_only` profile. Nothing gates an LLM or MCP call the same way. Treat
-  data residency as that one gate plus operator-configured permission rules and
-  HITL, not as an automatic profile switch across every outbound path.
-- An operator profile UI switch and a real enforcement gate are planned
-  post-v0.1.0.
+- The runtime reads the signed organisation policy once at boot
+  (`read_org_policy` in
+  `crates/apollia-runtime/src/supervisor/boot/governance.rs`) and
+  hands the verdict to `PolicyAdmission`
+  (`crates/apollia-runtime/src/governance/policy_admission.rs`), the connection
+  admission every place that adds a connection calls.
+- `connections.remote = "deny"` refuses every connection that sends data off
+  the machine. A native Google or Microsoft account is refused when its consent
+  starts, on both paths: the desktop command `oauth_start_flow` and the route
+  `POST /api/v1/connectors/oauth/start` (403), and again before its code is
+  exchanged. The desktop surfaces the refusal as `refused_by_policy`.
+- Without a policy the user is free: every connection is admitted. A policy that
+  is present but refused (rights, key, signature, schema) cannot be read, and
+  the admission fails closed. So does a `governance.db` the runtime cannot
+  read.
+- The decision never comes from the renderer. A value a caller hands the
+  runtime is not a gate, since any caller can choose it.
+- The `[inference]` section of the policy is read where an inference server is
+  added and where a request is sent to one
+  (`crates/apollia-runtime/src/governance/inference_policy.rs`): a non-empty
+  `allowed_servers` refuses every address it does not list, and
+  `remote_endpoints = "deny"` refuses every address outside this machine that
+  `allowed_servers` does not list.
 
 Rules :
-- A new external call site should route through the chat approval gate (HITL) so
-  the operator can deny it. Do not claim the sovereignty profile blocks the call
-  automatically until the enforcement gate lands.
+- A new place that adds a connection calls the connection admission before it
+  stores anything, and stops on a refusal.
+- A new external call site should be a tool call, so the governance decision of
+  section 5 applies and the operator can refuse it. Do not claim the policy
+  blocks a call outside the connection admission and the inference check until
+  a check is wired there.
 
 ---
 
@@ -123,7 +145,8 @@ with singleflight to prevent concurrent refresh races.
 Lifecycle :
 
 ```
-oauth_start_flow(provider, scopes, sovereignty)
+oauth_start_flow(provider, scopes)
+   -> connection admission (organisation policy)
    -> browser
 oauth_complete_flow(state, code)
    -> SecretStore.write(refresh_token)
@@ -148,15 +171,19 @@ See `crates/apollia-auth/src/` (OAuth2 PKCE, keyring token storage).
 
 ## 4. MCP and connector credentials
 
-MCP servers may require credentials (API keys, OAuth tokens). They are
-stored via `SecretStore` under `mcp:<server_name>:<env_var>` keys.
+MCP servers may require credentials (API keys, OAuth tokens). A static secret
+is stored via `SecretStore` under the service `apollia-mcp`
+(`MCP_STATIC_SECRET_SERVICE`), with the key `<server_name>:<KEY>`.
 
 Rules :
-- An MCP server config in `~/.apollia/mcp.json` references environment
-  variables by name, never values.
-- The runtime resolves the env vars at spawn time from `SecretStore`.
-- A failed resolution puts the MCP server in `ProcessState::DEGRADED`,
-  not `STOPPED`. Operator action required.
+- An MCP server config (`~/.apollia/mcp.toml`, or a row of `mcp.db`) references
+  a secret by placeholder, never by value: `${APOLLIA_SECRET:KEY}` for a static
+  secret, `${APOLLIA_OAUTH}` for an OAuth bearer, `${VAR}` for a variable of
+  the system environment.
+- The runtime resolves the placeholders when the server starts
+  (`McpServerConfig::resolve_env`, `crates/apollia-mcp/src/config.rs`).
+- A placeholder that cannot be resolved fails the start of the server with
+  `McpConfigError::UnresolvedEnvVar`. Operator action required.
 
 Native SaaS connectors (Gmail, Calendar, Drive, Outlook, OneDrive) reuse
 the OAuth flow above. See `crates/apollia-connectors/`.
@@ -172,25 +199,80 @@ Decision outcomes :
 
 | Decision | Meaning |
 |---|---|
-| `allow` | execution proceeds, recorded |
-| `ask` | execution paused, HITL prompt issued |
-| `deny` | execution blocked, recorded |
+| `allowed` | execution proceeds, recorded |
+| `ask_user` | execution paused, HITL prompt issued |
+| `pending` | unattended run: execution waits for an answer given later |
+| `denied` | execution blocked, recorded |
 
-Scopes : `session`, `project`, `global`. The closest scope wins.
+Reach of what is persisted :
 
-What actually gates a tool call in the shipped runtime :
+- A fine rule targets one agent (`agent`, with its identifier) or every agent
+  (`global`); the rule of the calling agent is consulted before the rule for
+  every agent. No rule targets a project or a single session.
+- An "always" is not a rule: it is a standing consent for one agent and one
+  action family (`apollia_permissions::FamilyConsentStore`, table
+  `family_consents`), permanent or bound to one batch run. The "execute code"
+  family never takes one: there, in developer mode, "always" on a single simple
+  command writes a fine rule `allow` for that agent whose prefix is the whole
+  command (`GovernanceHandle::allow_command`).
+- Rules written by an older binary are converted once at startup
+  (`apollia_permissions::run_access_upgrade`), and every conversion or removal
+  is recorded in the audit journal as a change of access.
 
-1. **Prefix rules** (persisted in `governance.db`). Auto-approve or auto-deny
-   by argument prefix (`arg.starts_with(prefix)`); a rule with no prefix
-   matches any argument. This is where the desktop "always allow" button writes
-   its rules.
-2. **Code-executor guard** (`apollia_permissions::executor_guard`). The
-   invariant described in the next section, applied on every dispatch.
-3. **HITL approval**. Anything not auto-approved reaches the user.
+What actually gates a tool call in the shipped runtime : one decision, made by
+the governance actor (`apollia_runtime::governance::GovernanceHandle`) before
+every tool call of every agent, in the chat and outside it alike. The agent
+loop asks it at a single point, before anything runs; nothing else authorizes
+a call by tool name. The actor owns what the decision reads (the organisation
+policy read at boot, the fine rules and the standing consents of
+`governance.db`, the developer mode of `apollia.toml`) and publishes it as one
+state the decision reads without waiting. The order, the first line that
+applies deciding :
 
-Those three are the whole of it. Nothing else in `apollia-permissions` sits in
-front of a tool call, and the `[permissions]` section of `apollia.toml` is inert
-(see the withdrawn sections of the configuration reference).
+1. **Organisation policy.** A tool, a connection or an action family the
+   policy refuses is refused, whatever the consent.
+2. **Fine rule `deny`** (persisted in `governance.db`, by argument prefix,
+   `arg.starts_with(prefix)`; a rule with no prefix matches any argument).
+   Refused.
+3. **Reading** (the `read` family, or a tool that acts on the conversation
+   alone). Allowed, no consent asked.
+4. **Executing code.** Allowed only by a fine rule `allow` on a single simple
+   command, in developer mode; otherwise asked, with "always" offered only on
+   a single simple command in developer mode.
+5. **Standing consent** of the agent for the family, or a grant of the run (a
+   batch grants the accesses of its agent for its items). Allowed.
+6. **Otherwise asked**, with three answers: once, always, refuse. A tool
+   nobody classified lands here, without "always", unless a fine rule `allow`
+   names it in developer mode, which lets it run: it has no family a consent
+   could stand for, so the rule is the only thing that answers for it.
+
+The decision carries its reason (policy, rule, fail closed, consent) and the
+answers offered.
+
+Governance that cannot read what it decides from fails closed, never open: a
+`governance.db` that exists and cannot be read, a policy present and
+refused, or a journal the policy requires (`journal.required = true`) that is
+absent or could not be opened, refuses every sensitive call (line 5 and 6
+above become a refusal) and every new connection, while reading continues. A database that stops
+being readable keeps its last state in force, its deny rules and its disabled
+tools included; one unreadable at startup keeps only the `[tools] disabled`
+list of `apollia.toml`. The runs that build their own dispatcher (the agent
+runners of the desktop and the daemon) read the same state through
+`governance::tool_gate`. The state is served by `GET /api/v1/governance/state`,
+which reads the sources again before it answers (a database whose permissions
+were repaired keeps its modification time), and each change is announced as
+`RuntimeEvent::GovernanceFailClosed`. The desktop shows it as a banner under
+the top bar, with a retry for an unreadable database.
+
+A run nobody watches (an item of a batch) waits where an attended one would
+ask. An "always" answered at the prompt is written as a
+standing consent for the agent and the family, never as a rule on a tool name;
+on code, as the fine rule of line 4, never as a grant by name. The request the
+prompt shows carries the whole command or source of a code executor and the
+folder it runs in, never a truncated preview.
+Those six lines are the whole of it. Nothing else in `apollia-permissions` sits
+in front of a tool call, and the `[permissions]` section of `apollia.toml` is
+inert (see the withdrawn sections of the configuration reference).
 
 Two consequences worth stating plainly, because they are easy to get wrong :
 
@@ -209,9 +291,12 @@ raw-string prefix is escapable by chaining (`git` would match
 `git status; rm -rf ...`). The permission model enforces one invariant for them
 (the set is `apollia_permissions::CODE_EXECUTOR_TOOLS`) :
 
-- A no-prefix rule never auto-approves a code executor: "always allow" is
-  downgraded to a per-invocation approval, in the chat path and the agent path
-  alike. The current call is still approved once; the next one asks again.
+- A no-prefix rule never auto-approves a code executor, and outside developer
+  mode "always" is never offered for one: every call asks, whichever agent runs
+  it, in a conversation or outside one, since both go through the same
+  decision. A prefix rule approves only in developer mode, and "always" there
+  is offered only on a single simple command, where it writes an `allow` rule
+  for the agent on that whole command; a compound command is asked every time.
 - A prefix rule on a code executor matches only when the argument is a single
   simple command, with no chaining, pipe, redirection, substitution, or
   backgrounding (`;`, `|`, `&`, `` ` ``, `>`, `<`, `(`, `)`, `{`, `}`, `$(`,
@@ -228,9 +313,43 @@ not the primary control. The primary control against an over-broad grant is the
 permission scoping above, not the classifier. Default patterns are deliberately
 left empty to preserve the opt-in, local-first posture.
 
-Audit table is append-only. Never delete a row programmatically.
-Retention is time-based via `[audit].retention_days` in the config, not a
-manual purge command.
+### What the journal promises, and what it does not
+
+The audit journal (`audit_journal.db`, `apollia_runtime::audit_journal`) is
+append-only, hash-chained per run and across runs, and signed when its key can
+be read. The promise made to whoever answers for a fleet is exact, and no
+wider than this:
+
+- **No erase function.** Nothing in the interface, the command line or the API
+  removes an entry: no route under `/api/v1/audit` answers `DELETE` (a test
+  lists them), and no `audit` subcommand or desktop command deletes. Never add
+  one, and never delete a row programmatically.
+- **Alteration is detected, not prevented.** The journal and its HMAC key live
+  in the user's own folder, on the user's own machine. The user can delete or
+  rewrite the file. What the chain guarantees is that an entry changed,
+  removed or reordered shows in `audit verify`; it does not stop the change.
+  A holder of the key can re-sign a rewritten chain.
+- **Only an anchor kept elsewhere detects truncation.** A journal cut at its
+  end is a shorter chain that still verifies against itself. The head anchor
+  (`audit anchor`, and the `anchor` of each daily export file) is what shows
+  it, and only when a copy of it sits outside the machine.
+- **Retention belongs to the organisation policy.** `journal.retention_days`
+  of the signed policy is the only thing that removes entries, at startup and then
+  once a day: the entries older than that many days leave after a signed
+  `journal_purged` entry that carries the anchor of what left, and
+  verification starts from that entry and reports where. Without a policy, or
+  without that key, nothing is ever removed. There is no retention key in
+  `apollia.toml` and no purge command.
+
+The same section of the policy sets the rest: `journal.required = true` fails
+closed without a journal (above); a journal that opens without its signing key
+stays usable, says so in the window and records `journal_unsigned`, because
+its chain is still verified; `journal.export.detail` forbids or requires the
+detail of an export, and an export asked the other way is refused;
+`journal.export.daily_summary_dir` receives one summary file per UTC day with
+the head anchor, caught up at startup before the retention runs. A folder that
+cannot be written is said in the window and recorded as
+`journal_export_failed`; it refuses nothing.
 
 
 
@@ -240,23 +359,31 @@ manual purge command.
 
 The file tools (`file_read`, `file_write`, `file_edit`, `file_list`,
 `file_glob`, `file_grep`, notebook read/edit) resolve every path against a
-`SandboxRoot` jail and reject escapes. A reversible journal logs every write.
+`SandboxRoot` jail and reject escapes. Nothing records a write so that it can be
+undone (see the last rule below).
+
+A write is consented to like any other tool call: `file_write`, `file_edit` and
+`notebook_edit` are in the "write or delete" family, so the decision of
+section 5 asks once, on the same card as every tool, with the same three
+answers. There is no second prompt of their own, no classification of the path
+by risk level and no confirmation word to type.
 
 This jail applies to those tools only. `bash_executor` and `python_executor`
 spawn child processes that dereference paths themselves, so a string-level jail
 cannot constrain them; they rely on the Linux namespaces, rlimits, and HITL
-described in section 0 instead. And an in-process agent can touch the filesystem
-directly with raw Python, bypassing the tool layer entirely.
+described in section 0 instead. And the Python of a package can touch the
+filesystem directly, bypassing the tool layer entirely.
 
 Rules :
-- Prefer the file tools for agent filesystem access so the jail and journal
-  apply.
+- Prefer the file tools for agent filesystem access so the jail and the
+  family consent apply.
 - Path validation : file-tool paths are resolved against the sandbox root and
   rejected if they escape (`..`, symlinks pointing outside).
-- The journal is the intended rollback path, and it is not wired: the file
-  tools accept a journal handle through `with_journal`, and no production site
-  passes one, so nothing is recorded and nothing can be reverted. Do not write a
-  rule, a doc page, or an error message that implies otherwise.
+- A rollback journal exists in `apollia-tools` and it is not wired: the file
+  tools accept a journal handle through `with_journal`, only their own tests
+  pass one, and no production site does, so nothing is recorded and nothing can
+  be reverted. Do not write a rule, a doc page, or an error message that implies
+  otherwise.
 
 ---
 
@@ -276,10 +403,10 @@ Residual (not yet mitigated) : the check is name-level only, so DNS rebinding
 (host resolves public at check-time, private at connect-time) and a redirect
 host that rebinds between the policy check and the socket connect are not
 closed. That requires a custom resolver that pins the resolved IP for the
-connection. Profile gating (`local_only`) is not yet enforced here (see
-section 1). And because agent code is unsandboxed, an agent can open a raw
+connection. The organisation policy is not checked here (see section 1).
+And because package code is unsandboxed, a package tool can open a raw
 socket directly, bypassing the guard; it protects tool-mediated fetches, not
-the agent process. Tool child processes on Linux share the host network
+the Python of a package. Tool child processes on Linux share the host network
 namespace (no `--net` isolation yet).
 
 Rules, held by `scripts/check_http_clients.py` :
@@ -293,6 +420,18 @@ Rules, held by `scripts/check_http_clients.py` :
 - Never read a response body with `.text()`, `.bytes()` or `.json()`. Read it
   with `apollia_core::net::read_capped_{bytes,text,json}`, which refuse an
   oversized body mid-stream instead of buffering it and measuring afterwards.
+- One exception sits between the two builders, and it is written here rather
+  than tolerated: the MCP server a request to the compatible server brings
+  with it (`[server] allow_request_mcp`, off by default). Its address comes
+  from a third party, so the redirect policy is the one of
+  `safe_client_builder`, every hop public; but trying a server on this machine
+  is the first use of such a request, so the initial check is
+  `assert_public_or_loopback`: the loopback interface is let through, the
+  private network, a link-local address and an internal domain stay refused.
+  The client is built by `request_supplied_client_builder` and handed to the
+  transport (`StreamableHttpTransport::with_client`); the transport never
+  builds one for an address a request gave. A server on this machine cannot
+  redirect at all, since every hop must be public.
 - Two paths in the runtime carry an agent payload straight to the network: the
   webhook notification channel and the `PreToolUse` / `PostToolUse` HTTP hook
   handler. Both apply the initial check and the per-hop one. A hook answer that
@@ -316,7 +455,7 @@ Rules, held by `scripts/check_http_clients.py` :
 
 - `.env`, `.apollia/`, `.keyfile`, `*credentials*`, `*token*` are in
   `.gitignore`. CI enforces.
-- Apollia reads runtime config from `~/.apollia/config.toml`. Never read
+- Apollia reads runtime config from `~/.apollia/apollia.toml`. Never read
   secrets from environment variables in production code (except the
   documented `APOLLIA_*` selectors).
 - `APOLLIA_*` env vars : selectors only (which backend, which path),
@@ -328,13 +467,13 @@ Rules, held by `scripts/check_http_clients.py` :
 
 | Threat | Mitigation |
 |---|---|
-| Local file exfiltration by a deliberately malicious agent | Not technically prevented: agent code runs in-process (section 0). Defense is the install-chain audit plus HITL on tool actions. The filesystem sandbox and audit journal apply to native tool calls, not to raw agent Python |
-| Buggy agent writing outside its intent via file tools | File-tool path jail (`SandboxRoot`), audit journal, reversible writes |
+| Local file exfiltration by the code of a deliberately malicious package | Not technically prevented: package code runs in-process (section 0). Defense is reading the package preview before installing, plus the governance decision on tool calls. The filesystem jail and the audit journal apply to tool calls, not to raw package Python |
+| Buggy agent writing outside its intent via file tools | File-tool path jail (`SandboxRoot`), the "write or delete" consent, asked on each write until the user answers "always" for the agent, audit journal. No write can be undone: the rollback journal is not wired (section 6) |
 | Credential leak via prompt injection | **Not mitigated.** No prompt-injection defence exists: fetched content feeds the model context as data with no output-side scanning (`web_read` documents this in-module). The only barrier is that any resulting tool call still goes through the prefix rules, the code-executor guard and HITL, so injected instructions cannot silently execute |
-| Network exfiltration | Profile gating, host pinning, audit log |
+| Network exfiltration | Tool-mediated only: the "send to the outside" family asks for consent, the SSRF guard checks every hop (section 7), the organisation policy can refuse remote connections and inference servers (section 1), and the call is in the audit journal. A shell command or the Python of a package can still reach the network |
 | Token theft from disk | OS keyring or age-encrypted file |
 | Replay of OAuth state | Signed state parameter |
-| MCP server hijack | TLS validation, server cert pinning where applicable |
+| MCP server hijack | TLS validation on HTTP transports; a server's tools are granted to an agent family by family, and each call goes through the governance decision |
 | Crash / DoS via a crafted parser input (LLM output, web content, automation text, tool specs) | `cargo-fuzz` targets on the untrusted-input parsers, char-boundary-safe slicing, panic-free parse contract (see `docs/agents/TESTING.md` 8b) |
 
 The agent trust model and sandbox posture are covered in
@@ -353,7 +492,7 @@ The agent trust model and sandbox posture are covered in
 - Need to add a new secret kind : define its `(service, user)` naming
   convention, update the `SecretStore` doc-comment, and document the key
   naming in this file.
-- Need to bypass profile gating for a legitimate reason : the answer is
-  no. If you genuinely believe a bypass is required, the `#permission-model`
+- Need to bypass the governance decision for a legitimate reason : the answer
+  is no. If you genuinely believe a bypass is required, the `#permission-model`
   section of `docs/site/docs/architecture/08-decisions.md` is what has to
   change first.

@@ -5,6 +5,8 @@ use chrono::Utc;
 
 use crate::{config::Severity, engine::Notification};
 
+mod batch;
+
 /// Complete list of event names that [`map_event`] can produce.
 ///
 /// Used to validate event names declared in `apollia.toml` at startup.
@@ -23,6 +25,8 @@ pub const KNOWN_EVENT_NAMES: &[&str] = &[
     "chat.approval_required",
     "chat.tool_failed",
     "chat.user_input_required",
+    "batch.item_awaiting_approval",
+    "batch.ended",
 ];
 
 /// Extracts the text of the first question from the serialized JSON of the
@@ -88,6 +92,7 @@ fn build_dashboard_url(base_url: &str) -> String {
 /// The events that produce a notification:
 /// - `TaskInputRequired`, `TaskCompleted` (success and failure), `AgentDegraded`,
 ///   `LlmModelFailed`, `TriggerError`
+/// - `BatchItemAwaitingApproval`, `BatchEnded`
 ///
 /// Everything else returns `None`.
 pub fn map_event(base_url: &str, event: &RuntimeEvent) -> Option<Notification> {
@@ -278,6 +283,10 @@ pub fn map_event(base_url: &str, event: &RuntimeEvent) -> Option<Notification> {
             })
         }
 
+        RuntimeEvent::BatchItemAwaitingApproval { .. } | RuntimeEvent::BatchEnded { .. } => {
+            batch::map_batch_event(dashboard_url, event)
+        }
+
         _ => None,
     }
 }
@@ -437,6 +446,10 @@ mod tests {
             tool_call_id: "call-001".into(),
             tool_name: "bash_executor".into(),
             prompt: "The 'bash_executor' tool asks to run".into(),
+            answers: Vec::new(),
+            detail: String::new(),
+            code: None,
+            working_dir: None,
         };
         // WHEN
         let notif = map_event(DEFAULT_BASE_URL, &event).expect("must return Some");

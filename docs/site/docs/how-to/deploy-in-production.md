@@ -116,6 +116,12 @@ apollia.example.com {
     reverse_proxy /api/v1/mailbox/stream 127.0.0.1:7771 {
         flush_interval -1
     }
+    reverse_proxy /api/v1/sessions/*/stream 127.0.0.1:7771 {
+        flush_interval -1
+    }
+    reverse_proxy /api/v1/events 127.0.0.1:7771 {
+        flush_interval -1
+    }
 }
 ```
 
@@ -131,7 +137,7 @@ server {
         proxy_set_header Authorization $http_authorization;
     }
     # SSE: unbuffered streaming
-    location ~ ^/api/v1/(tasks/.*/stream|mailbox/stream)$ {
+    location ~ ^/api/v1/(tasks/.*/stream|sessions/.*/stream|mailbox/stream|events)$ {
         proxy_pass http://127.0.0.1:7771;
         proxy_buffering off;
         proxy_cache off;
@@ -140,8 +146,9 @@ server {
 }
 ```
 
-The streaming endpoints `GET /api/v1/tasks/{id}/stream` and
-`GET /api/v1/mailbox/stream` push events as they happen. Without buffering
+The streaming endpoints `GET /api/v1/tasks/{id}/stream`,
+`GET /api/v1/sessions/{id}/stream`, `GET /api/v1/mailbox/stream` and
+`GET /api/v1/events` push events as they happen. Without buffering
 disabled, the proxy holds them until the response closes and the host sees nothing
 live. The same caution applies client-side under native TLS: do not buffer the
 response.
@@ -149,17 +156,19 @@ response.
 ## Verify after deploy
 
 ```sh
-# Liveness. The TCP listener requires the bearer token on every path but the
-# webhook one, so the health check carries it too.
-curl -H "Authorization: Bearer $(cat ~/.apollia/api-token)" \
-  http://127.0.0.1:7771/api/v1/health             # {"status":"ok"}
+# Liveness. The health route is the one API path served without the bearer
+# token; it reveals the product marker and the version only.
+curl -s http://127.0.0.1:7771/api/v1/health
+# {"status":"ok","product":"apollia-os","version":"<runtime version>"}
 
 # Runtime and agent status
 apollia-os status
 
-# End-to-end: install a trivial agent and run it
-apollia-os agent install clients/examples/echo_agent.py --skip-tests
-apollia-os run echo "post-deploy check"
+# End-to-end: build the starting package, install it and run its agent.
+apollia-os package new postcheck
+apollia-os package build postcheck
+apollia-os package install postcheck-0.1.0.apo
+apollia-os run postcheck "post-deploy check"
 ```
 
 The same records the CLI reads are available over HTTP for a host integration; see

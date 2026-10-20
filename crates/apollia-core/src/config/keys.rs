@@ -1,0 +1,273 @@
+//! The registry of the keys of `apollia.toml`.
+//!
+//! One entry per key: its dotted path, its type, its default, its
+//! documentation, its reload class, whether the organization policy can fix
+//! it, and whether it is withdrawn. The registry is written by hand and held
+//! to the structures by a test: the leaf paths of a serialized
+//! [`ApolliaConfig`](super::ApolliaConfig) must be exactly the keys of this
+//! table that are not withdrawn. A story that adds a key to a section adds its
+//! line here, or the test fails naming it.
+//!
+//! A withdrawn key is one the product no longer reads. A file that still
+//! carries it is accepted: [`validate`](super::validate) sets it aside with a
+//! `config.key.retired` warning, so an installation written for an earlier
+//! version keeps starting.
+
+/// The TOML type of a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyType {
+    /// `true` or `false`.
+    Boolean,
+    /// A whole number.
+    Integer,
+    /// A decimal number.
+    Float,
+    /// A string.
+    String,
+    /// A string naming a file or a directory; `~` stands for the home folder.
+    Path,
+    /// One of a closed list of strings.
+    Enum(&'static [&'static str]),
+    /// An array of strings.
+    StringArray,
+    /// An array of tables (`[[...]]`).
+    TableArray,
+    /// A table whose own keys are free (a map) or optional as a whole.
+    Table,
+}
+
+/// When a new value of a key takes effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadClass {
+    /// Applied by the running engine, without a restart.
+    Reloadable,
+    /// Fixes a resource opened at startup: applied at the next start.
+    Restart,
+}
+
+/// One key of `apollia.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigKey {
+    /// Dotted path from the root of the file.
+    pub path: &'static str,
+    /// TOML type.
+    pub ty: KeyType,
+    /// Default, as TOML would spell it, or `None` when the key has none (an
+    /// optional key, or one the section requires).
+    pub default: Option<&'static str>,
+    /// What the key does, in English.
+    pub doc: &'static str,
+    /// When a new value takes effect.
+    pub reload: ReloadClass,
+    /// Whether the organization policy can fix the value.
+    pub lockable: bool,
+    /// For a withdrawn key, what the operator does instead; `None` for a live
+    /// key.
+    pub withdrawn: Option<&'static str>,
+}
+
+const fn key(
+    path: &'static str,
+    ty: KeyType,
+    default: Option<&'static str>,
+    reload: ReloadClass,
+    doc: &'static str,
+) -> ConfigKey {
+    ConfigKey {
+        path,
+        ty,
+        default,
+        doc,
+        reload,
+        lockable: false,
+        withdrawn: None,
+    }
+}
+
+const fn locked(mut k: ConfigKey) -> ConfigKey {
+    k.lockable = true;
+    k
+}
+
+const fn withdrawn(path: &'static str, detail: &'static str) -> ConfigKey {
+    ConfigKey {
+        path,
+        ty: KeyType::Table,
+        default: None,
+        doc: "Withdrawn: the product no longer reads it.",
+        reload: ReloadClass::Reloadable,
+        lockable: false,
+        withdrawn: Some(detail),
+    }
+}
+
+use KeyType::{Boolean, Enum, Float, Integer, Path, StringArray, Table, TableArray};
+use ReloadClass::{Reloadable, Restart};
+
+/// Every key of `apollia.toml`, live and withdrawn.
+pub const KEYS: &[ConfigKey] = &[
+    // [llm]
+    key("llm.format_version", Integer, Some("1"), Restart, "Version of the [llm] format; read as 1 when absent."),
+    key("llm.default", KeyType::String, None, Restart, "Name of the backend used when none is asked for; must name an entry of llm.backends."),
+    key("llm.backends", TableArray, None, Restart, "OpenAI-compatible backends, migrated into the engine's database on a first start; required with llm.default."),
+    key("llm.observability.debug_log_prompt", Boolean, Some("false"), Restart, "Log the full prompt at trace level."),
+    key("llm.routing", Table, None, Restart, "Backends answering precise and fast requests, and the hybrid routing ceiling."),
+    withdrawn("llm.observability.log_token_usage", "the tokens of every model call are always logged; remove the key"),
+    withdrawn("llm.observability.log_latency", "the latency of every model call is always logged; remove the key"),
+    withdrawn("llm.observability.log_cost", "nothing reads it; remove the key"),
+    withdrawn("llm.pricing_overrides", "nothing reads it; remove the section"),
+    withdrawn("llm.cost_alert_threshold_usd", "nothing reads it; remove the key"),
+    withdrawn("llm.runner", "the engine is chosen from the detected hardware; remove the section"),
+    locked(key("llm.guardrails.level", Enum(&["disabled", "lenient", "balanced", "strict", "ceiling"]), Some("\"balanced\""), Reloadable, "How strictly a local model launch is held to the machine's memory; an unknown level holds to balanced.")),
+    locked(key("llm.guardrails.ceiling_gb", Float, None, Reloadable, "Largest estimate, in gigabytes, the ceiling level launches.")),
+    locked(key("llm.guardrails.bypass", Enum(&["confirm", "unrestricted"]), Some("\"confirm\""), Reloadable, "What loading a refused model anyway asks first: confirm, an explicit confirmation, or unrestricted, nothing.")),
+    locked(key("llm.residency.idle_unload_minutes", Integer, Some("60"), Reloadable, "Minutes without a request after which a local model nothing holds is unloaded; 0 never unloads.")),
+    locked(key("llm.residency.unload_before_load", Boolean, Some("false"), Reloadable, "Before a local model is loaded, unload the resident ones that are not pinned and answer no request; off, several models stay loaded together.")),
+    locked(key("llm.defaults.context", Enum(&["custom", "model_max"]), Some("\"custom\""), Reloadable, "Context window of a local model that neither APOLLIA_LLAMA_N_CTX, nor a preset, nor its backend fixes: custom, the figure of llm.defaults.context_tokens, or model_max, the length the model was trained for.")),
+    locked(key("llm.defaults.context_tokens", Integer, Some("0"), Reloadable, "Default context window, in tokens, when llm.defaults.context is custom; 0 lets the engine size it to the memory of this machine, model by model, up to 32768.")),
+    locked(key("llm.images.limit_side", Boolean, Some("true"), Reloadable, "Scale an image down before it is sent to a model when its largest side exceeds llm.images.max_side_px.")),
+    locked(key("llm.images.max_side_px", Integer, Some("2048"), Reloadable, "Largest side, in pixels, of an image sent to a model; proportions are kept.")),
+    locked(key("llm.devices.disabled", StringArray, Some("[]"), Reloadable, "Graphics devices the local engine is kept away from, each named as the engine lists it (CUDA0, Vulkan1): a listed device receives no layer and its memory is left out of every estimate; empty leaves the engine every device.")),
+    withdrawn("llm.vertex", "the Google Vertex AI client was removed; declare an OpenAI-compatible server instead"),
+    // [api]
+    key("api.bind", KeyType::String, Some("\"127.0.0.1\""), Restart, "Address the daemon's TCP listener binds to."),
+    key("api.port", Integer, Some("7771"), Restart, "TCP port of the native API, read at the next start; the --port option of apollia-os start wins over it, and it must differ from server.port."),
+    key("api.require_token", Boolean, Some("true"), Restart, "Require a bearer token on every TCP request to the daemon."),
+    key("api.unix_socket", Path, Some("\"~/.apollia/runtime.sock\""), Restart, "Local socket of the embedded runtime; its folder must exist."),
+    key("api.tls_cert", Path, None, Restart, "PEM certificate chain for TLS on the daemon's TCP listener; set with api.tls_key."),
+    key("api.tls_key", Path, None, Restart, "PEM private key matching api.tls_cert."),
+    // [runtime]
+    key("runtime.eventbus_capacity", Integer, Some("1024"), Restart, "Events buffered by the event bus before a slow reader lags (64 to 65536)."),
+    key("runtime.mailbox_capacity", Integer, Some("100"), Restart, "Messages buffered by an actor mailbox (10 to 10000)."),
+    key("runtime.mailbox_visibility_timeout_secs", Integer, Some("60"), Restart, "Seconds a leased agent message stays invisible before redelivery."),
+    key("runtime.mailbox_message_ttl_secs", Integer, Some("86400"), Restart, "Seconds an undelivered agent message is kept."),
+    key("runtime.mailbox_send_quota_per_run", Integer, Some("50"), Restart, "Agent messages one run may send."),
+    key("runtime.mailbox_max_payload_bytes", Integer, Some("65536"), Restart, "Largest agent message payload, in bytes."),
+    key("runtime.mailbox_audit_full_payload", Boolean, Some("false"), Restart, "Copy the full agent message payload into the audit journal."),
+    key("runtime.startup_timeout_secs", Integer, Some("300"), Restart, "Seconds the engine may take to start."),
+    key("runtime.agent_idle_unload_secs", Integer, Some("600"), Restart, "Seconds without a task after which an agent module is unloaded."),
+    // [hitl]
+    key("hitl.timeout_hours", Integer, None, Reloadable, "Hours after which an unanswered approval cancels its task (1 to 168); none waits forever."),
+    key("hitl.scan_interval_secs", Integer, Some("60"), Reloadable, "Seconds between two scans for expired approvals (10 to 3600)."),
+    // [tools]
+    key("tools.max_output_chars", Integer, Some("30000"), Reloadable, "Largest tool output passed to the model, in bytes (10 to 1000000)."),
+    key("tools.disabled", StringArray, Some("[]"), Reloadable, "Native tools removed from every agent."),
+    key("tools.web_search.backend", Enum(&["auto", "duck_duck_go", "brave"]), Some("\"auto\""), Reloadable, "Search engine of the web_search tool."),
+    key("tools.web_search.require_configured", Boolean, Some("false"), Reloadable, "Refuse a search when the chosen engine is not configured."),
+    key("tools.web_search.brave.api_key_env_var", KeyType::String, Some("\"BRAVE_SEARCH_API_KEY\""), Reloadable, "Environment variable holding the Brave Search key."),
+    key("tools.web_search.brave.timeout_secs", Integer, Some("15"), Reloadable, "Seconds a Brave Search request may take (1 to 120)."),
+    key("tools.web_search.brave.max_results", Integer, Some("10"), Reloadable, "Results asked of Brave Search (1 to 20)."),
+    key("tools.web_search.duckduckgo.timeout_secs", Integer, Some("15"), Reloadable, "Seconds a DuckDuckGo request may take (1 to 120)."),
+    key("tools.web_search.duckduckgo.max_response_kb", Integer, Some("1024"), Reloadable, "Largest DuckDuckGo response read, in KiB (16 to 16384)."),
+    key("tools.web_read.timeout_secs", Integer, Some("20"), Reloadable, "Seconds a web_read request may take (1 to 120)."),
+    key("tools.web_read.max_response_kb", Integer, Some("2048"), Reloadable, "Largest page web_read reads, in KiB (64 to 32768)."),
+    key("tools.web_read.ssrf_guard", Boolean, Some("true"), Reloadable, "Refuse an address on the local network or the machine itself."),
+    key("tools.python_interpreter", Path, None, Reloadable, "Python interpreter used instead of the bundled one."),
+    locked(key("tools.new_agent.families", StringArray, Some("[\"read\"]"), Reloadable, "Families of tools an agent created without code is granted whole, read against the tools active when it is created: read, read_personal, write_or_delete, send_external, execute_code.")),
+    locked(key("tools.new_agent.access", StringArray, Some("[]"), Reloadable, "Tools an agent created without code is granted by name, on top of tools.new_agent.families.")),
+    // [mcp]
+    withdrawn("mcp.approval_ttl_hours", "an MCP tool is decided on its action family, and a standing consent lasts until it is withdrawn; remove the key"),
+    locked(key("mcp.tool_loading", Enum(&["eager", "deferred"]), Some("\"deferred\""), Reloadable, "Load every MCP tool schema up front, or on first use.")),
+    locked(key("mcp.tool_search_limit", Integer, Some("20"), Reloadable, "Results returned by the tool_search tool (1 to 500).")),
+    locked(key("mcp.server_enabled", Boolean, Some("false"), Reloadable, "Let an MCP client reach the agents and workflows marked exposed, through apollia-os mcp server.")),
+    // [hooks]
+    key("hooks.handlers", TableArray, Some("[]"), Reloadable, "Lifecycle hook handlers, a command or an HTTP endpoint each."),
+    // [chat]
+    key("chat.plan_mode_default", Boolean, Some("false"), Reloadable, "Start every new conversation in plan mode."),
+    key("chat.tool_turn_temperature", Float, None, Reloadable, "Model temperature of a turn that offers tools; none means 0.3."),
+    locked(key("chat.share_profile_default", Boolean, Some("true"), Reloadable, "Start every new conversation with the profile shared with the built-in assistant; a conversation that exists keeps its own switch.")),
+    // [models]
+    locked(key("models.registry_url", KeyType::String, Some("\"https://registry.apollia.fr/models/stable/index.json\""), Reloadable, "Address of the signed index of model cards.")),
+    locked(key("models.registry_mirror_url", KeyType::String, Some("\"https://github.com/Apollia-OS/apollia-os/releases/latest/download/models-stable-index.json\""), Reloadable, "Address tried when the index does not answer; empty disables it.")),
+    locked(key("models.registry_enabled", Boolean, Some("true"), Reloadable, "Read the online index of model cards.")),
+    locked(key("models.dir", Path, Some("\"\""), Reloadable, "Folder the language models, their projectors and the embedding models are kept in; empty means <data dir>/models. Changing it moves no file.")),
+    locked(key("models.preset_load_settings", Boolean, Some("false"), Reloadable, "Let a preset be created or modified with load settings; off, a preset takes request settings only and keeps the load settings it holds.")),
+    locked(key("models.import.require_verified", Boolean, Some("false"), Reloadable, "Refuse an imported model file that matches no signed card.")),
+    // [workflows]
+    key("workflows.max_steps", Integer, Some("200"), Restart, "Steps a workflow run may take."),
+    key("workflows.max_tool_calls", Integer, Some("400"), Restart, "Tool calls a workflow run may make."),
+    key("workflows.wall_clock_secs", Integer, Some("3600"), Restart, "Seconds a workflow run may last."),
+    // [desktop]
+    locked(key("desktop.developer_mode", Boolean, Some("false"), Reloadable, "Show the advanced surfaces of the application.")),
+    locked(key("desktop.link_preview_enabled", Boolean, Some("false"), Reloadable, "Fetch the preview of a link shown in a conversation.")),
+    locked(key("desktop.update_channel", Enum(&["stable", "preview"]), Some("\"stable\""), Reloadable, "Update channel of the application: stable receives the published versions, preview the trial versions as well.")),
+    locked(key("desktop.background_service_allowed", Boolean, Some("true"), Reloadable, "Allow the application to install the engine as a service of the user's session.")),
+    locked(key("desktop.chat_auto_naming", Enum(&["never", "auto", "always"]), Some("\"auto\""), Reloadable, "Name a new conversation from its first message: never, automatically when the model generates fast enough, or always.")),
+    locked(key("desktop.chat_debug_blocks", Boolean, Some("true"), Reloadable, "With the developer mode on, show the raw data of a tool step and the detailed trace in a conversation.")),
+    locked(key("desktop.resource_widget", Boolean, Some("false"), Reloadable, "Show the processor, the memory and the video memory in use at the foot of the sidebar.")),
+    locked(key("desktop.chat_single_empty", Boolean, Some("true"), Reloadable, "Open the empty conversation that already exists rather than a second one.")),
+    locked(key("desktop.chat_double_click_edit", Boolean, Some("false"), Reloadable, "Open the edition of a message of a conversation on a double click.")),
+    locked(key("desktop.chat_double_click_rename", Boolean, Some("true"), Reloadable, "Rename a conversation or a folder of the list on a double click.")),
+    locked(key("desktop.chat_regenerate_shortcut", Boolean, Some("true"), Reloadable, "Regenerate the last answer of the conversation shown with Cmd + R on a Mac, Ctrl + R elsewhere.")),
+    locked(key("desktop.model_load_window", Boolean, Some("true"), Reloadable, "Open the loading window when a conversation chooses a model of this machine that is not in memory; off, the model loads at once under its default preset.")),
+    locked(key("desktop.preset_save_confirm", Boolean, Some("false"), Reloadable, "Ask for a confirmation that lists the settings changed before they are saved into a preset.")),
+    // [server]
+    locked(key("server.enabled", Boolean, Some("false"), Restart, "Start the compatible server (OpenAI and Anthropic formats) with the engine.")),
+    locked(key("server.port", Integer, Some("7772"), Restart, "TCP port of the compatible server.")),
+    locked(key("server.require_auth", Boolean, Some("false"), Restart, "Require a token of the compatible server on every request; read when the listener opens.")),
+    locked(key("server.cors", Boolean, Some("false"), Restart, "Let a web page of another origin call the compatible server; read each time the server starts.")),
+    locked(key("server.jit_loading", Boolean, Some("true"), Reloadable, "Let a request to the compatible server load the model of this machine it names.")),
+    locked(key("server.jit_auto_unload", Boolean, Some("true"), Reloadable, "Unload the models the compatible server loaded after their own idle delay rather than the general one.")),
+    locked(key("server.jit_idle_ttl_minutes", Integer, Some("60"), Reloadable, "Minutes without a request after which a model the compatible server loaded is unloaded; 0 keeps it loaded.")),
+    locked(key("server.jit_keep_last_only", Boolean, Some("true"), Reloadable, "When the compatible server loads a model, unload the other models it loaded that nothing holds.")),
+    locked(key("server.separate_reasoning_content", Boolean, Some("true"), Reloadable, "Keep the reasoning of a model in reasoning_content, apart from content, in the chat completions of the compatible server; off, it goes back into content between think tags.")),
+    locked(key("server.serve_on_lan", Boolean, Some("false"), Restart, "Open the compatible server to the local network, on every interface; the native API stays on the loopback interface. Read when the listener opens.")),
+    locked(key("server.allow_request_mcp", Boolean, Some("false"), Reloadable, "Let a request to the compatible server bring an MCP server of its own, reached over HTTP for the length of the call; off, such a request is refused.")),
+    // [engines]
+    locked(key("engines.log_level", Enum(&["error", "warning", "info", "debug"]), Some("\"debug\""), Reloadable, "Log level of the local engine, applied when a model is next loaded.")),
+    locked(key("engines.gguf", Enum(&["auto", "embedded", "cuda", "vulkan", "cpu", "metal"]), Some("\"auto\""), Restart, "Engine that serves GGUF models: the automatic choice, the engine shipped with the application, or a variant installed by the engine store. A variant no longer installed falls back to the automatic choice. Read at the next start.")),
+    locked(key("engines.mlx", Enum(&["auto", "embedded", "metal"]), Some("\"auto\""), Restart, "Engine that serves MLX models on a Mac with Apple Silicon: the automatic choice, the engine shipped with the application, or the one installed by the engine store. Read at the next start.")),
+    locked(key("engines.auto_update", Boolean, Some("true"), Reloadable, "Download and verify the update of a chosen engine when the followed channel announces one; off, the update is only announced.")),
+    locked(key("engines.auto_purge", Boolean, Some("false"), Reloadable, "After an update of an engine, delete the builds of its variant left unused the longest, beyond two; the build in service and the shipped engine are never deleted.")),
+    // [author]
+    locked(key("author.name", KeyType::String, Some("\"\""), Reloadable, "Publisher name of the agents exported from this machine; empty asks at export.")),
+    // [observability]
+    key("observability.max_input_bytes", Integer, Some("32768"), Reloadable, "Largest run input kept, in bytes."),
+    key("observability.max_output_bytes", Integer, Some("32768"), Reloadable, "Largest run output kept, in bytes."),
+    key("observability.max_tool_output_bytes", Integer, Some("10240"), Reloadable, "Largest tool output kept, in bytes."),
+    key("observability.capture_thoughts", Boolean, Some("true"), Reloadable, "Keep the model's reasoning in the run history."),
+    key("observability.capture_tool_args", Boolean, Some("true"), Reloadable, "Keep tool arguments in the run history."),
+    key("observability.capture_tool_outputs", Boolean, Some("true"), Reloadable, "Keep tool outputs in the run history."),
+    key("observability.capture_agent_logs", Boolean, Some("true"), Reloadable, "Keep agent logs in the run history."),
+    key("observability.retention_days", Integer, Some("90"), Reloadable, "Days the run history is kept."),
+    // Withdrawn sections.
+    withdrawn("memory", "nothing reads it; remove the section"),
+    withdrawn("budget", "nothing reads it; remove the section"),
+    withdrawn("a2a", "nothing reads it; remove the section"),
+    withdrawn("oria", "nothing reads it; remove the section"),
+    withdrawn("registry", "nothing reads it; remove the section"),
+    withdrawn("permissions", "nothing reads it; remove the section"),
+    withdrawn("triggers", "use the desktop app or the API to manage it"),
+    withdrawn("notifications", "use the desktop app or the API to manage it"),
+    withdrawn("stt", "use the desktop app or the API to manage it"),
+    withdrawn("tools.file_path_extraction_pattern", "nothing reads it; remove the key"),
+    withdrawn("filesystem", "the file tools reach the folders granted to each agent; the paths listed here were added once as folder connections, grant them on the agent's sheet"),
+    withdrawn("chat.default_workspace", "the folder was added once as a folder connection; grant it to an agent on its sheet"),
+    withdrawn("ui", "moved: write desktop.link_preview_enabled; ui.link_preview_enabled is still read while it is absent"),
+];
+
+/// The entry of `path`, live or withdrawn.
+pub fn lookup(path: &str) -> Option<&'static ConfigKey> {
+    KEYS.iter().find(|k| k.path == path)
+}
+
+/// The withdrawn entry that covers `path` (the key itself or a table above
+/// it), if any.
+pub fn withdrawn_covering(path: &str) -> Option<&'static ConfigKey> {
+    KEYS.iter()
+        .filter(|k| k.withdrawn.is_some())
+        .find(|k| super::scan::covers(k.path, path))
+}
+
+/// `true` when `path` names a live key, or lies under a live key whose own
+/// keys are free (an optional table such as `llm.routing`).
+pub fn is_live_path(path: &str) -> bool {
+    KEYS.iter()
+        .filter(|k| k.withdrawn.is_none())
+        .any(|k| k.path == path || (k.ty == KeyType::Table && super::scan::covers(k.path, path)))
+}
+
+/// Every withdrawn entry, in registry order.
+pub fn withdrawn_keys() -> impl Iterator<Item = &'static ConfigKey> {
+    KEYS.iter().filter(|k| k.withdrawn.is_some())
+}

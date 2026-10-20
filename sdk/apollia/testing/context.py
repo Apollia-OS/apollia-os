@@ -1,12 +1,12 @@
-"""Mock implementations of all ``ctx.*`` services for unit testing agents.
+"""Mock implementations of the ``ctx.*`` services for unit tests.
 
 Each ``Mock<X>`` mirrors the corresponding Protocol from
 :mod:`apollia.context` and adds tracking attributes (``*_calls`` lists,
 queues, ``values`` dicts) so tests can drive scenarios and assert what
 happened.
 
-These mocks intentionally implement only the surface methods agents use
-at runtime.  They are *not* full duck-types - calling a method that has
+These mocks intentionally implement only the surface methods a tool or a
+workflow uses at runtime.  They are *not* full duck-types - calling a method that has
 not been implemented will raise :class:`AttributeError`, which keeps the
 test surface small and intentional.
 """
@@ -14,6 +14,8 @@ test surface small and intentional.
 from __future__ import annotations
 
 from typing import Any
+
+from apollia.errors import QuestionDeclined
 
 # NOTE on `# NOSONAR S7503` / `# NOSONAR S1172` markers below:
 # Every mock here implements an async Protocol defined in
@@ -24,57 +26,85 @@ from typing import Any
 # removed.
 
 
-# ctx.a2a
-class MockA2A:
-    """In-memory mock of the ``A2AProxy`` Protocol.
+# ctx.agents
+class MockAgents:
+    """In-memory mock of the ``AgentsInterface`` Protocol.
 
     Pre-configure via attributes:
-        ``invoke_responses``: ``{skill_id: response_dict}`` returned by
-            :meth:`invoke`.  Default response is
-            ``{"status": "completed"}``.
-        ``skill_cards``: ``{skill_id: card_dict}`` returned by
-            :meth:`discover` / used by :meth:`skill_as_tool`.
-        ``skills_list``: list returned by :meth:`list_skills`.
+        ``answers``: ``{agent_id: answer}`` returned by :meth:`run`. An agent
+            with no configured answer returns the empty string.
 
     Track via attributes:
-        ``invoke_calls``: ordered list of ``(skill_id, merged_input)``.
+        ``run_calls``: ordered list of ``(agent_id, message)``.
     """
 
     def __init__(self) -> None:
-        """Start with no configured response and an empty call log."""
-        self.invoke_calls: list[tuple[str, dict[str, Any]]] = []
-        self.invoke_responses: dict[str, dict[str, Any]] = {}
-        self.skill_cards: dict[str, dict[str, Any]] = {}
-        self.skills_list: list[dict[str, Any]] = []
+        """Start with no configured answer and an empty call log."""
+        self.run_calls: list[tuple[str, str]] = []
+        self.answers: dict[str, str] = {}
 
-    async def invoke(  # NOSONAR S7503 S1172: Protocol contract
+    async def run(self, agent_id: str, message: str) -> str:  # NOSONAR S7503
+        """Record the call and return the configured answer."""
+        self.run_calls.append((agent_id, message))
+        return self.answers.get(agent_id, "")
+
+
+# ctx.workflows
+class MockWorkflows:
+    """In-memory mock of the ``WorkflowsInterface`` Protocol.
+
+    Pre-configure via attributes:
+        ``results``: ``{workflow_id: result}`` returned by :meth:`run`. A
+            workflow with no configured result returns ``None``.
+
+    Track via attributes:
+        ``run_calls``: ordered list of ``(workflow_id, inputs)``.
+    """
+
+    def __init__(self) -> None:
+        """Start with no configured result and an empty call log."""
+        self.run_calls: list[tuple[str, dict[str, Any]]] = []
+        self.results: dict[str, Any] = {}
+
+    # REASON(ANN401): mirrors the `WorkflowsInterface.run` contract.
+    async def run(self, workflow_id: str, inputs: dict[str, Any]) -> Any:  # noqa: ANN401
+        """Record the call and return the configured result."""
+        self.run_calls.append((workflow_id, dict(inputs)))
+        return self.results.get(workflow_id)
+
+
+# ctx.user
+class MockUser:
+    """In-memory mock of the ``UserInterface`` Protocol.
+
+    Pre-configure via attributes:
+        ``answers``: ``{question: answer}`` returned by :meth:`ask`. A
+            question with no configured answer returns the empty string.
+        ``declined``: ``{question: reason}``; asking one of these raises
+            ``QuestionDeclined`` with that reason (``None`` for no reason).
+
+    Track via attributes:
+        ``ask_calls``: ordered list of ``(question, options, hint)``.
+    """
+
+    def __init__(self) -> None:
+        """Start with no configured answer and an empty call log."""
+        self.ask_calls: list[tuple[str, list[str], str | None]] = []
+        self.answers: dict[str, str] = {}
+        self.declined: dict[str, str | None] = {}
+
+    async def ask(  # NOSONAR S7503
         self,
-        skill_id: str,
-        input: dict[str, Any] | None,
+        question: str,
         *,
-        timeout_secs: int | None = None,  # NOSONAR S1172: Protocol kwarg
-    ) -> dict[str, Any]:
-        """Record the call and return the configured response."""
-        merged: dict[str, Any] = dict(input) if input else {}
-        self.invoke_calls.append((skill_id, merged))
-        return self.invoke_responses.get(skill_id, {"status": "completed"})
-
-    async def discover(self, skill_id: str) -> dict[str, Any] | None:  # NOSONAR S7503
-        """Return the configured skill card, or None if none was set."""
-        return self.skill_cards.get(skill_id)
-
-    async def list_skills(self) -> list[dict[str, Any]]:  # NOSONAR S7503
-        """Return a copy of the configured ``skills_list``."""
-        return list(self.skills_list)
-
-    async def skill_as_tool(self, skill_id: str) -> dict[str, Any]:  # NOSONAR S7503
-        """Build a tool descriptor from the configured skill card."""
-        card = self.skill_cards.get(skill_id, {})
-        return {
-            "name": f"a2a__{skill_id.replace('.', '__')}",
-            "description": card.get("description", ""),
-            "input_schema": card.get("input_schema", {}),
-        }
+        options: list[str] | None = None,
+        hint: str | None = None,
+    ) -> str:
+        """Record the call, then answer or decline as configured."""
+        self.ask_calls.append((question, list(options or []), hint))
+        if question in self.declined:
+            raise QuestionDeclined(question, reason=self.declined[question])
+        return self.answers.get(question, "")
 
 
 # ctx.datasources
@@ -403,7 +433,6 @@ class MockBudget:
 
 
 __all__ = [
-    "MockA2A",
     "MockBudget",
     "MockDatasources",
     "MockEvents",

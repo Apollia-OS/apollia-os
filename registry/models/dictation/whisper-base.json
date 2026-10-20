@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "whisper-base",
+  "kind": "dictation",
+  "label": "Whisper Base",
+  "publisher": "OpenAI",
+  "license": {
+    "id": "mit",
+    "source": "https://huggingface.co/ggerganov/whisper.cpp"
+  },
+  "source_url": "https://huggingface.co/openai/whisper-base",
+  "description": {
+    "fr": "Modèle Whisper d'OpenAI léger, pour dicter des messages courts sur un poste modeste. Plus juste que Tiny, il bute encore sur les noms propres et le vocabulaire de métier. Il tient sur toute machine.",
+    "en": "A light Whisper model from OpenAI, for dictating short messages on a modest machine. More accurate than Tiny, it still stumbles on proper nouns and trade vocabulary. It fits any machine."
+  },
+  "capabilities": {
+    "tools": false,
+    "reasoning": false,
+    "vision": false,
+    "source": "https://huggingface.co/openai/whisper-base"
+  },
+  "memory": {
+    "min_gb": 0.2,
+    "source": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-base.bin"
+  },
+  "defaults": {
+    "source": ""
+  },
+  "author_fields": [],
+  "repos": [
+    "openai/whisper-base"
+  ],
+  "selection_files": [
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q8_0.bin"
+  ]
+}

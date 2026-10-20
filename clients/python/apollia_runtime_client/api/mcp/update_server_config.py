@@ -36,6 +36,11 @@ def _parse_response(
 
         return response_400
 
+    if response.status_code == 403:
+        response_403 = ApiErrorBody.from_dict(response.json())
+
+        return response_403
+
     if response.status_code == 404:
         response_404 = ApiErrorBody.from_dict(response.json())
 
@@ -75,8 +80,8 @@ def sync_detailed(
 ) -> Response[Any | ApiErrorBody]:
     """`PUT /api/v1/mcp/servers/:name/config`, Replace a server configuration and restart the session.
 
-     Removes the current session, starts a new one with the updated configuration, then
-    upserts the entry in `mcp.db`.
+     Removes the current session, starts a new one with the updated configuration,
+    upserts the entry in `mcp.db`, then journals the change.
     Returns `200 OK` with the new [`McpServerStatus`] on success.
     Returns `404 Not Found` when no server with `name` is managed.
     Returns `400 Bad Request` when the new session fails to start.
@@ -111,8 +116,8 @@ def sync(
 ) -> Any | ApiErrorBody | None:
     """`PUT /api/v1/mcp/servers/:name/config`, Replace a server configuration and restart the session.
 
-     Removes the current session, starts a new one with the updated configuration, then
-    upserts the entry in `mcp.db`.
+     Removes the current session, starts a new one with the updated configuration,
+    upserts the entry in `mcp.db`, then journals the change.
     Returns `200 OK` with the new [`McpServerStatus`] on success.
     Returns `404 Not Found` when no server with `name` is managed.
     Returns `400 Bad Request` when the new session fails to start.
@@ -142,8 +147,8 @@ async def asyncio_detailed(
 ) -> Response[Any | ApiErrorBody]:
     """`PUT /api/v1/mcp/servers/:name/config`, Replace a server configuration and restart the session.
 
-     Removes the current session, starts a new one with the updated configuration, then
-    upserts the entry in `mcp.db`.
+     Removes the current session, starts a new one with the updated configuration,
+    upserts the entry in `mcp.db`, then journals the change.
     Returns `200 OK` with the new [`McpServerStatus`] on success.
     Returns `404 Not Found` when no server with `name` is managed.
     Returns `400 Bad Request` when the new session fails to start.
@@ -176,8 +181,8 @@ async def asyncio(
 ) -> Any | ApiErrorBody | None:
     """`PUT /api/v1/mcp/servers/:name/config`, Replace a server configuration and restart the session.
 
-     Removes the current session, starts a new one with the updated configuration, then
-    upserts the entry in `mcp.db`.
+     Removes the current session, starts a new one with the updated configuration,
+    upserts the entry in `mcp.db`, then journals the change.
     Returns `200 OK` with the new [`McpServerStatus`] on success.
     Returns `404 Not Found` when no server with `name` is managed.
     Returns `400 Bad Request` when the new session fails to start.

@@ -13,6 +13,7 @@
 //! | ChatResponseStarted / Completed (Some)     | Unknown { raw_kind }    |
 //! | PlanApprovalRequired/Approved/Rejected/... | Unknown { raw_kind }    |
 //! | any other run-scoped variant               | Unknown { raw_kind } + warn |
+//! | ConfigInvalid (no run; run `host:config`)  | Unknown { raw_kind }    |
 //! | events without a run_id                     | not appended (debug)   |
 //!
 //! Entries with no `run_id` are skipped (system events such as `RuntimeStarted`
@@ -28,6 +29,9 @@ use crate::audit_journal::entry::{
 };
 use crate::audit_journal::handle::AuditJournalHandle;
 use crate::replay::{LlmCompletionSnapshot, ToolOutputSnapshot};
+
+/// Run under which host-scoped configuration events are journaled.
+const CONFIG_RUN_ID: &str = "host:config";
 
 /// Per-run step-ordinal counters for captured replay inputs.
 ///
@@ -291,30 +295,48 @@ pub fn map_event(event: &RuntimeEvent) -> Option<JournalEntryDraft> {
             tool_name,
             agent_id,
             task_id,
+            tool_call_id,
+            family,
+            target,
             ..
         } => Some(draft(
             run_id.as_str().to_string(),
             JournalEntryKind::ToolCallStarted,
-            serde_json::json!({
-                "tool_name": tool_name,
-                "agent_id": agent_id.as_str(),
-                "task_id": task_id.as_str(),
-            }),
+            with_call_facts(
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "agent_id": agent_id.as_str(),
+                    "task_id": task_id.as_str(),
+                }),
+                tool_call_id,
+                family,
+                target,
+            ),
         )),
         RuntimeEvent::ToolCallCompleted {
             run_id: Some(run_id),
             tool_name,
+            agent_id,
             success,
             duration_ms,
+            tool_call_id,
+            family,
+            target,
             ..
         } => Some(draft(
             run_id.as_str().to_string(),
             JournalEntryKind::ToolCallCompleted,
-            serde_json::json!({
-                "tool_name": tool_name,
-                "success": success,
-                "duration_ms": duration_ms,
-            }),
+            with_call_facts(
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "agent_id": agent_id.as_str(),
+                    "success": success,
+                    "duration_ms": duration_ms,
+                }),
+                tool_call_id,
+                family,
+                target,
+            ),
         )),
         RuntimeEvent::LlmCallStarted {
             run_id: Some(run_id),
@@ -465,6 +487,14 @@ pub fn map_event(event: &RuntimeEvent) -> Option<JournalEntryDraft> {
                 serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null),
             ))
         }
+        // A refused `apollia.toml` belongs to no run: it is chained under a
+        // fixed host-scoped run so the journal keeps the record of the engine
+        // having run on its defaults.
+        RuntimeEvent::ConfigInvalid { path, diagnostics } => Some(unknown(
+            CONFIG_RUN_ID,
+            "ConfigInvalid",
+            serde_json::json!({ "path": path, "diagnostics": diagnostics }),
+        )),
         RuntimeEvent::AgentMessageDropped {
             to,
             message_id,
@@ -488,6 +518,30 @@ pub fn map_event(event: &RuntimeEvent) -> Option<JournalEntryDraft> {
     }
 }
 
+/// Adds to the payload of a tool call what identifies and situates it: the
+/// identifier that joins it to its captured arguments and output, the family
+/// of the tool, and the target of the call. The arguments themselves are never
+/// written here. A fact the emitter did not give is left out.
+fn with_call_facts(
+    mut payload: serde_json::Value,
+    tool_call_id: &Option<String>,
+    family: &Option<String>,
+    target: &Option<String>,
+) -> serde_json::Value {
+    if let Some(fields) = payload.as_object_mut() {
+        for (key, value) in [
+            ("tool_call_id", tool_call_id),
+            ("family", family),
+            ("target", target),
+        ] {
+            if let Some(value) = value {
+                fields.insert(key.to_owned(), serde_json::Value::String(value.clone()));
+            }
+        }
+    }
+    payload
+}
+
 /// Build an `Unknown`-kind draft for a run-scoped event with no typed mapping,
 /// keeping the raw variant name so coverage stays auditable.
 fn unknown(run_id: &str, raw_kind: &str, payload: serde_json::Value) -> JournalEntryDraft {
@@ -505,24 +559,116 @@ mod tests {
     use super::*;
     use apollia_core::events::RunId;
 
+    #[test]
+    fn test_a_refused_configuration_is_journaled_under_the_host_run() {
+        // GIVEN the event the embedded runtime publishes on a refused apollia.toml
+        let event = RuntimeEvent::ConfigInvalid {
+            path: "/home/u/.apollia/apollia.toml".into(),
+            diagnostics: vec![apollia_core::config::ConfigDiagnostic {
+                line: 12,
+                column: 1,
+                path: "runtime.eventbus_capacity".into(),
+                message: "invalid type".into(),
+            }],
+        };
+
+        // WHEN it is mapped
+        let draft = map_event(&event).expect("a refused configuration is journaled");
+
+        // THEN it is chained under the host run, with its diagnostics
+        assert_eq!(draft.run_id, CONFIG_RUN_ID);
+        assert!(matches!(
+            draft.kind,
+            JournalEntryKind::Unknown { ref raw_kind } if raw_kind == "ConfigInvalid"
+        ));
+        assert_eq!(draft.payload["diagnostics"][0]["line"], 12);
+    }
+
     // A tool call carrying a run_id maps to a typed entry
     #[test]
     fn test_tool_call_started_maps_typed() {
-        // GIVEN a ToolCallStarted with a run_id
+        // GIVEN a ToolCallStarted with a run_id, its call identifier, the
+        // family of the tool, the target of the call, and its arguments
         let run = RunId::new();
         let event = RuntimeEvent::ToolCallStarted {
             event_id: "e1".into(),
             task_id: "t1".into(),
             agent_id: "a1".into(),
-            tool_name: "web_search".into(),
-            args_json: None,
+            tool_name: "file_write".into(),
+            args_json: Some(r#"{"path":"/tmp/a.md","content":"the whole letter"}"#.into()),
             run_id: Some(run.clone()),
+            tool_call_id: Some("call-7".into()),
+            family: Some("write_or_delete".into()),
+            target: Some("/tmp/a.md".into()),
         };
         // WHEN mapped
         let draft = map_event(&event).expect("should map");
-        // THEN it is a typed ToolCallStarted entry scoped to the run
+        // THEN it is a typed ToolCallStarted entry scoped to the run, carrying
+        // the identifier, the family and the target
         assert_eq!(draft.run_id, run.as_str());
         assert_eq!(draft.kind, JournalEntryKind::ToolCallStarted);
+        assert_eq!(draft.payload["tool_call_id"], "call-7");
+        assert_eq!(draft.payload["family"], "write_or_delete");
+        assert_eq!(draft.payload["target"], "/tmp/a.md");
+        // AND the arguments are nowhere in it
+        assert!(!draft.payload.to_string().contains("the whole letter"));
+        assert!(draft.payload.get("args_json").is_none());
+    }
+
+    // The completion of a call carries the same identifier, so the two entries
+    // and the captured output join on it.
+    #[test]
+    fn test_tool_call_completed_carries_the_call_identifier_and_no_output() {
+        // GIVEN a ToolCallCompleted with a run_id, a call identifier and an output
+        let run = RunId::new();
+        let event = RuntimeEvent::ToolCallCompleted {
+            parent_event_id: "e1".into(),
+            task_id: "t1".into(),
+            agent_id: "a1".into(),
+            tool_name: "http_fetch".into(),
+            output_json: Some(r#"{"body":"page content"}"#.into()),
+            exit_code: None,
+            duration_ms: 12,
+            success: false,
+            run_id: Some(run.clone()),
+            tool_call_id: Some("call-7".into()),
+            family: Some("send_external".into()),
+            target: Some("example.org".into()),
+        };
+        // WHEN mapped
+        let draft = map_event(&event).expect("should map");
+        // THEN the entry names the agent, the call, its family, its target and
+        // its result, without the output
+        assert_eq!(draft.kind, JournalEntryKind::ToolCallCompleted);
+        assert_eq!(draft.payload["agent_id"], "a1");
+        assert_eq!(draft.payload["tool_call_id"], "call-7");
+        assert_eq!(draft.payload["family"], "send_external");
+        assert_eq!(draft.payload["target"], "example.org");
+        assert_eq!(draft.payload["success"], false);
+        assert!(!draft.payload.to_string().contains("page content"));
+    }
+
+    // A call whose emitter knows neither family nor target leaves both keys out.
+    #[test]
+    fn test_tool_call_without_family_or_target_leaves_the_keys_out() {
+        // GIVEN a ToolCallStarted that carries only its call identifier
+        let event = RuntimeEvent::ToolCallStarted {
+            event_id: "e1".into(),
+            task_id: "t1".into(),
+            agent_id: "a1".into(),
+            tool_name: "mcp:notes/search".into(),
+            args_json: None,
+            run_id: Some(RunId::new()),
+            tool_call_id: Some("e1".into()),
+            family: None,
+            target: None,
+        };
+        // WHEN mapped
+        let draft = map_event(&event).expect("should map");
+        // THEN the identifier is written, and neither a family nor a target
+        assert_eq!(draft.payload["tool_call_id"], "e1");
+        assert!(draft.payload.get("family").is_none());
+        assert!(draft.payload.get("target").is_none());
     }
 
     // A mailbox send with a run_id is journaled as a MessageSent entry.
@@ -624,6 +770,11 @@ mod tests {
             latency_ms: 1,
             cost_usd: None,
             run_id: None,
+            session_id: None,
+            turn_id: None,
+            ttft_ms: None,
+            finish_reason: None,
+            generation_ms: None,
         };
         // WHEN mapped
         // THEN it is skipped (no chain pollution from non-run events)

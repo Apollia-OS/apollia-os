@@ -86,9 +86,9 @@ back out.
 2. **Load the seed**, per the section below. Read the line it prints naming the
    overlay it used.
 3. **Run the deterministic script**, 61 captures:
-   `just desktop-screenshots scripts/automation/screenshots-en.json`
+   `just automation-screenshots scripts/automation/screenshots-en.json`
 4. **Run the model script**, 11 captures, needs `llama-server` on the `PATH`:
-   `just desktop-dev-automation-seeded-llama scripts/automation/screenshots-en-llm.json <model.gguf>`
+   `just automation-seeded-llama scripts/automation/screenshots-en-llm.json <model.gguf>`
 5. **Publish**, which copies what the run produced into the documentation and
    names what it did not:
    `python3 scripts/automation/tools/publish_screenshots.py --apply`
@@ -116,8 +116,7 @@ backup already exists, and picks up the narrative overlay from
 Read that line: without the overlay you get the test fixture, and half the
 screens below show a thinner state than what they describe.
 
-`APOLLIA_SEED_PROJECT_ROOT` is what the project pages, the permission cards and
-the audit trail display. Left unset it is this repository checkout, which means
+`APOLLIA_SEED_PROJECT_ROOT` is what the permission cards display. Left unset it is this repository checkout, which means
 your own machine's path ends up on a published image. Point it at a directory
 that exists (create an empty one if you have none) unless you have decided you
 do not mind.
@@ -211,7 +210,7 @@ testid and capture under the right label:
 
 ```sh
 lsof -ti :5173 :8899 | xargs kill -9 2>/dev/null
-just desktop-screenshots scripts/automation/screenshots-en.json
+just automation-screenshots scripts/automation/screenshots-en.json
 ```
 
 Those runs frame the whole window, which is looser than the crops described
@@ -274,14 +273,12 @@ different stories, and the reader notices.
 | Onboarding, profile card | **Operator** |
 | Onboarding, LLM model | **Qwen3 14B** (8.4 GB) |
 | Onboarding, speech model | **base** (142 MB) |
-| Model Hub, model to download | **Qwen3 14B** (8.4 GB) |
-| Model Hub, model to set as default | **Qwen3 14B** |
+| Discover models, model to download | **Qwen3 14B** (8.4 GB) |
+| AI screen, model to set as default | **Qwen3 14B** |
 | Chat question, row 23 and 24 | `Summarise the three conversion failures from batch 3 and tell me which one blocks batch 4.` |
 | Chat question, row 25 (reasoning) | `Read reports/atlas-audit.md and tell me how many pages need a manual pass.` |
 | Chat question, row 61 (MCP approval) | `List the files under legacy/ using the filesystem connector.` |
 | Approval rejection reason, row 51 | `That would remove batches 1 to 3 as well. Clear batch 4 by name instead.` |
-| New project name, row 40 | `Client Digest 2027` |
-| New project template, row 40 | **Developer project** |
 | New automation sentence, rows 45 and 46 | `Every weekday at 8am, summarise what moved on Atlas Migration.` |
 | New channel name, row 75 | `Ops desk` |
 | Custom MCP name, rows 57 to 59 | `Notes server` |
@@ -306,12 +303,10 @@ is converting, one batch failed on a malformed table and had to be redone.
 
 | Where | What is there |
 |---|---|
-| Projects | `Atlas Migration` (active minutes ago) and `Client Digest` |
 | Chat | 5 conversations, the top one `Auditing the legacy documentation set`, which carries 5 tool cards: 3 executed, 1 failed, 1 refused |
 | Plan | 6 steps: 3 done (one of them replanned), 1 running, 1 pending, 1 failed |
 | Automations | 2 active, 2 paused; 8 history rows across fired / skipped / error |
 | Timeline (1 h) | ~42 events, every filter chip populated |
-| Audit trail | 10 invocations, 2 failures, each expandable |
 | LLM costs (7 d) | 20 calls, 3 backends, 7 populated days |
 | Memory | 5 namespaces, project one included, all three types present in each |
 | Agents | 4 agents + 1 package, 7 tasks covering every status |
@@ -332,9 +327,9 @@ only opens once per profile reload.
 | 5 | `installation-configurer-votre-profil-5.png` | Downloads finish → Continue. The calibration step opens. | 4 progress pips, the agent's first question, the answer field | Type `Maya` but do not send | dialog | hand, see N2 |
 | 6 | `installation-configurer-votre-profil-6.png` | Answer all four questions, reach the end of calibration. | The permission rule cards the agent proposes | Answer with the four onboarding values above | dialog | hand, see N2 |
 | 7 | `installation-configurer-votre-profil-7.png` | Finish onboarding. Settings → Profile. | Identity (Maya, Head of operations, Consulting), Goals, Agent supervision | none, the values are the ones just entered | panel | auto |
-| 8 | `installation-connecter-un-modele-distant-1.png` | Settings → LLM backends → **+ Add LLM backend**. | The dialog, empty, Name and Provider visible | leave every field empty | dialog | auto |
-| 9 | `installation-telecharger-des-modeles-locaux-1.png` | Settings → Model Hub. | The available-models list: Name, Size, Type, Status | none | panel | auto |
-| 10 | `installation-telecharger-des-modeles-locaux-1bis.png` | Same page, scroll to Installed models. | The installed list with the **In use** badge on the active model | none, the seed installs two | panel | auto |
+| 8 | `installation-connecter-un-modele-distant-1.png` | AI → Servers → **Add a server**. | The form, empty, Address, Name and Key visible | leave every field empty | panel | auto |
+| 9 | `installation-telecharger-des-modeles-locaux-1.png` | AI → Discover models. | The discovery window: the Apollia selection on the left, the card of the chosen model and its download options | none | panel | auto |
+| 10 | `installation-telecharger-des-modeles-locaux-1bis.png` | AI screen, before the window opens. | The models of this computer, with the **Default** badge on the active model | none, the seed installs two | panel | auto |
 | 11 | `installation-telecharger-des-modeles-locaux-2.png` | Click Download on a model row. | The row with a progress bar and a Cancel button | **Qwen3 14B**; capture around 40 % | panel | hand, see N1 |
 
 ## Cross-cutting
@@ -371,7 +366,7 @@ marked `hand` only because the automaton frames the whole window.
 |---|---|---|---|---|---|---|
 | 26 | `agents-consulter-les-logs-d-un-agent-1.png` | My Assistants → select `apollia-guide` → **Logs**. | The Agent Logs panel: task counter, search, status filters, sorting. 7 tasks, every status | none | panel | auto |
 | 27 | `agents-demarrer-un-agent-1.png` | My Assistants. | The left column with both sections, My assistants and My packages | none | page | auto |
-| 28 | `agents-demarrer-un-agent-2.png` | Click the `seed-office-pack` row. | Package detail: Information, Agents with director/worker roles, Triggers | none | panel | auto |
+| 28 | `agents-demarrer-un-agent-2.png` | Click the `seed-office-pack` row. | Package detail: Information, its agents, workflows and tools | none | panel | auto |
 | 29 | `agents-demarrer-un-agent-2bis.png` | Same panel, scrolled down. | The rest of the same panel | none | panel | auto |
 | 30 | `agents-installer-un-agent-1.png` | My Assistants, one agent selected. | List left, detail right, **New assistant** top right | select `apollia-guide` | page | auto |
 | 31 | `agents-installer-un-agent-2.png` | New assistant → pick a package folder. | Preview step: Agents and Triggers sections, green Valid badge | see N5 | dialog | hand, see N5 |
@@ -379,20 +374,6 @@ marked `hand` only because the automaton frames the whole window.
 | 33 | `agents-installer-un-agent-2bis.png` | Same preview, a package with a webhook trigger. | The webhook trigger card with its Configure button | see N5 | dialog | hand, see N5 |
 | 34 | `agents-installer-un-agent-3.png` | Preview → Configure. | Configure step: webhook card, endpoint URL, HMAC-SHA256 secret field | see N5 | dialog | hand, see N5 |
 | 35 | `agents-installer-un-agent-4.png` | Configure → Install. | "Package installed!" with the agent and trigger counters, Close | see N5 | dialog | hand, see N5 |
-
-## Projects
-
-| # | File | Route and gesture | What must be on screen | Values | Crop | How |
-|---|---|---|---|---|---|---|
-| 36 | `projets-activer-les-context-providers-1.png` | Projects → `Atlas Migration` → Context. | The provider list with its ON/OFF toggles. Three providers | none | panel | auto |
-| 37 | `projets-activer-les-context-providers-2.png` | Same section, no click needed. | Git status ON (green), Directory tree OFF (grey) | none, the seed sets them that way | panel | auto |
-| 38 | `projets-activer-les-context-providers-3.png` | Click **Preview context** (Workspace Snapshot). | The provider preview with real git diff and file tree content | none; needs `APOLLIA_SEED_PROJECT_ROOT` to be a real git checkout | panel | auto |
-| 39 | `projets-creer-un-projet-1.png` | Projects. | The list, **+ New Project** highlighted top right | none | page | auto |
-| 40 | `projets-creer-un-projet-2.png` | Click + New Project. | The modal: Name, Root folder, Template | name `Client Digest 2027`, template **Developer project**, leave the folder as offered | dialog | auto |
-| 41 | `projets-creer-un-projet-3.png` | Cancel, then click the `Atlas Migration` row. | The detail pane: header with the agent count and New chat, the six-tab bar (Conversations, Tasks, Agents, Memory, Context, Settings), open on Conversations | none | panel | auto |
-| 42 | `projets-lier-un-projet-a-un-chat-1.png` | Same sheet. | **+ New Chat** highlighted | none | dialog | auto |
-| 43 | `projets-lier-un-projet-a-un-chat-2.png` | Chat → open any conversation → header menu (three dots). | The menu open on **Link to a project** | open `Weekly check-in` | panel | auto |
-| 44 | `projets-lier-un-projet-a-un-chat-3.png` | Back to the project sheet, Chats section. | The linked chats with their titles and dates | none, the seed links two, `Weekly check-in` and `Auditing the legacy documentation set` | dialog | auto |
 
 ## Automations
 
@@ -411,10 +392,10 @@ marked `hand` only because the automaton frames the whole window.
 | 50 | `controle-approuver-ou-refuser-une-action-2.png` | Inbox → To do, expand the pending approval. | The expanded approval card with its risk badge | see N4 | panel | auto |
 | 51 | `controle-approuver-ou-refuser-une-action-3.png` | Click Refuse. | The Reject action dialog: textarea, character counter, Cancel / Confirm | type the row-50 reason (98 characters, so the counter reads `98 / 500`) | dialog | auto |
 | 52 | `controle-approuver-ou-refuser-une-action-4.png` | Inbox → To do, Recent history block. | 4 rows with different icons, the rejection showing its reason in red | none, the seed writes the history | panel | auto once a pending item exists, see N4 |
-| 53 | `controle-configurer-les-permissions-de-fichiers-1.png` | Settings → Permissions. | The permission rule cards with their scope badges. 4 rules covering all three badges: Everywhere (2), This project, Chat / agent | none | panel | auto |
-| 54 | `controle-configurer-les-permissions-de-fichiers-1bis.png` | Click **Revoke all**. | The dialog: scope selector, affected-rule count, Revoke | pick scope **project**; do **not** confirm | dialog | auto |
-| 55 | `controle-configurer-les-permissions-de-fichiers-2.png` | Cancel, then hover a rule card and click Revoke. | The card mid-revoke and the confirmation toast | revoke the `bash_executor` rule, so the toast names `bash_executor` | panel | auto |
-| 56 | `controle-configurer-les-permissions-de-fichiers-3.png` | Same page, Active sessions section. | The session entries with their orange Session badge and Revoke button. 5 authorizations across 3 sessions | none | panel | auto |
+| 53 | `controle-configurer-les-permissions-de-fichiers-1.png` | Permissions screen (route `authorizations`). | The organization policy panel, the list (rules for every agent, then one row per agent) and the fine rules for every agent, a Withdraw on each | none | panel | auto |
+| 54 | `controle-configurer-les-permissions-de-fichiers-1bis.png` | Click **Revoke all**. | The dialog: what is withdrawn, the scope (every agent or one), the count, Revoke all | do **not** confirm | dialog | auto |
+| 55 | `controle-configurer-les-permissions-de-fichiers-2.png` | Cancel the dialog. | The fine rules for every agent, each with its effect badge and its Withdraw | none | panel | auto |
+| 56 | `controle-configurer-les-permissions-de-fichiers-3.png` | Same screen, click the first agent of the list. | The agent: its accesses by family, its "always" consents, its fine rules, Open the sheet | none | panel | auto |
 
 Row 54 mutates the seed. Shoot it after 52, 53 and 55, or reload the seed.
 
@@ -427,7 +408,7 @@ Row 54 mutates the seed. Shoot it after 52, 53 and 55, or reload the seed.
 | 59 | `integration-cabler-son-propre-serveur-mcp-3.png` | Same form, transport **streamable-http**. | URL and authentication headers | URL and header from the values table | dialog | auto |
 | 60 | `integration-comprendre-la-portee-d-une-integration-1.png` | My Assistants → `apollia-guide` → Tools tab. | Required and optional tools with their approval badges | none | panel | auto |
 | 61 | `integration-comprendre-les-permissions-mcp-1.png` | Ask the row-60 question in a chat with the MCP server connected. | The approval popup: tool title, exposed parameters, Allow once / Deny, the scope note | the row-60 question | panel | hand, see N3 |
-| 62 | `integration-comprendre-les-permissions-mcp-2.png` | Settings → Permissions. | The rules stacked, a Revoke on each row | none | panel | auto |
+| 62 | `integration-comprendre-les-permissions-mcp-2.png` | Permissions screen (route `authorizations`). | The fine rules, a Withdraw on each row | none | panel | auto |
 | 63 | `integration-google-workspace-1.png` | Connections → Google Workspace card. | The card selected (Not connected), the right panel with the connect action | see N6 | page | hand, see N6 |
 | 64 | `integration-google-workspace-2.png` | Click Connect, follow to the Google consent screen. | Google's consent screen listing the requested permissions | see N6 | dialog | hand, see N6 |
 | 65 | `integration-google-workspace-3.png` | Return to Apollia after consent. | The Drive folder dialog, the drive.file scope explanation, the Folder path field | see N6 | dialog | hand, see N6 |
@@ -457,8 +438,6 @@ Row 54 mutates the seed. Shoot it after 52, 53 and 55, or reload the seed.
 
 | # | File | Route and gesture | What must be on screen | Values | Crop | How |
 |---|---|---|---|---|---|---|
-| 77 | `observabilite-consulter-l-audit-trail-1.png` | Observability → **Audit Trail**. | Purpose banner, the Full journal totals card, 4 KPIs, filters, then the table. 10 rows, 2 agents, 2 failures | none | panel | auto |
-| 78 | `observabilite-consulter-l-audit-trail-2.png` | Expand the failed `bash_executor` row. | Arguments, stdout and stderr sections, all three populated | expand the row whose stderr mentions page 187 | panel | auto |
 | 79 | `observabilite-consulter-l-historique-des-taches-1.png` | Observability → **Timeline**. | Scope selector on **All activity**, KPI strip, filter bar, events grouped by day. ~42 events in the default 1 h window, every chip populated | keep the default **1 h** window, do not switch the scope | panel | auto |
 | 80 | `observabilite-lire-le-digest-quotidien-1.png` | Home, operator mode. | Three cards in a grid, Decisions waiting spanning two columns on the left. Both projects active | none | page | auto |
 | 81 | `observabilite-surveiller-les-couts-llm-1.png` | Observability → **LLM Costs**. | Period selector, 4 KPIs, the stacked bars, the backend legend. 3 backends, 7 populated days | keep the default **7 d** period | panel | auto |
@@ -468,7 +447,7 @@ Row 54 mutates the seed. Shoot it after 52, 53 and 55, or reload the seed.
 | # | File | Route and gesture | What must be on screen | Values | Crop | How |
 |---|---|---|---|---|---|---|
 | 82 | `troubleshooting-la-dictee-vocale-ne-transcrit-rien-1.png` | Settings → Speech-to-Text → click the shortcut. | The full-screen capture dialog waiting for a combination | do not press anything, shoot the waiting state | dialog | auto |
-| 83 | `troubleshooting-le-fournisseur-d-ia-ne-repond-pas-1.png` | Settings → LLM backends. | A backend card in error, red icon, Error label; hover it for the native tooltip | the seed marks one backend disabled; see N7 | panel | auto |
+| 83 | `troubleshooting-le-fournisseur-d-ia-ne-repond-pas-1.png` | AI → Servers → the first server. | The server marked Unreachable, the error banner and its Retry | the seeded `gpu-server` refuses at once; see N7 | panel | auto |
 | 84 | `troubleshooting-reinitialiser-apollia-factory-reset-1.png` | Settings → Danger Zone. | The red Factory Reset box with its isolated button | do **not** click | panel | auto |
 | 85 | `troubleshooting-un-agent-est-bloque-1.png` | Inbox → To do, filter on **Approvals**, expand one. | The approval card expanded showing what the agent waits for | see N4 | panel | auto |
 | 86 | `troubleshooting-une-action-est-refusee-1.png` | Inbox → To do, Recent history at the bottom. | The ❌ Rejected line with its reason | none, the seed writes it | panel | auto once a pending item exists, see N4 |
@@ -556,11 +535,11 @@ three need a real account and a real OAuth client. If you have neither, leave
 the three stale images in place: they are the only rows in the set where that is
 the honest answer.
 
-**N7. A backend in error needs the backend to fail** (row 83)
-The seed disables `openai-gpt4o-mini` but disabled is not error: the card shows
-grey, not red. To get the red state, configure a backend pointing at an
-unreachable host and let the health check fail. Name it `Remote GPU` and point
-it at `http://127.0.0.1:9/v1`, which refuses instantly.
+**N7. A server in error needs the server to fail** (row 83)
+The seed disables `vllm-qwen` but disabled is not error: the server reads
+Disabled, with no banner. The seeded `gpu-server` points at
+`http://127.0.0.1:9/v1`, which refuses instantly: it is the first server of
+the column, and opening it shows the Unreachable state.
 
 ---
 

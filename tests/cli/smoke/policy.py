@@ -17,7 +17,7 @@ into a real read path, and `TIMEOUTS` overrides the per-leaf deadline.
 
 Values come from the committed fixture at tests/cli/seed (2 projects, 4 chat
 sessions, 4 agents, 4 triggers, 2 MCP servers, 3 LLM backends, 5 memory
-namespaces, 5 tasks, 4 audit runs, 3 transcriptions). Changing the seed changes
+namespaces, 5 tasks, 3 transcriptions). Changing the seed changes
 what these identifiers resolve to.
 
 Stdlib only, no import of the sweep engine: this file is data plus its reasons.
@@ -46,9 +46,9 @@ EXCLUSIONS: dict[str, tuple[str, str]] = {
     ),
     "mcp server": (
         "blocking",
-        "serves the MCP stdio protocol on stdin until the peer closes; with "
-        "stdin on /dev/null it exits on EOF, which measures the EOF path and "
-        "not the server",
+        "bridges an MCP client on stdin to the daemon until the peer closes; "
+        "offline it refuses at once for want of a daemon, which Track 1 of "
+        "the end-to-end suite asserts, and with a daemon it would wait on stdin",
     ),
     "update": (
         "destructive-host",
@@ -80,11 +80,6 @@ EXCLUSIONS: dict[str, tuple[str, str]] = {
     "stt model download": (
         "network",
         "downloads a GGML whisper model from the network",
-    ),
-    "agent install": (
-        "network",
-        "the documented sources are a git URL and a registry name; the local "
-        "path variant is covered by `agent validate` and `agent create`",
     ),
     "eval run": (
         "blocking",
@@ -156,10 +151,8 @@ ARGV: dict[str, list[str]] = {
     "mcp raw-config": ["filesystem"],
     "mcp test": ["filesystem"],
     "mcp restart": ["filesystem"],
-    "mcp update": ["filesystem", "--require-approval", "true"],
+    "mcp update": ["filesystem", "--command", "python3"],
     "mcp remove": ["notes", "--confirm"],
-    "mcp set-approval": ["filesystem", "read_file"],
-    "mcp revoke-approval": ["filesystem", "read_file"],
     "mcp secret set": ["filesystem", "SMOKE_TOKEN", "smoke-value"],
     "mcp secret delete": ["filesystem", "SMOKE_TOKEN"],
     "mcp oauth status": ["filesystem"],
@@ -167,7 +160,7 @@ ARGV: dict[str, list[str]] = {
     "llm backends show": ["local-llama-server"],
     "llm backends update": ["local-llama-server", "--disable"],
     "llm backends set-default": ["local-llama-server"],
-    "llm backends delete": ["openai-gpt4o-mini", "--confirm"],
+    "llm backends delete": ["vllm-qwen", "--confirm"],
     "llm backends create": [
         "smoke-backend",
         "--provider",
@@ -204,13 +197,11 @@ ARGV: dict[str, list[str]] = {
     "profile forget": ["display_name"],
     "completions": ["bash"],
     "guide": ["chat"],
-    # Paths: the seed's own agent directory, never a path in the repository.
-    "agent validate": ["@SEED_AGENT_DIR@"],
-    "inspect": ["@SEED_AGENT_DIR@"],
-    "agent update": ["seed-classifier", "@SEED_AGENT_DIR@"],
-    "agent start": ["@SEED_AGENT_DIR@"],
+    "agent start": ["seed-classifier"],
+    # A package folder written inside the throwaway HOME, never the caller's cwd.
+    "package new": ["smoke-package", "--output-dir", "@RUN_DIR@"],
     # Writes that must land inside the throwaway HOME, never the caller's cwd.
-    "audit export": ["--output", "@RUN_DIR@/audit-export.json"],
+    "audit export": ["--format", "json", "--output", "@RUN_DIR@/audit-export.json"],
     "profile export": ["--output", "@RUN_DIR@/profile.json"],
     "profile import": ["--input", "@RUN_DIR@/profile-in.json"],
     "memory import": [
@@ -239,7 +230,6 @@ ARGV: dict[str, list[str]] = {
     "explain": ["what a sovereign runtime is"],
     "llm chat": ["say ok"],
     "run": ["seed-classifier", "ping"],
-    "agent create": ["smoke-agent"],
     "project create": ["Smoke Project"],
     "mcp add": ["smoke-server", "--command", "/bin/echo"],
     "trigger create": [
@@ -252,10 +242,13 @@ ARGV: dict[str, list[str]] = {
         "0 6 * * 1",
     ],
     "agent uninstall": ["seed-classifier", "--confirm"],
-    "agent repair": ["seed-classifier"],
     "agent package uninstall": ["seed-office-pack", "--confirm"],
     "agent stop": ["seed-classifier"],
     "notify events set": ["task.completed"],
+    # Without `--no-load` the leaf hands the definition to launchd, systemd or
+    # Task Scheduler, which act on the operator's real session whatever HOME
+    # says. The write is played; the load is the maintainer's gesture.
+    "service install": ["--no-load"],
 }
 
 # Per-leaf deadline in seconds; DEFAULT_TIMEOUT elsewhere.
