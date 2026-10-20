@@ -325,7 +325,7 @@ notify-rust = "4"
 ureq = { version = "2", features = ["json"] }
 
 # --- STT audio capture and resampling (apollia-runner, apollia-stt) ---
-cpal = "0.15"
+cpal = "0.18"
 rubato = "0.15"
 whisper-rs = "0.16"
 
