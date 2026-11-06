@@ -93,6 +93,14 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os llm backends set-default`↴](#apollia-os-llm-backends-set-default)
 * [`apollia-os llm reload`↴](#apollia-os-llm-reload)
 * [`apollia-os llm setup`↴](#apollia-os-llm-setup)
+* [`apollia-os engine`↴](#apollia-os-engine)
+* [`apollia-os engine list`↴](#apollia-os-engine-list)
+* [`apollia-os engine check`↴](#apollia-os-engine-check)
+* [`apollia-os engine use`↴](#apollia-os-engine-use)
+* [`apollia-os engine channel`↴](#apollia-os-engine-channel)
+* [`apollia-os engine install`↴](#apollia-os-engine-install)
+* [`apollia-os engine import`↴](#apollia-os-engine-import)
+* [`apollia-os engine remove`↴](#apollia-os-engine-remove)
 * [`apollia-os model`↴](#apollia-os-model)
 * [`apollia-os model list`↴](#apollia-os-model-list)
 * [`apollia-os model search`↴](#apollia-os-model-search)
@@ -109,6 +117,7 @@ This document contains the help content for the `apollia-os` command-line progra
 * [`apollia-os source delete`↴](#apollia-os-source-delete)
 * [`apollia-os source inspect`↴](#apollia-os-source-inspect)
 * [`apollia-os source report`↴](#apollia-os-source-report)
+* [`apollia-os source show`↴](#apollia-os-source-show)
 * [`apollia-os trigger`↴](#apollia-os-trigger)
 * [`apollia-os trigger list`↴](#apollia-os-trigger-list)
 * [`apollia-os trigger status`↴](#apollia-os-trigger-status)
@@ -320,8 +329,9 @@ Apollia OS CLI binary (apollia-os)
 * `hooks` - Lifecycle hooks (list)
 * `memory` - Memory management
 * `llm` - LLM backend diagnostics (status, ping, chat, costs, backends, reload)
+* `engine` - The inference engines: the cards detected, the variants installed and offered, the one in service (list, check, use, channel, install, import, remove)
 * `model` - Local model file management
-* `source` - The sources an agent may consult once checked: folders, files, mailboxes, the profile, memory (list, create, delete, inspect)
+* `source` - The sources an agent may consult once checked: folders, files, mailboxes, the profile, memory (list, show, create, delete, inspect)
 * `trigger` - Trigger management (list, status, fire, enable, disable, logs, reload, create, update, delete)
 * `notify` - Notification channel management (test, list, logs, create, update, delete, events)
 * `stt` - Speech-to-Text management (status, transcribe, transcriptions, model, config)
@@ -1681,6 +1691,140 @@ First-run helper: configure a local LLM in one step.
 
 
 
+## `apollia-os engine`
+
+The inference engines: the cards detected, the variants installed and offered, the one in service (list, check, use, channel, install, import, remove)
+
+**Usage:** `apollia-os engine <COMMAND>`
+
+###### **Subcommands:**
+
+* `list` - The cards, the engines installed and in service, the variants the channel offers, Node.js
+* `check` - Probe the cards again and verify the followed channel
+* `use` - Choose the engine that serves GGUF models: a variant installed, `auto` or `embedded`
+* `channel` - Show the followed channel, or follow another one
+* `install` - Install a variant of llama-server (the recommended one when none is named) or Node.js
+* `import` - Install the engines of a directory copied from a release: manifest, signature and archives
+* `remove` - Remove one installed build, as `engine list` names it
+
+
+
+## `apollia-os engine list`
+
+The cards, the engines installed and in service, the variants the channel offers, Node.js
+
+**Usage:** `apollia-os engine list [OPTIONS]`
+
+###### **Options:**
+
+* `--all` - Also list the variants that do not run on this machine
+
+
+
+## `apollia-os engine check`
+
+Probe the cards again and verify the followed channel
+
+**Usage:** `apollia-os engine check`
+
+
+
+## `apollia-os engine use`
+
+Choose the engine that serves GGUF models: a variant installed, `auto` or `embedded`
+
+**Usage:** `apollia-os engine use <CHOICE>`
+
+###### **Arguments:**
+
+* `<CHOICE>` - `auto`, `embedded`, or an installed variant (`cuda`, `cuda-12`, `cuda-13`, `rocm`, `vulkan`, `cpu`, `metal`)
+
+  Possible values: `auto`, `embedded`, `cuda`, `cuda-12`, `cuda-13`, `rocm`, `vulkan`, `cpu`, `metal`
+
+
+
+
+## `apollia-os engine channel`
+
+Show the followed channel, or follow another one
+
+**Usage:** `apollia-os engine channel [CHANNEL]`
+
+###### **Arguments:**
+
+* `<CHANNEL>` - The channel to follow; without it, the followed one is shown
+
+  Possible values:
+  - `stable`:
+    The builds the project vouches for
+  - `preview`:
+    The builds being tried before they reach stable
+
+
+
+
+## `apollia-os engine install`
+
+Install a variant of llama-server (the recommended one when none is named) or Node.js
+
+**Usage:** `apollia-os engine install [OPTIONS] <ENGINE> [VARIANT]`
+
+###### **Arguments:**
+
+* `<ENGINE>` - The engine to install
+
+  Possible values:
+  - `llama-server`:
+    The llama.cpp server, which serves GGUF models
+  - `nodejs`:
+    The Node.js runtime of the tool servers that run on it
+
+* `<VARIANT>` - The llama-server variant; without it, the one rated recommended for this machine
+
+  Possible values: `cuda-12`, `cuda-13`, `rocm`, `vulkan`, `cpu`, `metal`
+
+
+###### **Options:**
+
+* `--detach` - Return once the runtime accepted the installation; `engine list` follows it
+* `--force` - Install a variant rated incompatible with this machine
+
+
+
+## `apollia-os engine import`
+
+Install the engines of a directory copied from a release: manifest, signature and archives
+
+**Usage:** `apollia-os engine import [OPTIONS] <DIR>`
+
+###### **Arguments:**
+
+* `<DIR>` - The directory holding `engines.json`, `engines.json.minisig` and the archives
+
+###### **Options:**
+
+* `--detach` - Return once the runtime accepted the import; `engine list` follows it
+
+
+
+## `apollia-os engine remove`
+
+Remove one installed build, as `engine list` names it
+
+**Usage:** `apollia-os engine remove [OPTIONS] <ENGINE> <TAG> <VARIANT>`
+
+###### **Arguments:**
+
+* `<ENGINE>` - The engine: `llama-server`, `vllm-mlx` or `nodejs`
+* `<TAG>` - The upstream tag of the build
+* `<VARIANT>` - The variant of the build
+
+###### **Options:**
+
+* `--confirm` - Remove without asking, also the build `engines.gguf` chooses
+
+
+
 ## `apollia-os model`
 
 Local model file management
@@ -1813,7 +1957,7 @@ Remove a local model file from `~/.apollia/models/`
 
 ## `apollia-os source`
 
-The sources an agent may consult once checked: folders, files, mailboxes, the profile, memory (list, create, delete, inspect)
+The sources an agent may consult once checked: folders, files, mailboxes, the profile, memory (list, show, create, delete, inspect)
 
 **Usage:** `apollia-os source <COMMAND>`
 
@@ -1824,6 +1968,7 @@ The sources an agent may consult once checked: folders, files, mailboxes, the pr
 * `delete` - Remove a source. Agents that list it stop seeing it
 * `inspect` - Preview a workbook or a CSV file as a batch would read it: the sheet and header row proposed, the first twenty rows, the columns
 * `report` - Show the report of the migration of the former projects into sources: what each project became, and what could not be carried over
+* `show` - Show one source and where its index stands: documents and passages, the files left out, and the pages waiting for recognition or not read
 
 
 
@@ -1888,6 +2033,18 @@ Preview a workbook or a CSV file as a batch would read it: the sheet and header 
 Show the report of the migration of the former projects into sources: what each project became, and what could not be carried over
 
 **Usage:** `apollia-os source report`
+
+
+
+## `apollia-os source show`
+
+Show one source and where its index stands: documents and passages, the files left out, and the pages waiting for recognition or not read
+
+**Usage:** `apollia-os source show <ID>`
+
+###### **Arguments:**
+
+* `<ID>` - Source identifier, as `source list` shows it
 
 
 
@@ -3890,7 +4047,7 @@ Report whether the service is installed and running
 
 Diagnose the local Apollia environment (no runtime required).
 
-Verifies the Apollia home directory, the config file, local SQLite databases, the Python bridge, and the runtime socket. Prints a status table and exits 0 when healthy, 1 when at least one check errors.
+Verifies the Apollia home directory, the config file, local SQLite databases, the models directory, recognition (whether this build reads scanned pages, and which reading languages are in place), the Python bridge, the sandbox posture, and the runtime socket. Prints a status table and exits 0 when healthy, 1 when at least one check errors.
 
 **Usage:** `apollia-os doctor`
 

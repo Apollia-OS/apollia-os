@@ -3,17 +3,20 @@
 //! Pure: every input is read by the caller, so the rules are tested without a
 //! runtime, a keychain or a server process.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use apollia_auth::ConnectorProvider;
 use apollia_connectors::imap::{providers::provider_for_email, ImapAccount};
-use apollia_core::FolderConnection;
-use apollia_core::McpHealth;
+use apollia_core::{ConnectionStateRecord, ConnectionStatus, FolderConnection, McpHealth};
+use apollia_mcp::classify::classify_configured_tool;
 use apollia_mcp::config::McpServerConfig;
 use apollia_mcp::manager::McpServerStatus;
+use apollia_mcp::server_repository::StoredTool;
+use apollia_mcp::tool_search::ToolIndexSnapshot;
 use apollia_mcp::Provenance;
 use apollia_tools::{FamilySource, ToolDescriptor};
 
+use super::state::{kept_detail, kept_mcp_state, shown_state};
 use super::{
     folder_connections, imap_connection_id, is_prechecked, is_remote, is_remote_host, Connection,
     ConnectionKind, ConnectionState, ConnectionTool,
@@ -31,8 +34,12 @@ pub struct ConnectionSources {
     pub mcp_statuses: Vec<McpServerStatus>,
     /// Every descriptor of the tool registry.
     pub descriptors: Vec<ToolDescriptor>,
-    /// Names of the MCP servers an installed package brought.
-    pub package_servers: HashSet<String>,
+    /// The tools each live MCP session indexed. In deferred loading none of
+    /// them reaches the registry, so this is where a server's tools are read.
+    pub mcp_index: Vec<ToolIndexSnapshot>,
+    /// The MCP servers an installed package brought: the name of each, and
+    /// the name of its package.
+    pub package_servers: HashMap<String, String>,
     /// Connected accounts of each native provider.
     pub native_accounts: Vec<NativeAccounts>,
     /// Mailboxes connected over IMAP.
@@ -41,11 +48,19 @@ pub struct ConnectionSources {
     pub forbidden: HashSet<String>,
     /// Folders of this machine added as connections.
     pub folders: Vec<FolderConnection>,
+    /// The state each connection was last found in, by identifier.
+    pub states: HashMap<String, ConnectionStateRecord>,
+    /// Connections the user put in pause, by identifier.
+    pub paused: HashSet<String>,
 }
 
 /// Assemble every connection: native accounts first, then mailboxes, then MCP
 /// servers by name, then folders. A connection the policy forbade at boot is
-/// marked so, whatever else its state would be.
+/// marked so, whatever else its state would be. A connection in pause reads
+/// paused, whatever state was kept for it before, and stopped in the detail
+/// its kind gives. Each other one reads in the state it was last found in,
+/// dated; one never found yet reads as not checked yet, not as needing
+/// repair.
 #[must_use]
 pub fn assemble(sources: &ConnectionSources) -> Vec<Connection> {
     let mut out = Vec::new();
@@ -56,6 +71,7 @@ pub fn assemble(sources: &ConnectionSources) -> Vec<Connection> {
                 .map(|account| native_connection(*provider, account)),
         );
     }
+    out.extend(blocked_providers(sources));
     out.extend(sources.imap_accounts.iter().map(imap_connection));
     out.extend(
         sources
@@ -65,8 +81,27 @@ pub fn assemble(sources: &ConnectionSources) -> Vec<Connection> {
     );
     out.extend(folder_connections(&sources.folders));
     for connection in &mut out {
-        if sources.forbidden.contains(&connection.id) {
+        let forbidden = sources.forbidden.contains(&connection.id);
+        if connection.kind != ConnectionKind::Mcp {
+            connection.state = kept_detail(sources.states.get(&connection.id));
+        }
+        if forbidden {
             connection.state = ConnectionState::ForbiddenByPolicy;
+        }
+        let live = connection
+            .id
+            .strip_prefix("mcp:")
+            .and_then(|name| sources.mcp_statuses.iter().find(|s| s.name == name))
+            .map(|s| &s.health);
+        let shown = shown_state(&connection.id, &sources.states, forbidden, live);
+        connection.status = shown.status;
+        connection.reason = shown.reason;
+        connection.checked_at = shown.checked_at;
+        if !forbidden && sources.paused.contains(&connection.id) {
+            connection.state = ConnectionState::Stopped;
+            connection.status = ConnectionStatus::Paused;
+            connection.reason = None;
+            connection.checked_at = None;
         }
     }
     out
@@ -88,11 +123,52 @@ fn native_connection(provider: ConnectorProvider, account: &str) -> Connection {
         remote: true,
         official,
         state: ConnectionState::Connected,
+        status: ConnectionStatus::NotChecked,
+        reason: Some(super::state::not_checked()),
+        checked_at: None,
+        package: None,
         tools: descriptors
             .iter()
             .map(|d| tool_from_descriptor(d, provenance, official))
             .collect(),
     }
+}
+
+/// The native providers no account of which could connect because their
+/// organisation requires an administrator's approval: one connection each,
+/// with no account and no tool, shown blocked with the approval to send.
+fn blocked_providers(sources: &ConnectionSources) -> Vec<Connection> {
+    ConnectorProvider::ALL
+        .into_iter()
+        .filter(|provider| {
+            !sources
+                .native_accounts
+                .iter()
+                .any(|(p, accounts)| p == provider && !accounts.is_empty())
+        })
+        .filter(|provider| {
+            sources
+                .states
+                .get(&super::state::native_provider_connection_id(*provider))
+                .is_some_and(|kept| kept.state == ConnectionStatus::Blocked)
+        })
+        .map(|provider| Connection {
+            id: super::state::native_provider_connection_id(provider),
+            kind: ConnectionKind::Native,
+            label: provider_label(provider).to_owned(),
+            account: None,
+            path: None,
+            provenance: Provenance::Selection,
+            remote: true,
+            official: false,
+            state: ConnectionState::Stopped,
+            status: ConnectionStatus::Blocked,
+            reason: None,
+            checked_at: None,
+            package: None,
+            tools: Vec::new(),
+        })
+        .collect()
 }
 
 fn imap_connection(account: &ImapAccount) -> Connection {
@@ -111,6 +187,10 @@ fn imap_connection(account: &ImapAccount) -> Connection {
         remote: is_remote_host(&account.host),
         official,
         state: ConnectionState::Connected,
+        status: ConnectionStatus::NotChecked,
+        reason: Some(super::state::not_checked()),
+        checked_at: None,
+        package: None,
         tools: crate::connectors_bridge::imap_tool_descriptors()
             .iter()
             .map(|d| tool_from_descriptor(d, provenance, official))
@@ -126,7 +206,8 @@ fn provider_label(provider: ConnectorProvider) -> &'static str {
 }
 
 fn mcp_connection(config: &McpServerConfig, sources: &ConnectionSources) -> Connection {
-    let provenance = if sources.package_servers.contains(&config.name) {
+    let package = sources.package_servers.get(&config.name).cloned();
+    let provenance = if package.is_some() {
         Provenance::Package
     } else {
         config
@@ -136,8 +217,13 @@ fn mcp_connection(config: &McpServerConfig, sources: &ConnectionSources) -> Conn
     };
     let official = config.origin.as_ref().is_some_and(|origin| origin.official);
     let status = sources.mcp_statuses.iter().find(|s| s.name == config.name);
+    let id = format!("mcp:{}", config.name);
+    let state = status.map_or_else(
+        || kept_mcp_state(sources.states.get(&id)),
+        |s| state_of(&s.health),
+    );
     Connection {
-        id: format!("mcp:{}", config.name),
+        id,
         kind: ConnectionKind::Mcp,
         label: config.name.clone(),
         account: None,
@@ -145,8 +231,12 @@ fn mcp_connection(config: &McpServerConfig, sources: &ConnectionSources) -> Conn
         provenance,
         remote: is_remote(&config.transport, config.url.as_deref()),
         official,
-        state: status.map_or(ConnectionState::Stopped, |s| state_of(&s.health)),
-        tools: mcp_tools(config, &sources.descriptors, provenance, official),
+        state,
+        status: ConnectionStatus::NotChecked,
+        reason: Some(super::state::not_checked()),
+        checked_at: None,
+        package,
+        tools: mcp_tools(config, sources, provenance, official),
     }
 }
 
@@ -159,16 +249,21 @@ fn state_of(health: &McpHealth) -> ConnectionState {
     }
 }
 
-/// The tools a server published, as registered; for a server without a live
-/// session, the tools its selection entry classified.
+/// The tools a server published, as registered; otherwise the tools its
+/// selection entry classified, then every other tool its index holds (a live
+/// session's, or the one kept from its last `tools/list`), classified by the
+/// family the operator gave it, else by the hints the server declared. In
+/// deferred loading nothing is registered, so a server with no selection
+/// entry would otherwise offer no tool to grant.
 fn mcp_tools(
     config: &McpServerConfig,
-    descriptors: &[ToolDescriptor],
+    sources: &ConnectionSources,
     provenance: Provenance,
     official: bool,
 ) -> Vec<ConnectionTool> {
     let prefix = format!("mcp:{}/", config.name);
-    let registered: Vec<ConnectionTool> = descriptors
+    let registered: Vec<ConnectionTool> = sources
+        .descriptors
         .iter()
         .filter(|d| d.name.starts_with(&prefix))
         .map(|d| tool_from_descriptor(d, provenance, official))
@@ -176,7 +271,7 @@ fn mcp_tools(
     if !registered.is_empty() {
         return registered;
     }
-    config
+    let mut tools: Vec<ConnectionTool> = config
         .tool_families
         .iter()
         .map(|(name, family)| ConnectionTool {
@@ -185,7 +280,63 @@ fn mcp_tools(
             family_source: FamilySource::Selection,
             prechecked: is_prechecked(*family, provenance, official),
         })
-        .collect()
+        .collect();
+    let mut indexed: Vec<&ToolIndexSnapshot> = sources
+        .mcp_index
+        .iter()
+        .filter(|e| {
+            e.server_name == config.name && !config.tool_families.contains_key(&e.tool_name)
+        })
+        .collect();
+    indexed.sort_by(|a, b| a.tool_name.cmp(&b.tool_name));
+    indexed.dedup_by(|a, b| a.tool_name == b.tool_name);
+    tools.extend(indexed.into_iter().map(|entry| {
+        let (family, family_source) =
+            classify_configured_tool(config, &entry.tool_name, entry.annotations.as_ref());
+        ConnectionTool {
+            id: format!("{prefix}{}", entry.tool_name),
+            family,
+            family_source,
+            prechecked: is_prechecked(family, provenance, official),
+        }
+    }));
+    tools
+}
+
+/// The index entries of the tools kept in `mcp.db` for each server of
+/// `configs` that has no live session and no entry in `index`, such as a
+/// server in pause: the list still shows what it last published, classified
+/// as its next start will classify it.
+#[must_use]
+pub fn kept_tool_index(
+    configs: &[McpServerConfig],
+    statuses: &[McpServerStatus],
+    index: &[ToolIndexSnapshot],
+    stored: &HashMap<String, Vec<StoredTool>>,
+) -> Vec<ToolIndexSnapshot> {
+    let mut out = Vec::new();
+    for config in configs {
+        let live = statuses.iter().any(|s| s.name == config.name)
+            || index.iter().any(|e| e.server_name == config.name);
+        let Some(tools) = stored.get(&config.name).filter(|_| !live) else {
+            continue;
+        };
+        out.extend(tools.iter().map(|tool| {
+            let (family, family_source) =
+                classify_configured_tool(config, &tool.name, tool.annotations.as_ref());
+            ToolIndexSnapshot {
+                server_name: config.name.clone(),
+                tool_name: tool.name.clone(),
+                description: tool.description.clone(),
+                tags: config.tags.clone(),
+                input_schema: Some(tool.input_schema.clone()),
+                annotations: tool.annotations,
+                family,
+                family_source,
+            }
+        }));
+    }
+    out
 }
 
 fn tool_from_descriptor(

@@ -211,6 +211,7 @@ impl RequestMcp {
             max_tools: 256,
             tags: Vec::new(),
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         }
     }
@@ -330,6 +331,7 @@ fn request_agent(access: Vec<String>, backend: &str) -> ResolvedAgent {
         mission: String::new(),
         examples: Vec::new(),
         access: access.clone(),
+        access_added: Vec::new(),
         sources: Vec::new(),
         model: Some(apollia_core::model_preset::AgentModel {
             agent: REQUEST_AGENT_ID.to_owned(),

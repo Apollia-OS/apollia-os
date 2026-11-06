@@ -15,6 +15,7 @@ from .add_permission_rule_body import AddPermissionRuleBody
 from .added_access import AddedAccess
 from .added_permission_rule import AddedPermissionRule
 from .advance_phase_body import AdvancePhaseBody
+from .agent_activity import AgentActivity
 from .agent_draft import AgentDraft
 from .agent_list_response import AgentListResponse
 from .agent_message_dto import AgentMessageDto
@@ -51,6 +52,7 @@ from .audit_journal_page_response_entries_item import AuditJournalPageResponseEn
 from .audit_journal_response import AuditJournalResponse
 from .audit_journal_response_entries_item import AuditJournalResponseEntriesItem
 from .authorize_tool_request import AuthorizeToolRequest
+from .available_package import AvailablePackage
 from .batch_access import BatchAccess
 from .batch_accesses_view import BatchAccessesView
 from .batch_deleted_view import BatchDeletedView
@@ -81,6 +83,8 @@ from .chat_request import ChatRequest
 from .chat_request_schema_type_0 import ChatRequestSchemaType0
 from .chat_response import ChatResponse
 from .chat_response_value_type_0 import ChatResponseValueType0
+from .check_connection_body import CheckConnectionBody
+from .check_connection_body_probe_type_0 import CheckConnectionBodyProbeType0
 from .clear_agent_model_response import ClearAgentModelResponse
 from .clear_cache_response import ClearCacheResponse
 from .clear_memory_body import ClearMemoryBody
@@ -102,8 +106,15 @@ from .config_validation import ConfigValidation
 from .config_view import ConfigView
 from .connected_account_response import ConnectedAccountResponse
 from .connection import Connection
+from .connection_activity_response import ConnectionActivityResponse
+from .connection_agent import ConnectionAgent
+from .connection_agents import ConnectionAgents
 from .connection_kind import ConnectionKind
+from .connection_reason_type_0 import ConnectionReasonType0
+from .connection_reason_type_0_key import ConnectionReasonType0Key
+from .connection_removal import ConnectionRemoval
 from .connection_state import ConnectionState
+from .connection_status import ConnectionStatus
 from .connection_tool import ConnectionTool
 from .connector_account_response import ConnectorAccountResponse
 from .context_overflow_setting import ContextOverflowSetting
@@ -191,10 +202,31 @@ from .engine_installation_state_type_5 import EngineInstallationStateType5
 from .engine_installation_state_type_5_state import EngineInstallationStateType5State
 from .engine_installed_response import EngineInstalledResponse
 from .engine_name import EngineName
+from .engine_rating import EngineRating
+from .engine_rating_reason_type_0 import EngineRatingReasonType0
+from .engine_rating_reason_type_0_code import EngineRatingReasonType0Code
+from .engine_rating_reason_type_1 import EngineRatingReasonType1
+from .engine_rating_reason_type_1_code import EngineRatingReasonType1Code
+from .engine_rating_reason_type_2 import EngineRatingReasonType2
+from .engine_rating_reason_type_2_code import EngineRatingReasonType2Code
+from .engine_rating_reason_type_3 import EngineRatingReasonType3
+from .engine_rating_reason_type_3_code import EngineRatingReasonType3Code
+from .engine_rating_reason_type_4 import EngineRatingReasonType4
+from .engine_rating_reason_type_4_code import EngineRatingReasonType4Code
+from .engine_rating_reason_type_5 import EngineRatingReasonType5
+from .engine_rating_reason_type_5_code import EngineRatingReasonType5Code
+from .engine_rating_reason_type_6 import EngineRatingReasonType6
+from .engine_rating_reason_type_6_code import EngineRatingReasonType6Code
+from .engine_rating_reason_type_7 import EngineRatingReasonType7
+from .engine_rating_reason_type_7_code import EngineRatingReasonType7Code
+from .engine_rating_reason_type_8 import EngineRatingReasonType8
+from .engine_rating_reason_type_8_code import EngineRatingReasonType8Code
 from .engine_refusal_code import EngineRefusalCode
+from .engine_removal_error_body import EngineRemovalErrorBody
 from .engine_settings_body import EngineSettingsBody
 from .engine_source import EngineSource
 from .engine_variant import EngineVariant
+from .engine_verdict import EngineVerdict
 from .engines_response import EnginesResponse
 from .events_response import EventsResponse
 from .example_agent import ExampleAgent
@@ -222,13 +254,17 @@ from .gguf_model_info import GgufModelInfo
 from .global_timeline_event import GlobalTimelineEvent
 from .global_timeline_event_detail import GlobalTimelineEventDetail
 from .governance_state_body import GovernanceStateBody
+from .gpu_card_vendor import GpuCardVendor
+from .grant_connection_body import GrantConnectionBody
 from .guardrail_check_dto import GuardrailCheckDto
 from .guardrail_level import GuardrailLevel
 from .guardrail_refused_body import GuardrailRefusedBody
 from .guardrail_verdict_dto import GuardrailVerdictDto
+from .hardware_card import HardwareCard
 from .hardware_response import HardwareResponse
 from .hardware_response_accelerator import HardwareResponseAccelerator
 from .hardware_response_devices_item import HardwareResponseDevicesItem
+from .hardware_view import HardwareView
 from .health_response import HealthResponse
 from .image_attachment import ImageAttachment
 from .imap_account_body import ImapAccountBody
@@ -355,6 +391,8 @@ from .onboarding_phase import OnboardingPhase
 from .onboarding_reset import OnboardingReset
 from .onboarding_state import OnboardingState
 from .onboarding_stats import OnboardingStats
+from .one_drive_choice_view import OneDriveChoiceView
+from .one_drive_entry import OneDriveEntry
 from .open_lease_request import OpenLeaseRequest
 from .package_error_body import PackageErrorBody
 from .package_install_request import PackageInstallRequest
@@ -428,7 +466,10 @@ from .reload_last_request import ReloadLastRequest
 from .reload_response import ReloadResponse
 from .reload_router_response import ReloadRouterResponse
 from .reload_router_response_backends_item import ReloadRouterResponseBackendsItem
+from .removed_item import RemovedItem
+from .removed_kind import RemovedKind
 from .rename_session_body import RenameSessionBody
+from .repoint_folder_body import RepointFolderBody
 from .required_connection_preview import RequiredConnectionPreview
 from .resend_message_request import ResendMessageRequest
 from .reset_response import ResetResponse
@@ -551,6 +592,7 @@ from .tool_call_detail_output_type_0 import ToolCallDetailOutputType0
 from .tool_config_body import ToolConfigBody
 from .tool_config_body_config_type_0 import ToolConfigBodyConfigType0
 from .tool_enabled_body import ToolEnabledBody
+from .tool_family_body import ToolFamilyBody
 from .tool_list_response import ToolListResponse
 from .tool_list_response_tools_item import ToolListResponseToolsItem
 from .tool_stat_entry import ToolStatEntry
@@ -633,6 +675,7 @@ __all__ = (
     "AddFolderBody",
     "AddPermissionRuleBody",
     "AdvancePhaseBody",
+    "AgentActivity",
     "AgentDraft",
     "AgentListResponse",
     "AgentMessageDto",
@@ -669,6 +712,7 @@ __all__ = (
     "AuditJournalResponse",
     "AuditJournalResponseEntriesItem",
     "AuthorizeToolRequest",
+    "AvailablePackage",
     "BatchAccess",
     "BatchAccessesView",
     "BatchDeletedView",
@@ -699,6 +743,8 @@ __all__ = (
     "ChatRequestSchemaType0",
     "ChatResponse",
     "ChatResponseValueType0",
+    "CheckConnectionBody",
+    "CheckConnectionBodyProbeType0",
     "ClearAgentModelResponse",
     "ClearCacheResponse",
     "ClearedServerLogs",
@@ -720,8 +766,15 @@ __all__ = (
     "ConfigView",
     "ConnectedAccountResponse",
     "Connection",
+    "ConnectionActivityResponse",
+    "ConnectionAgent",
+    "ConnectionAgents",
     "ConnectionKind",
+    "ConnectionReasonType0",
+    "ConnectionReasonType0Key",
+    "ConnectionRemoval",
     "ConnectionState",
+    "ConnectionStatus",
     "ConnectionTool",
     "ConnectorAccountResponse",
     "ContextOverflowSetting",
@@ -809,11 +862,32 @@ __all__ = (
     "EngineInstalledResponse",
     "EngineInstallRequest",
     "EngineName",
+    "EngineRating",
+    "EngineRatingReasonType0",
+    "EngineRatingReasonType0Code",
+    "EngineRatingReasonType1",
+    "EngineRatingReasonType1Code",
+    "EngineRatingReasonType2",
+    "EngineRatingReasonType2Code",
+    "EngineRatingReasonType3",
+    "EngineRatingReasonType3Code",
+    "EngineRatingReasonType4",
+    "EngineRatingReasonType4Code",
+    "EngineRatingReasonType5",
+    "EngineRatingReasonType5Code",
+    "EngineRatingReasonType6",
+    "EngineRatingReasonType6Code",
+    "EngineRatingReasonType7",
+    "EngineRatingReasonType7Code",
+    "EngineRatingReasonType8",
+    "EngineRatingReasonType8Code",
     "EngineRefusalCode",
+    "EngineRemovalErrorBody",
     "EngineSettingsBody",
     "EngineSource",
     "EnginesResponse",
     "EngineVariant",
+    "EngineVerdict",
     "EventsResponse",
     "ExampleAgent",
     "ExampleInstallRequest",
@@ -840,13 +914,17 @@ __all__ = (
     "GlobalTimelineEvent",
     "GlobalTimelineEventDetail",
     "GovernanceStateBody",
+    "GpuCardVendor",
+    "GrantConnectionBody",
     "GuardrailCheckDto",
     "GuardrailLevel",
     "GuardrailRefusedBody",
     "GuardrailVerdictDto",
+    "HardwareCard",
     "HardwareResponse",
     "HardwareResponseAccelerator",
     "HardwareResponseDevicesItem",
+    "HardwareView",
     "HealthResponse",
     "ImageAttachment",
     "ImapAccountBody",
@@ -973,6 +1051,8 @@ __all__ = (
     "OnboardingReset",
     "OnboardingState",
     "OnboardingStats",
+    "OneDriveChoiceView",
+    "OneDriveEntry",
     "OpenLeaseRequest",
     "PackageErrorBody",
     "PackageInstallRequest",
@@ -1044,7 +1124,10 @@ __all__ = (
     "ReloadResponse",
     "ReloadRouterResponse",
     "ReloadRouterResponseBackendsItem",
+    "RemovedItem",
+    "RemovedKind",
     "RenameSessionBody",
+    "RepointFolderBody",
     "RequiredConnectionPreview",
     "ResendMessageRequest",
     "ResetResponse",
@@ -1165,6 +1248,7 @@ __all__ = (
     "ToolConfigBody",
     "ToolConfigBodyConfigType0",
     "ToolEnabledBody",
+    "ToolFamilyBody",
     "ToolListResponse",
     "ToolListResponseToolsItem",
     "ToolStatEntry",

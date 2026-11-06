@@ -9,7 +9,7 @@ use apollia_tools::descriptor::{McpTransport, ToolDescriptor, ToolKind};
 use apollia_tools::registry::ToolRegistryHandle;
 use apollia_tools::{ActionFamily, FamilySource};
 
-use crate::classify::classify_mcp_tool;
+use crate::classify::{classify_configured_tool, classify_mcp_tool};
 use crate::config::McpServerConfig;
 use crate::manager::{
     McpClientManager, McpServerConfigView, McpServerDetail, McpServerStatus, McpToolSummary,
@@ -18,40 +18,42 @@ use crate::session::{McpSession, McpSessionError};
 use crate::tool_search::ToolIndexSnapshot;
 
 impl McpClientManager {
-    /// Collect an enriched status snapshot for every live session.
-    pub(super) fn collect_statuses(&self) -> Vec<McpServerStatus> {
-        self.sessions
-            .iter()
-            .map(|(name, session)| {
-                build_status(
-                    name,
-                    session,
-                    self.last_call_at.get(name).map(String::as_str),
-                )
-            })
-            .collect()
-    }
-    /// Aggregate the lightweight tool index across every session.
+    /// Aggregate the lightweight tool index across every session, then the
+    /// tools kept for the servers that have none.
     ///
-    /// Each [`ToolIndexEntry`] is enriched with its owning server name and the
-    /// server's configured tags, producing a [`ToolIndexSnapshot`] usable by the
-    /// synthetic `tool_search` tool. Sessions running in [`LoadingMode::Eager`]
-    /// contribute nothing, since their index is empty.
+    /// Each [`ToolIndexEntry`] is enriched with its owning server name, the
+    /// server's configured tags and the family the tool is classified in,
+    /// producing a [`ToolIndexSnapshot`] usable by the synthetic `tool_search`
+    /// tool. Sessions running in [`LoadingMode::Eager`] contribute nothing,
+    /// since their index is empty, and nothing is kept for them.
     ///
     /// [`ToolIndexEntry`]: crate::session::ToolIndexEntry
+    /// [`LoadingMode::Eager`]: crate::session::LoadingMode::Eager
     pub(super) fn collect_tool_index(&self) -> Vec<ToolIndexSnapshot> {
         let mut index = Vec::new();
         for session in self.sessions.values() {
-            let server_name = session.server_name().to_string();
-            let tags = session.config().tags.clone();
+            let server_name = session.server_name();
+            let hints = if self.request_servers.contains(server_name) {
+                ServerHints::Ignored
+            } else {
+                ServerHints::Read
+            };
             for entry in session.tool_index() {
-                index.push(ToolIndexSnapshot {
-                    server_name: server_name.clone(),
-                    tool_name: entry.name.clone(),
-                    description: entry.description.clone(),
-                    tags: tags.clone(),
-                    input_schema: session.cached_tool_schema(&entry.name).cloned(),
-                });
+                index.push(index_snapshot(
+                    session.config(),
+                    hints,
+                    IndexedTool {
+                        name: &entry.name,
+                        description: entry.description.clone(),
+                        annotations: entry.annotations,
+                        input_schema: session.cached_tool_schema(&entry.name).cloned(),
+                    },
+                ));
+            }
+        }
+        for (server_name, kept) in &self.kept_index {
+            if !self.sessions.contains_key(server_name) {
+                index.extend(kept.iter().cloned());
             }
         }
         index
@@ -77,6 +79,38 @@ pub(super) enum ServerHints {
     Ignored,
 }
 
+/// One tool of a server's index, before it is classified.
+pub(super) struct IndexedTool<'a> {
+    pub(super) name: &'a str,
+    pub(super) description: Option<String>,
+    pub(super) annotations: Option<crate::protocol::McpToolAnnotations>,
+    pub(super) input_schema: Option<serde_json::Value>,
+}
+
+/// The index entry of `tool` on the server `config` describes, classified as
+/// the registry would classify it: the selection entry, then the server's
+/// hints when `hints` lets them count, else unclassified.
+pub(super) fn index_snapshot(
+    config: &McpServerConfig,
+    hints: ServerHints,
+    tool: IndexedTool<'_>,
+) -> ToolIndexSnapshot {
+    let (family, family_source) = match hints {
+        ServerHints::Read => classify_configured_tool(config, tool.name, tool.annotations.as_ref()),
+        ServerHints::Ignored => classify_mcp_tool(None, None, config.has_account()),
+    };
+    ToolIndexSnapshot {
+        server_name: config.name.clone(),
+        tool_name: tool.name.to_string(),
+        description: tool.description,
+        tags: config.tags.clone(),
+        input_schema: tool.input_schema,
+        annotations: tool.annotations,
+        family,
+        family_source,
+    }
+}
+
 /// The registry names of the tools `session` exposes, `mcp:<server>/<tool>`.
 pub(super) fn registry_names(server_name: &str, session: &McpSession) -> Vec<String> {
     session_tool_names(session)
@@ -92,7 +126,7 @@ pub(super) fn registry_names(server_name: &str, session: &McpSession) -> Vec<Str
 /// loaded at boot and the runtime exposes the synthetic `tool_search` tool
 /// instead, so the registry stays free of `mcp:` descriptors.
 ///
-/// Each descriptor carries the action family [`classify_mcp_tool`] decides
+/// Each descriptor carries the action family [`classify_configured_tool`] decides
 /// for the tool, and its source; see [`descriptor_risk`] for the two fields
 /// derived from it. Whether a call may run is decided on that family, by
 /// governance, when an agent makes it.
@@ -108,48 +142,8 @@ pub(super) async fn register_session_tools_in_registry(
     session: &McpSession,
     hints: ServerHints,
 ) {
-    let has_account = session.config().has_account();
     for tool_def in session.tools() {
-        let (family, family_source) = match hints {
-            ServerHints::Read => classify_mcp_tool(
-                session.config().tool_families.get(&tool_def.name).copied(),
-                tool_def.annotations.as_ref(),
-                has_account,
-            ),
-            ServerHints::Ignored => classify_mcp_tool(None, None, has_account),
-        };
-        let (is_read_only, risk_score) = descriptor_risk(family, family_source);
-        let mut tool_tags = vec!["mcp".to_string(), server_name.to_string()];
-        tool_tags.extend(tags.iter().cloned());
-
-        let (server_url, transport) = descriptor_endpoint(session.config(), server_name);
-        let descriptor = ToolDescriptor {
-            name: format!("mcp:{}/{}", server_name, tool_def.name),
-            version: "1.0.0".to_string(),
-            description: tool_def
-                .description
-                .clone()
-                .unwrap_or_else(|| format!("MCP tool from {}", server_name)),
-            kind: ToolKind::McpServer {
-                server_url,
-                transport,
-                tool_name: tool_def.name.clone(),
-            },
-            input_schema: tool_def.input_schema.clone(),
-            output_schema: None,
-            sandbox_profile: SandboxProfile::NetworkRestricted,
-            tags: tool_tags,
-            family,
-            family_source,
-            // Nobody has designated which argument of an MCP tool is its target.
-            target_arg: None,
-            is_read_only,
-            risk_score,
-            approval_risk_level: None,
-            impact_description: None,
-            reject_reason_required: false,
-        };
-
+        let descriptor = tool_descriptor(server_name, tags, session.config(), tool_def, hints);
         match tool_registry.register(descriptor).await {
             Ok(()) => {
                 tracing::info!(
@@ -169,13 +163,62 @@ pub(super) async fn register_session_tools_in_registry(
         }
     }
 }
+
+/// The registry descriptor of `tool_def`, a tool of the server `config`
+/// describes, classified as `hints` allows.
+pub(super) fn tool_descriptor(
+    server_name: &str,
+    tags: &[String],
+    config: &McpServerConfig,
+    tool_def: &crate::protocol::McpToolDefinition,
+    hints: ServerHints,
+) -> ToolDescriptor {
+    let (family, family_source) = match hints {
+        ServerHints::Read => {
+            classify_configured_tool(config, &tool_def.name, tool_def.annotations.as_ref())
+        }
+        ServerHints::Ignored => classify_mcp_tool(None, None, config.has_account()),
+    };
+    let (is_read_only, risk_score) = descriptor_risk(family, family_source);
+    let mut tool_tags = vec!["mcp".to_string(), server_name.to_string()];
+    tool_tags.extend(tags.iter().cloned());
+
+    let (server_url, transport) = descriptor_endpoint(config, server_name);
+    ToolDescriptor {
+        name: format!("mcp:{}/{}", server_name, tool_def.name),
+        version: "1.0.0".to_string(),
+        description: tool_def
+            .description
+            .clone()
+            .unwrap_or_else(|| format!("MCP tool from {}", server_name)),
+        kind: ToolKind::McpServer {
+            server_url,
+            transport,
+            tool_name: tool_def.name.clone(),
+        },
+        input_schema: tool_def.input_schema.clone(),
+        output_schema: None,
+        sandbox_profile: SandboxProfile::NetworkRestricted,
+        tags: tool_tags,
+        family,
+        family_source,
+        // Nobody has designated which argument of an MCP tool is its target.
+        target_arg: None,
+        is_read_only,
+        risk_score,
+        approval_risk_level: None,
+        impact_description: None,
+        reject_reason_required: false,
+    }
+}
+
 /// The `is_read_only` flag and `risk_score` of an MCP tool's descriptor,
 /// derived from its family.
 ///
 /// `is_read_only` lets a call run concurrently and before a plan is approved,
 /// so it is granted only to a reading family taken from the curated
 /// selection: a server's own read-only hint classifies the tool but is not
-/// trusted to unlock that path. The score follows the family: a read is low,
+/// trusted to unlock that path, nor is the operator's family. The score follows the family: a read is low,
 /// a write, a send or code is medium, and an unclassified tool, sensitive by
 /// rule, scores as a write.
 pub(super) fn descriptor_risk(family: ActionFamily, source: FamilySource) -> (bool, u8) {
@@ -251,6 +294,7 @@ pub(super) fn build_status(
         server_info: session.server_info().name.clone(),
         tools_count: session_tool_count(session),
         connected: true,
+        dormant: false,
         pid: session.pid(),
         uptime_secs: Some(session.uptime_secs()),
         last_call_at: last_call_at.map(str::to_string),
@@ -358,6 +402,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         }
     }

@@ -9,6 +9,7 @@ import {
   allPresent,
   connectionType,
   entryToAdd,
+  lineLabel,
   loadConnectionProposal,
   missingLines,
   nothingToPropose,
@@ -38,7 +39,7 @@ const BROWSER_ENTRY = {
   name: "@modelcontextprotocol/server-puppeteer",
   title: "Web Browser",
   packages: [{ identifier: "@modelcontextprotocol/server-puppeteer" }],
-  enrichment: { operator_label: "Web Browser" },
+  enrichment: { operator_label: { en: "Web Browser", fr: "Navigateur web" } },
 } as unknown as RegistryServerView;
 
 const NOTION_ENTRY = {
@@ -163,8 +164,31 @@ describe("connection step - the connections required and missing are listed", ()
     expect(asked).toEqual(["request-sorter"]);
   });
 
-  test("a connection already there is not listed", () => {
-    // GIVEN two required connections, one added earlier under the name of its entry
+  test("a connection added under the identifier of its entry is not listed", () => {
+    // GIVEN two required connections, one added under the name the wizard
+    // draws from the identifier of its entry
+    const required = requiredConnections(MANIFEST);
+    const connections = [connection("mcp:modelcontextprotocol-server-puppeteer", "mcp")];
+
+    // WHEN the lines are built
+    const lines = missingLines(required, connections, [BROWSER_ENTRY, NOTION_ENTRY]);
+
+    // THEN only the one still missing is listed
+    expect(lines.map((line) => line.type)).toEqual(["com.notion/mcp"]);
+  });
+
+  test("a line is named in the interface language", () => {
+    // GIVEN the line of an entry the selection labels in English and French
+    const [line] = missingLines(requiredConnections(MANIFEST), [], [BROWSER_ENTRY, NOTION_ENTRY]);
+
+    // WHEN it is named in each language
+    // THEN each language reads its own label
+    expect(line && lineLabel(line, "fr")).toBe("Navigateur web");
+    expect(line && lineLabel(line, "en")).toBe("Web Browser");
+  });
+
+  test("a connection already there under its former name is not listed", () => {
+    // GIVEN two required connections, one added earlier under the label of its entry
     const required = requiredConnections(MANIFEST);
     const connections = [connection("mcp:web-browser", "mcp")];
 
@@ -185,11 +209,11 @@ describe("connection step - the connections required and missing are listed", ()
     expect(entryToAdd(lines, "@modelcontextprotocol/server-puppeteer")).toBe(BROWSER_ENTRY);
     expect(entryToAdd(lines, "unknown")).toBeNull();
 
-    // AND the step hands that entry to the add dialog of the Connections screen
+    // AND the step hands that entry to the one flow of an addition
     const step = source("./OnboardingConnection.svelte");
-    expect(step).toContain('import ConnectorWizard from "../integrations/ConnectorWizard.svelte";');
+    expect(step).toContain('import AddFlow from "../connections/add/AddFlow.svelte";');
     expect(step).toContain("const addingEntry = $derived(adding === null ? null : entryToAdd(lines, adding));");
-    expect(step).toContain("server={addingEntry}");
+    expect(step).toContain('kind: "catalogue", entry: addingEntry, source: "selection"');
     expect(step).toContain("onclick={() => (adding = line.type)}");
     expect(step).toContain('data-testid="connection-line-add"');
   });
@@ -378,9 +402,9 @@ describe("connection step - a connection added shows as present", () => {
     // GIVEN the source of the step
     const step = source("./OnboardingConnection.svelte");
 
-    // WHEN the wiring of the add dialog is read
-    // THEN its completion marks the line added, and a present line shows it
-    expect(step).toContain("if (adding !== null) void markAdded(adding);");
+    // WHEN the wiring of the add flow is read
+    // THEN the connection added marks the line, and a present line shows it
+    expect(step).toContain("onadded={() => void markAdded(type)}");
     expect(step).toContain("lines = refreshedLines(lines, [], added);");
     expect(step).toContain("lines = refreshedLines(lines, await connectionSources.connections(), added);");
     expect(step).toContain('{#if line.state === "present"}');

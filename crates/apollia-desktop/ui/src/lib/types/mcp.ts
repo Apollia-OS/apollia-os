@@ -150,14 +150,26 @@ export interface RegistryPackageArgView {
   isRepeatable: boolean;
 }
 
-/** UI-friendly metadata enriching a registry server entry for the catalogue. */
+/** Texts keyed by locale (`"en"`, `"fr"`), as the selection declares them. */
+export type CatalogueText = Record<string, string>;
+
+/**
+ * UI-friendly metadata enriching a registry server entry for the catalogue.
+ * Its texts arrive in every locale; `$lib/connections/catalogueText` picks
+ * the one of the interface language.
+ */
 export interface ConnectorEnrichmentView {
-  operator_label: string;
+  operator_label: CatalogueText;
+  /** Short description shown in the catalogue. */
+  description?: CatalogueText | null;
   category: string;
+  /** The brand's logo by its Simple Icons name, or a generic name (`$lib/connections/brandLogo`). */
   icon_name: string;
+  /** Names of the entry in the MCP registry, the first naming a server added from it. */
+  registry_names?: string[];
   trust_level: TrustLevel;
   auth_help_url: string | null;
-  auth_help_text: string | null;
+  auth_help_text: CatalogueText | null;
   /** Optional i18n key resolved by the wizard via `$t(key)`. When set, it
    *  takes precedence over `auth_help_text` and lets us ship long localised
    *  explanations in the bundled FR/EN catalogs instead of inline strings. */
@@ -167,8 +179,13 @@ export interface ConnectorEnrichmentView {
    *  env var via `mcp_oauth_resolve_client_id` and passes the value to
    *  `mcp_oauth_login`. */
   oauth_pre_registered_client_id_env: string | null;
+  /** The remote server signs in with the person's account, as the selection
+   *  declares it; a key the entry declares is then only the fallback. */
+  oauth?: boolean;
   /** Questions offered to try the connection, one per tool they exercise. */
   examples?: TryExample[];
+  /** The description of each package argument, in the order of `packageArguments`. */
+  argument_descriptions?: (CatalogueText | null)[];
 }
 
 /** One question offered to try a connection, its texts keyed by locale. */
@@ -202,9 +219,20 @@ export interface McpConnectionTestResultView {
  * - `oauth_required` → switch to "Sign in with <provider>" mode and call
  *   `mcp_oauth_login` once the user clicks.
  */
-export type McpConnectionTestResponse =
+export type McpConnectionTestResponse = (
   | ({ kind: "success" } & McpConnectionTestResultView)
-  | { kind: "oauth_required"; www_authenticate: string };
+  | { kind: "oauth_required"; www_authenticate: string }
+) & {
+  /**
+   * Which Node.js ran the server, given by `test_mcp_live_server` for a
+   * server launched by `node` or `npx`: the engine store's, or the one
+   * installed on the machine when the store holds none.
+   */
+  node_source?: NodeSource;
+};
+
+/** Where the Node.js that runs a server comes from. */
+export type NodeSource = "store" | "machine";
 
 /** Discovery payload returned by `mcp_oauth_discover`. */
 export interface McpOAuthDiscoveryResult {
@@ -263,6 +291,34 @@ export type ConnectionState =
    *  its tools neither offered nor run, never deleted. */
   | "forbidden_by_policy";
 
+/**
+ * The state of a connection as its user reads it, found by the runtime: it
+ * works, it needs repair (the reason says why), its user paused it, the
+ * organisation policy blocks it, or nothing has found it in any state yet
+ * (`not_checked`, neither working nor broken).
+ */
+export type ConnectionStatusKey = "working" | "needs_repair" | "paused" | "blocked" | "not_checked";
+
+/** Why a connection is not working, as a key the interface translates. */
+export type ConnectionReasonKey =
+  | "not_checked"
+  | "sign_in_again"
+  | "password_refused"
+  | "folder_not_found"
+  | "unreachable"
+  | "failing"
+  | "forbidden_by_policy"
+  | "admin_approval_required";
+
+/** The reason a connection is in its state, and its technical detail. */
+export interface ConnectionReason {
+  key: ConnectionReasonKey;
+  /** Technical detail, already redacted, shown in developer mode. */
+  detail?: string | null;
+  /** The address the repairing action opens: the approval page to send an administrator. */
+  address?: string | null;
+}
+
 /** One tool a connection brings. */
 export interface ConnectionTool {
   id: string;
@@ -284,6 +340,15 @@ export interface Connection {
   /** Sends data off this machine; computed by the runtime. */
   remote: boolean;
   official: boolean;
+  /** The detail of the state its kind gives; what the user reads is `status`. */
   state: ConnectionState;
+  /** What its user reads, as last found. */
+  status: ConnectionStatusKey;
+  /** Why it is not working, absent when it works. */
+  reason: ConnectionReason | null;
+  /** When its state was last found, RFC 3339 in UTC; null when it never was. */
+  checkedAt: string | null;
+  /** Name of the installed package that brought it, when one did. */
+  package: string | null;
   tools: ConnectionTool[];
 }

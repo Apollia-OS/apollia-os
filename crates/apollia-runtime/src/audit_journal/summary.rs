@@ -140,6 +140,7 @@ pub fn nature_of(kind: &JournalEntryKind) -> JournalNature {
         | K::ConsentAnswered
         | K::PolicyRefused
         | K::RuleRefused
+        | K::PausedRefused
         | K::ServerCall => JournalNature::Action,
         K::AccessChanged
         | K::AgentInstalled
@@ -158,6 +159,7 @@ pub fn nature_of(kind: &JournalEntryKind) -> JournalNature {
         | K::AccountConnected
         | K::AccountDisconnected
         | K::FolderAdded
+        | K::ToolReclassified
         | K::AlwaysWithdrawn
         | K::RuleAdded
         | K::RuleRemoved
@@ -289,10 +291,13 @@ pub fn summarize(entry: &JournalEntry) -> JournalSummary {
         | K::ConnectionSecretRemoved
         | K::AccountConnected
         | K::AccountDisconnected
-        | K::FolderAdded => match serde_json::from_value::<ConnectionRecord>(payload.clone()) {
-            Ok(record) => connection_summary(&mut summary, &record.event),
-            Err(_) => summary.what = entry.kind.tag().to_owned(),
-        },
+        | K::FolderAdded
+        | K::ToolReclassified => {
+            match serde_json::from_value::<ConnectionRecord>(payload.clone()) {
+                Ok(record) => connection_summary(&mut summary, &record.event),
+                Err(_) => summary.what = entry.kind.tag().to_owned(),
+            }
+        }
         K::AccessChanged
         | K::AgentInstalled
         | K::AgentUpdated
@@ -305,6 +310,7 @@ pub fn summarize(entry: &JournalEntry) -> JournalSummary {
         | K::AlwaysWithdrawn
         | K::PolicyRefused
         | K::RuleRefused
+        | K::PausedRefused
         | K::RuleAdded
         | K::RuleRemoved
         | K::BatchAccessGranted
@@ -381,6 +387,7 @@ fn connection_summary(summary: &mut JournalSummary, event: &ConnectionEvent) {
             summary.target = Some(path.clone());
             "Folder added"
         }
+        ConnectionEvent::ToolReclassified { .. } => "Tool reclassified",
     }
     .to_owned();
 }
@@ -486,6 +493,19 @@ fn governance_summary(summary: &mut JournalSummary, event: &GovernanceEvent) {
             summary.family = Some(family.as_str().to_owned());
             summary.outcome = Some(JournalOutcome::Refused);
             "Call refused by a rule"
+        }
+        GovernanceEvent::PausedRefused {
+            agent_id,
+            access_id,
+            family,
+            connection_id,
+        } => {
+            summary.agent = Some(agent_id.clone());
+            summary.tool = Some(access_id.clone());
+            summary.family = Some(family.as_str().to_owned());
+            summary.target = Some(connection_id.clone());
+            summary.outcome = Some(JournalOutcome::Refused);
+            "Call refused: its connection is in pause"
         }
         GovernanceEvent::RuleAdded(rule) => {
             summary.agent = rule.agent_id.clone();

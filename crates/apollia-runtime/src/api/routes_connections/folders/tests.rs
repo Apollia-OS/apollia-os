@@ -187,7 +187,7 @@ async fn test_removing_a_folder_connection_removes_its_row_and_is_journaled() {
 
 /// A runtime on `dir` with its source registry, one folder connection and,
 /// on it, one indexed folder source whose index file exists.
-async fn folder_with_source(
+pub(crate) async fn folder_with_source(
     dir: &tempfile::TempDir,
     folder: &tempfile::TempDir,
 ) -> (
@@ -302,4 +302,158 @@ async fn test_a_folder_no_source_depends_on_is_removed_without_confirmation() {
         .get(&stored.id)
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn test_a_folder_connection_chosen_again_keeps_its_identifier_and_is_journaled() {
+    // GIVEN a folder connection over a journal, and the folder it moved to
+    let dir = tempfile::TempDir::new().unwrap();
+    let old = tempfile::TempDir::new().unwrap();
+    let new = tempfile::TempDir::new().unwrap();
+    let journal = AuditJournalHandle::open(&dir.path().join("journal.db"))
+        .await
+        .unwrap();
+    let governance = ConnectionGovernance::without_policy(Some(journal.clone()));
+    let store = store(dir.path()).unwrap();
+    let added = add(&governance, &store, &body(old.path())).unwrap();
+    let stored_id = added.id.trim_start_matches("folder:").to_owned();
+
+    // WHEN it is pointed at the new folder
+    let moved = repoint(
+        &governance,
+        &store,
+        &stored_id,
+        new.path().to_str().unwrap(),
+    )
+    .unwrap();
+
+    // THEN the connection is the same one, on the new canonical path, and the
+    // table still holds one row
+    let canonical = std::fs::canonicalize(new.path()).unwrap();
+    assert_eq!(moved.id, added.id);
+    assert_eq!(moved.path.as_deref(), canonical.to_str());
+    assert_eq!(store.list().unwrap().len(), 1);
+    // AND its connection run records the addition, then the modification
+    let entries = journal.query_run(&connection_run_id(&added.id)).await;
+    let kinds: Vec<JournalEntryKind> = entries.iter().map(|e| e.kind.clone()).collect();
+    assert_eq!(
+        kinds,
+        [
+            JournalEntryKind::FolderAdded,
+            JournalEntryKind::ConnectionModified
+        ]
+    );
+    journal.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_folder_the_admission_refuses_is_not_chosen_again() {
+    // GIVEN a folder connection added before a policy that refuses folders
+    let dir = tempfile::TempDir::new().unwrap();
+    let old = tempfile::TempDir::new().unwrap();
+    let new = tempfile::TempDir::new().unwrap();
+    let store = store(dir.path()).unwrap();
+    let added = add(
+        &ConnectionGovernance::without_policy(None),
+        &store,
+        &body(old.path()),
+    )
+    .unwrap();
+    let stored_id = added.id.trim_start_matches("folder:").to_owned();
+    let refusing = ConnectionGovernance::new(Arc::new(RefuseFolders), None);
+
+    // WHEN it is pointed at another folder, and an unknown connection too
+    let (status, Json(err)) =
+        repoint(&refusing, &store, &stored_id, new.path().to_str().unwrap()).unwrap_err();
+    let (unknown, Json(unknown_err)) = repoint(
+        &ConnectionGovernance::without_policy(None),
+        &store,
+        "nope",
+        new.path().to_str().unwrap(),
+    )
+    .unwrap_err();
+
+    // THEN the admission's reason is answered and the row keeps its folder;
+    // an unknown connection is not found
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(err.code, "admission_refused");
+    assert_eq!(store.list().unwrap()[0].path, added.path.unwrap());
+    assert_eq!(unknown, StatusCode::NOT_FOUND);
+    assert_eq!(unknown_err.code, "not_found");
+}
+
+/// An embedder with no model: the indexes are built for keywords alone.
+struct NoModel;
+
+impl apollia_sources::PassageEmbedder for NoModel {
+    async fn model(&self) -> Result<String, apollia_llm::embeddings_client::EmbeddingError> {
+        Err(apollia_llm::embeddings_client::EmbeddingError::NoModel)
+    }
+
+    async fn embed_passages(
+        &self,
+        _texts: &[String],
+    ) -> Result<apollia_sources::index::ChunkVectors, apollia_llm::embeddings_client::EmbeddingError>
+    {
+        Err(apollia_llm::embeddings_client::EmbeddingError::NoModel)
+    }
+}
+
+/// The documents `source_search` finds for `query` in the source `id`.
+async fn found(registry: &SourceRegistryHandle, id: &str, query: &str) -> Vec<String> {
+    let outcome = registry
+        .search(apollia_sources::SourcesQuery {
+            sources: vec![id.to_owned()],
+            query: query.to_owned(),
+            vector: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    outcome.hits.into_iter().map(|h| h.document).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_a_folder_chosen_again_is_searched_in_its_new_content_at_once() {
+    // GIVEN a folder source indexed on a folder about Lyon, an indexer that
+    // sweeps once an hour, and another folder about Nantes
+    let dir = tempfile::TempDir::new().unwrap();
+    let old = tempfile::TempDir::new().unwrap();
+    let new = tempfile::TempDir::new().unwrap();
+    std::fs::write(old.path().join("old.txt"), "The lease of the Lyon office.").unwrap();
+    std::fs::write(
+        new.path().join("new.txt"),
+        "The lease of the Nantes office.",
+    )
+    .unwrap();
+    let (state, folder_id, source_id, _) = folder_with_source(&dir, &old).await;
+    let registry = state.source_registry.clone().unwrap();
+    registry
+        .start_indexing_every(
+            NoModel,
+            dir.path().join("models"),
+            std::time::Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+    registry.refresh_indexes().await.unwrap().await.unwrap();
+    assert_eq!(found(&registry, &source_id, "Lyon").await.len(), 1);
+
+    // WHEN the connection is pointed at the other folder through the route
+    let (status, body) = crate::api::test_support::call(
+        state.clone(),
+        "PUT",
+        &format!("/api/v1/connections/folders/{folder_id}"),
+        Some(serde_json::json!({ "path": new.path().to_str().unwrap() })),
+    )
+    .await;
+    let right_after = found(&registry, &source_id, "Lyon").await;
+    registry.refresh_indexes().await.unwrap().await.unwrap();
+
+    // THEN the old folder is no longer searched as soon as the route
+    // answered, and the new one is once its indexing is over
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(right_after.is_empty(), "{right_after:?}");
+    assert!(found(&registry, &source_id, "Lyon").await.is_empty());
+    assert_eq!(found(&registry, &source_id, "Nantes").await.len(), 1);
 }

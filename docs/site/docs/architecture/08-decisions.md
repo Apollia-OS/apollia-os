@@ -334,11 +334,32 @@ pinned version. The Windows and Linux bundles do not carry it.
 
 Engines have an update channel of their own and do not follow the version of
 Apollia. The embedded engine serves every machine from the first launch; an
-accelerated build, CUDA on a machine with an NVIDIA card, is downloaded on
-demand, or imported from a disk without network, and the launcher then takes the
-newest installed build of that variant over the embedded one. Which engine
-serves each model format is a setting, automatic by default; a chosen variant
-that is no longer installed falls back to the automatic choice. The followed
+accelerated build is downloaded on demand, or imported from a disk without
+network. The channel offers `llama-server` in five variants, `cuda-12`,
+`cuda-13`, `rocm`, `vulkan` and `cpu`, each for the platforms the channel
+publishes it for; `cuda` remains an earlier name, read as `cuda-12` in an installed record
+and, as a setting, as the best CUDA build installed. The runtime rates every
+variant for the machine, recommended, compatible or incompatible, with a reason
+code, from the cards it probes and their driver: CUDA 13 from compute
+capability 7.5, compatible from driver R580 and recommended from R615; CUDA 12
+recommended from the driver of its toolkit (570.26 under Linux, 551.61 under
+Windows) and the one CUDA build for Maxwell, Pascal and Volta cards; ROCm when
+the gfx target of the card is in the list of the build, and under Linux when
+the host carries the ROCm runtime, which that build loads from the machine;
+Vulkan when a loader is present; the processor build always. An installed GPU
+build whose `--list-devices` lists no device is incompatible whatever the rest
+says. At most one variant is recommended, the most capable one the machine
+runs. Which engine serves each model format is a setting, automatic by default:
+the automatic choice takes the installed build rated recommended, otherwise the
+best compatible one, otherwise the embedded engine, and a chosen variant that
+is no longer installed falls back to it. The choice is read again each time an
+engine is launched. A CUDA package carries the CUDA runtime that upstream
+publishes for its build, next to the server, on Linux as on Windows, so a
+machine with only the NVIDIA driver runs it; the cost is a heavier download than
+a server that relied on a toolkit of the host. The rating is a table of
+thresholds that follows the upstream builds, so it is revised with each build
+the channel pins, and a card it rates wrongly is corrected by the listing of
+the installed build rather than by a guess. The followed
 channel is checked when the runtime starts and when the channel changes, and an
 update it announces for a chosen engine is installed unasked, unless the setting
 that governs it is off, in which case the update is only announced. Every
@@ -348,14 +369,27 @@ stable or preview, publishes one such manifest, listing every engine archive
 with its SHA-256. The public half of that key is compiled into the binary and
 is the only key accepted. No archive is requested before the signature holds,
 an archive whose digest differs from the manifest is deleted, and a manifest
-older than the last one accepted on its channel is refused. A mirror can replace
-the address manifests and archives are fetched from; it cannot replace the key.
+older than the last one accepted on its channel is refused. The runtime reads a channel
+from the registry of Apollia first, under `engines-<channel>/`, and from its
+GitHub Releases mirror when the registry does not answer; neither address is
+trusted, and the signature is the only authority. A mirror can replace
+the address manifests and archives are fetched from, and is then the only one
+read; it cannot replace the key.
 Engine archives are read as zip only, the format already read for agent
 packages, and no other archive format is parsed. Upstream builds published as
 `.tar.gz`, those for macOS and Linux among them, are repackaged as zip by the
 release pipeline that publishes the manifest, and the manifest carries the
-digest of that zip. The MLX engine environment is listed in the same manifest
-and installed through the same verification.
+digest of that zip. The `llama-connect` tool that upstream builds carry, a
+peer-to-peer tunnel, is left out of every package: nothing the distribution key
+signs may open a tunnel. The MLX engine environment is listed in the same
+manifest and installed through the same verification.
+
+A launched engine receives the environment of the daemon minus every
+`LLAMA_ARG_*` variable. llama.cpp reads each of its flags from such a variable
+as well, `--connect` among them, and a variable left in a shell or a service
+unit must not switch on a flag the runtime did not choose. The cost is that an
+engine can no longer be tuned that way: extra flags go through
+`APOLLIA_LLAMA_EXTRA_ARGS`, which the daemon passes as flags.
 
 There is no dedicated cloud provider. A remote model is reached through one
 generic connection to an OpenAI-compatible server, at the address the
@@ -489,11 +523,143 @@ distribution key (see [Local inference](#local-inference)), and it is
 downloaded the first time a server launched by `node` or `npx` needs it: the
 manifest signature is verified before any archive is requested, then the
 archive digest, then the archive is extracted into the engine store. Such a
-server then runs on that Node.js by its absolute path, never through the
-`PATH`; while none is installed, its launch fails with a typed "Node.js
-required" error. A machine without network imports Node.js from a disk,
-through the same verification. The npm packages of the servers install from a
-lockfile carrying an integrity digest for each package.
+server then runs on that Node.js by its absolute path. A machine without
+network imports Node.js from a disk, through the same verification. The npm
+packages of the servers install from a lockfile carrying an integrity digest
+for each package.
+
+### A Node.js of the machine, as a fallback {#mcp-machine-node}
+
+When the engine channel cannot provide Node.js (not published, unreachable,
+offline, or its verification refused), Apollia falls back on a Node.js already
+installed on the machine. That release is not verified by Apollia, and it is
+accepted all the same, because the user installed it and chose it: it is
+already trusted to run code on that machine, and Apollia adds nothing to what
+it can do. The search reads the absolute entries of the `PATH` of the process
+(a relative or empty entry, which stands for the current directory, is left
+out, so a `node` planted in the folder the application started from is never
+run), then the usual install directories (`/opt/homebrew/bin`,
+`/usr/local/bin`, `Program Files\nodejs` on Windows), the keg-only Homebrew
+formulas (`opt/node@<major>` under `/opt/homebrew` and `/usr/local`, newest
+major first) and the releases of the common version managers (nvm, Volta,
+fnm), and the only program it runs is the candidate `node` itself, with
+`--version`. A candidate is kept only when its major release is 22 or later,
+the line the channel publishes and the locks are tried with, and when its own
+npm lies beside it; `npx` and `npm` are always those of the `node` kept. The
+release of the channel stays preferred: as soon as it is installed, servers
+run on it again. What stays verified is the code of the servers: a pinned
+package still installs with `npm ci` from its embedded lockfile, which refuses
+the whole installation on one integrity digest that does not match, with the
+scripts of the packages turned off. When there is no Node.js at all, the
+addition says to install one or to wait for the channel, and links the help
+page.
+
+### One writer, a published state, detached calls {#mcp-manager-snapshot}
+
+The MCP manager is one actor, and it stays the only writer of its sessions,
+as principle 5 asks: no lock is shared with another actor. What it no longer
+does is hold its loop while a server works. A tool call and a connection test
+run in tasks of their own, over a handle on the session's JSON-RPC link; the
+outcome of a call comes back to the actor as a message, and the actor records
+it in the session's health in the order the outcomes arrive. Two calls on one
+session run side by side, which the protocol allows, since each request
+carries its own identifier.
+
+After each change (a server added, removed, restarted or reloaded, a call
+outcome recorded), the actor publishes the status of every server, its
+health, and the tool index on a `watch` channel, before it answers. Reading
+the list of connections, or the tool index a conversation reads at each turn,
+takes that published state and sends the actor nothing, so a slow server
+delays neither. Principle 5 is read this way: one actor owns and mutates the
+state, the others read a copy it publishes, never the state itself.
+
+### The state of a connection, found, kept and announced {#connection-state}
+
+A connection reads in one of four states: working, needs repair (with the
+reason and the one action that repairs it), paused, or blocked by the
+organisation. Until something has found it in one of them, it reads as not
+checked yet: a neutral state, undated, whose one action is to check it, listed
+with the rest and never with what needs repair. It is neither working nor
+broken, so an installation updated from a version that kept no state shows
+nothing to repair until something has failed. The runtime finds the state;
+nobody enters it. An MCP server's state follows its health, and a session
+whose handshake passed but whose operations nothing has proven yet does not
+read as working: it keeps the working state found before, and otherwise reads
+as not checked yet. A check, a use or a failure at start replaces it with the
+state found. A token that cannot
+be obtained at start asks the user to sign in again; a session whose
+transport closes on its own is marked unreachable when it closes, not at the
+next call.
+
+The last state of each connection, its reason and the moment it was found
+are kept in `connection_states` of `system.db`. The list of connections reads
+them, so after a restart it shows what was last known, dated, before anything
+has run again. Each state kept is announced as one `RuntimeEvent` variant,
+`ConnectionStateChanged`, which the desktop relays to the window. The
+variant and its state types live in `apollia-core`, part of its public API,
+because the event carries them. An announcement sent before a reader
+subscribed is not lost to it: the reader finds the same state in the list.
+
+A connection is checked on request, in the way its kind allows, and reaches
+its own service and nothing else. A native account obtains a valid token,
+refreshed at its provider's token endpoint when it expired; a refused refresh
+asks to sign in again. A mailbox logs in on its own server; a refused login
+reads as a refused password. A folder is looked up on this machine; one that
+is gone reads as not found. An MCP server is started when it has no session,
+then tested: a fresh handshake that lists its tools proves it, and the
+read-only probe its connector declares, when it declares one, says whether
+its operations fail. A connection the organisation forbids is not reached.
+What a check finds is kept and announced like any other state.
+
+Whether a user may consent alone to the mail and the calendar depends on the
+consent settings of their organisation. When Microsoft answers that an
+administrator must approve the application, no account could connect, so
+there is none to name: the state is kept under the provider alone
+(`native:microsoft`), blocked, with the reason `admin_approval_required` and
+the address of the approval page (`adminconsent`) to copy. The first account
+of that provider to connect lifts it. A work account whose consent was
+refused (`AADSTS65004`), which Microsoft does not tell apart from an
+administrator's approval left unasked, is offered the same address to copy,
+and its connection is not marked blocked. The Microsoft consent asks for the
+user's own files (`Files.Read`), never for `Files.Read.All`, which reaches
+every file shared with the user and which consent settings more often keep for
+an administrator.
+
+### A connection in pause {#connection-pause}
+
+A user can put a connection in pause and resume it as it was. The pause is
+held by governance, beside the refusals of the policy: the connections in
+pause are kept in `paused_connections` of `governance.db` (schema v6), and the
+decision on a tool call refuses every tool of one, reading tools included,
+with the reason that it is paused. The model is told so, and the refusal is
+journaled as `paused_refused`. The policy is read first: a connection both
+forbidden and paused reads blocked by the organisation, which no resume lifts.
+A pause is read by the next decision, without a restart.
+
+A pause takes nothing away: the accesses of the agents, the configuration and
+the secrets of the connection stay as they are. An MCP server in pause is
+also stopped and its `enabled` flag in `mcp.db` switched off, so it is not
+started again, at the next start or on request.
+
+Some tools are shared by several connections, and the call says which one it
+reaches. A mailbox tool reaches the mailbox the call names, or the only one
+connected, matched whatever the case of its address; a file tool reaches the
+deepest folder that holds where its path lands, read as the tool reads it (a
+relative path from the first folder granted, `~` expanded, links followed);
+`code_context` reaches the code folder it names, or every code folder of the
+agent. The decision refuses such a call when what it reaches is in pause, and
+journals it as any other. The file tools do not rest on that decision alone,
+since a walk over a sound folder names no folder nested in it: a folder in
+pause is taken out of their sandbox, it is no root and no root that holds it
+reaches into it, so no path, link or recursive listing or search reads or
+writes in it, and a walk names nothing it found through it, nor does the
+suggestion given for a file not found. `source_search` does not search it
+either: it answers the source under `paused` and searches the others. The
+tools of a turn are built when it starts, so they read the pauses governance
+publishes again at each of their calls, as the decision does: a folder paused
+while an agent works is out from its next call. The mailbox executor refuses a paused
+mailbox at each call as well, as it refuses a forbidden one. A connection in
+pause reads paused in the list, whatever state was kept for it before.
 
 ## Connectors {#connectors}
 
@@ -520,12 +686,28 @@ damaged, is a typed error, never a crash. A CSV file that is not UTF-8 is read
 with its invalid bytes replaced, and the result says so: no encoding is
 guessed.
 
-The cost is named: `calamine` depends on `zip` 8 while the workspace carries
-`zip` 4 for the package archive and the batch export, so two major versions of
-`zip` enter every build, with five small crates under `calamine` (`atoi_simd`,
-`codepage`, `debug_unsafe`, `fast-float2`, `typed-path`) and `csv-core` under
-`csv`. `calamine` is pinned to 0.36.1, so that a new release, and the version of
-`zip` it brings, is a decision rather than an update.
+The cost is named: three major versions of `zip` enter every build. The
+workspace carries `zip` 4 for the package archive and the batch export;
+`office_oxide`, held at 0.1.11 by `pdf_oxide` 0.3.78 (see below), brings
+`zip` 8; and `calamine` 0.38 brings `zip` 9, with second majors of `nix` and
+`typed-path` under it. Small crates come with them, `atoi_simd`, `codepage` and
+`fast-float2` under `calamine` and `csv-core` under `csv`. `calamine` is pinned
+to 0.38.0, the release that bounds the reading of a malformed `.xls` (a panic
+and an allocation sized by the file header in its compound-file reader, fixed
+upstream); a new release, and the version of `zip` it brings, is a decision
+rather than an update. A panic left in that reader is still caught at its
+boundary and reported as a damaged file.
+
+`zip` 4 and 8 carry four advisories on `ZipArchive::extract` and
+`ZipStreamReader::extract` (RUSTSEC-2026-0367, 0368, 0369 and 0429: permission
+bits, links out of the destination, permissions applied through links, and an
+abort on a link entry with a huge declared size). They are accepted in
+`deny.toml` and in the `cargo audit` configuration because nothing in the tree
+calls either function: the engine store and the package reader walk an archive
+entry by entry with bounded sizes, the first reading a link by its bytes and
+refusing one that leaves the archive, the second refusing every link, and
+workbooks and office documents are read in memory. They lift when the
+workspace and `office_oxide` move to `zip` 9.
 
 The text of a PDF document is extracted in Rust by `pdf_oxide` (MIT or
 Apache-2.0), page by page, each page with its number. It is pure Rust, reads
@@ -601,32 +783,57 @@ the documents.
 
 The engine reads with one data file per language. French and English, from the
 `tessdata_fast` set (Apache-2.0), are entries of the model registry, each
-pinned by its SHA-256. They are fetched the first time a source holds a scanned
-page, once per run, by the downloader that checks every model against its
-digest; a machine without the network takes the same files from a disk through
-the model import, which accepts a language data file only when its digest is a
-pinned one. A file whose digest is not pinned is never handed to the engine.
-Until the data is there, each page that waits is listed in the state of its
-source as waiting for recognition, and is read once it arrives; a page without
-text that is not a single picture is listed as not read. No rendering engine is
-shipped: `hayro` and PDFium, the ones weighed, stay out until documents show
-the need.
+pinned by its SHA-256 and by the upstream commit it is taken at: the files come
+from the `tesseract-ocr/tessdata_fast` repository itself, at a fixed commit,
+and a weekly check downloads each pinned language from the address the
+application composes and compares it with its pinned size and digest, so that
+an address that stops answering is seen within a week. They are fetched the
+first time a source holds a scanned page, once per run, by the downloader that
+checks every model against its digest; a machine without the network takes the
+same files from a disk through the model import, which accepts a language data
+file only when its digest is a pinned one. A file whose digest is not pinned is
+never handed to the engine. Until the data is there, each page that waits is
+listed in the state of its source as waiting for recognition, and is read once
+it arrives; a page without text that is not a single picture is listed as not
+read. No rendering engine is shipped: `hayro` and PDFium, the ones weighed,
+stay out until documents show the need.
+
+Every shipped build reads scanned pages: the command-line binary and the
+desktop application, on macOS, Linux and Windows, are built with the `ocr`
+feature, and the release refuses a command-line binary whose `doctor` does not
+report recognition compiled in, and a desktop binary that does not carry the
+engine. The feature is not among the default ones, so an everyday build of the
+workspace compiles none of it.
 
 The cost is named: the C++ toolchain enters the build. Compiling the engine
-needs cmake, a C++ compiler and the network, takes one to two minutes (83
-seconds on macOS Apple Silicon, 133 seconds on Linux x64 under emulation), and
-adds 2.8 MB to the binary on macOS and 4.4 MB on Linux. The build script of
-`tesseract-rs` downloads the sources of Tesseract 5.5.2 and Leptonica 1.87.0
-from GitHub without checking a digest, keeps them with the compiled libraries
-in a folder of the home directory rather than under `target/`, and fetches two
-language files there that the product does not read. Recognition therefore sits
-behind the `ocr` feature, off by default: an everyday build compiles none of
-it, and a build that ships recognition turns it on. `tesseract-rs` is pinned to 0.4.0, since a release changes the
-sources it fetches; three crates enter the lock file, `tesseract-rs` itself and
-`aws-lc-rs` with `aws-lc-sys`, which the HTTP client of its build script brings
-and which run at build time only. `image` was already built for the PDF reader
-and adds none. The static build is measured on macOS and on Linux; it is not
-measured on Windows, where the feature stays off until it is.
+needs cmake, a C++ compiler and the two source archives, takes one to two
+minutes (83 seconds on macOS Apple Silicon, 133 seconds on Linux x64 under
+emulation), and adds about 2.5 MB to the command-line binary on macOS Apple
+Silicon and 4.4 MB on Linux x64. On Windows x64 the shipped command-line
+binary, recognition included, weighs 97.6 MB (97,638,912 bytes); the share of
+the engine in it has not been measured on its own. The build script of `tesseract-rs` keeps the
+sources of Tesseract 5.5.2 and Leptonica 1.87.0 with the compiled libraries in
+a folder of the home directory rather than under `target/`, and downloads them
+from GitHub without checking a digest when that folder does not hold them. They
+are therefore put there before the build by
+`packaging/fetch-tesseract-sources.sh`, which checks each archive against a
+pinned SHA-256 and against the upstream commit GitHub writes into it, refuses a
+mismatch, and has no way to turn either check off; the guard on downloads
+refuses a workflow in which a build with `ocr` is not preceded, in its job, by
+a call to that script. On a workstation the order is the same, the script
+first, then the build. The build script also fetches two language files the
+product does not read unless files of those names are present: the script puts
+two empty ones there, so nothing is fetched, and the product never opens them.
+`tesseract-rs` is pinned to 0.4.0, since a release changes the sources it
+expects; three crates enter the lock file, `tesseract-rs` itself and
+`aws-lc-rs` with `aws-lc-sys`, which the HTTP client of its build script
+brings. The lock file also lists `aws-lc-rs` among the dependencies of
+`rustls`, `quinn-proto` and `rustls-webpki`, but only that build script
+compiles the two: they run at build time, and no shipped binary links them.
+`image` was already built for the PDF reader and adds none. On Windows, a
+binary linked with the static C runtime gets an engine compiled against that
+runtime, through the corrected copy described below (see
+[A corrected copy of tesseract-rs](#tesseract-rs-copy)).
 
 The results of a batch are written back to the table it read, by default into
 a copy next to the original, `<name> (results YYYY-MM-DD).xlsx`, named in the
@@ -675,6 +882,34 @@ The cost is named: two crates and their small trees (`imap-proto`, `hashify`,
 `stop-token`, `async-channel`) enter every build, for a protocol whose
 servers vary in how strictly they follow it. A server that misreads a command
 answers a typed protocol error rather than a crash.
+
+### A corrected copy of tesseract-rs {#tesseract-rs-copy}
+
+The Windows binaries link the C runtime statically
+(`-C target-feature=+crt-static`), so that a machine without the Visual C++
+Redistributable runs them, and every C or C++ library linked into them has to
+be compiled against that same static runtime, with `/MT`. The build script of
+`tesseract-rs` 0.4.0 compiles Leptonica and Tesseract with `/MD` whatever the
+Rust target asks: it writes `/MD` into the release flags itself and sets
+`CMAKE_MSVC_RUNTIME_LIBRARY` to `MultiThreadedDLL`, which overrides the value
+the build environment gives. The link of a Windows build with the `ocr`
+feature then fails on runtime symbols no object provides.
+
+The crate is therefore built from a copy kept in the tree, under
+`third_party/tesseract-rs/`, through `[patch.crates-io]` in the workspace
+manifest. The copy is the published 0.4.0 byte for byte except for one change
+to its build script: when the target has `crt-static`, it passes `/MT` in the
+release and debug flags and `MultiThreaded` as the runtime library; without
+it, every value is the upstream one, so macOS and Linux build exactly what the
+published crate builds. Nothing else of the copy differs, its other defects
+included: its sources are still staged beforehand by
+`packaging/fetch-tesseract-sources.sh`. The guards that judge the code written
+here leave the copy out, since its code and prose are its authors'. The
+installer does not change.
+
+The copy is removed, with the `[patch]` entry, as soon as a published release
+of `tesseract-rs` follows `crt-static` on Windows, and the pin moves to that
+release.
 
 ## Batch export {#batch-export}
 
@@ -860,6 +1095,29 @@ system features. It is the raw binding Microsoft publishes, it has no
 dependency beyond its own linker shim, and the same version was already in the
 tree through other crates, so the lockfile gained no package. The cost is a
 block of FFI code with its own `unsafe` allowance, confined to one module.
+
+### Tools called from a package's code {#python-tool-calls}
+
+The proxy behind `ctx.tools` decides every call by the same governance as a
+call of the Chat, of a plan or of a batch item, in the same order: the policy,
+a connection in pause, the fine rules, then the consents of the agent. No code
+of a package receives that proxy today: `ctx.tools` is `None` in a tool and in
+a workflow. A workflow reaches the tools through an agent, with
+`ctx.agents.run`, and that agent runs on the engine of the Chat, which already
+decides each of its calls. The decision sits in the proxy so that the day
+`ctx.tools` is given to the code of a package, no call of that code goes
+around it.
+
+That code would run with nobody watching it, so it follows the rule of a batch
+item, and no form of consent is added for it. A refusal of the policy, of a
+rule or of a pause does not run the tool: the call raises a `RuntimeError`
+naming the tool and the reason, without its arguments, the runtime emits the
+refusal as a denied tool call, and the journal records it as for the other
+paths. A call that would ask the person is not run either: it raises
+`NeedHumanInput` carrying the approval. The workflow engine does not pause a
+run on that error, so an uncaught one ends the run as any other error does. An
+access the caller of the run granted for the run counts as a consent, as a
+batch grants the accesses of its agent for its items.
 
 ## The configuration file {#configuration-file}
 
@@ -1107,16 +1365,18 @@ empty feed rather than as an error.
 There is one installer per system. No installer exists in a second edition for
 one kind of graphics card: an edition per card made the reader choose a download
 from hardware they may not know, and tied the version of an engine to a release
-of the application. The engines an installer does not embed, the CUDA build of
-`llama-server` and the Node.js that runs tool servers, are published apart, on
+of the application. The engines an installer does not embed, the `llama-server`
+variants of the channel (`cuda-12`, `cuda-13`, `rocm`, `vulkan`, `cpu`) and the Node.js that runs tool servers, are published apart, on
 their own channel, under a manifest signed in the minisign format with a
 dedicated distribution key (see [Local inference](#local-inference)). The
 pipeline that publishes them is separate from the one that publishes the
 application and is started by hand: it takes upstream archives pinned by
 SHA-256, repackages each as zip, and signs the manifest with a key that signs
 nothing else, distinct from the key of the application updates. The registry
-of Apollia serves the manifest and the archives, and GitHub Releases mirrors
-them. An application installed from a former CUDA edition keeps updating: the
+of Apollia serves the manifest and the archives under `engines-<channel>/`,
+and the GitHub release `engines-<channel>` mirrors them under the same names;
+the runtime reads the registry first and the mirror when the registry does not
+answer, and accepts either only under the signature. An application installed from a former CUDA edition keeps updating: the
 update manifest it asks is still published, as a copy of the standard one, so
 it moves to the one installer of its system and gets the CUDA engine from the
 engine channel.

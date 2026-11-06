@@ -3,9 +3,13 @@
 //! category and a trust level, and the keyword inference that guesses a
 //! category when nothing else names one.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::enrichments::{load_builtin_enrichments, TrustLevel, TryExample};
+use crate::mcp::enrichments::{
+    load_builtin_enrichments, ConnectorEnrichment, TrustLevel, TryExample,
+};
 use crate::mcp::official::is_official_registry_entry;
 use crate::mcp::registry_client::{
     RegistryIcon, RegistryPackage, RegistryRemote, RegistryRepository, RegistryServer,
@@ -111,6 +115,39 @@ pub(super) fn infer_category(name: &str, description: Option<&str>) -> Option<St
             &[
                 "notion",
                 "confluence",
+                "wiki",
+                "obsidian",
+                "notes",
+                "google docs",
+            ],
+            "documents",
+        ),
+        (
+            &[
+                "crm",
+                "hubspot",
+                "salesforce",
+                "pipedrive",
+                "sales",
+                "marketing",
+                "newsletter",
+            ],
+            "crm",
+        ),
+        (
+            &[
+                "figma",
+                "canva",
+                "penpot",
+                "sketch",
+                "miro",
+                "ui design",
+                "graphic design",
+            ],
+            "design",
+        ),
+        (
+            &[
                 "asana",
                 "trello",
                 "todoist",
@@ -278,25 +315,36 @@ impl From<RegistryServer> for RegistryServerView {
     }
 }
 
+/// Texts keyed by locale (`"en"`, `"fr"`), as the selection declares them.
+pub type LocalizedText = HashMap<String, String>;
+
 /// UI-friendly enrichment view for a connector, keyed by package identifier.
 ///
-/// Mirrors the TypeScript `ConnectorEnrichmentView` type. The `operator_label`
-/// and `auth_help_text` are resolved to English; full locale support is handled
-/// by the i18n layer on the frontend.
+/// Mirrors the TypeScript `ConnectorEnrichmentView` type. Every text is sent
+/// in each locale the selection declares; the interface picks the one of its
+/// current language.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorEnrichmentView {
-    /// Human-readable label shown in the operator UI (English).
-    pub operator_label: String,
+    /// Human-readable label shown in the operator UI, by locale.
+    pub operator_label: LocalizedText,
+    /// Short description shown in the catalogue, by locale.
+    #[serde(default)]
+    pub description: Option<LocalizedText>,
     /// Category used for grouping in the catalogue (e.g. `"productivity"`).
     pub category: String,
-    /// Lucide icon name (e.g. `"database"`, `"globe"`).
+    /// The brand's logo by its Simple Icons name (e.g. `"stripe"`), or a
+    /// generic name for a brand the interface carries no logo of.
     pub icon_name: String,
+    /// Names of the entry in the MCP registry, the first being the one a
+    /// server added from it is named after.
+    #[serde(default)]
+    pub registry_names: Vec<String>,
     /// Trust level badge serialised as a snake_case string.
     pub trust_level: TrustLevel,
     /// URL where the user can obtain an API key, if applicable.
     pub auth_help_url: Option<String>,
-    /// Guidance shown on the authentication step (English).
-    pub auth_help_text: Option<String>,
+    /// Guidance shown on the authentication step, by locale.
+    pub auth_help_text: Option<LocalizedText>,
     /// Optional i18n key resolved by the wizard via `$t(key)`. When set, it
     /// takes precedence over `auth_help_text` and lets us ship long localised
     /// explanations in the bundled FR/EN catalogs instead of duplicating them
@@ -306,10 +354,42 @@ pub struct ConnectorEnrichmentView {
     /// Set for providers that require manual dev-portal registration (Figma).
     /// `None` for providers that support CIMD or anonymous DCR.
     pub oauth_pre_registered_client_id_env: Option<String>,
+    /// The remote server signs in with the person's account; a declared key
+    /// is then only the fallback.
+    #[serde(default)]
+    pub oauth: bool,
     /// Questions offered to try the connection, both locales kept: the
     /// interface picks the one it shows.
     #[serde(default)]
     pub examples: Vec<TryExample>,
+    /// The description of each package argument, by locale, in the order of
+    /// the entry's `packageArguments`.
+    #[serde(default)]
+    pub argument_descriptions: Vec<Option<LocalizedText>>,
+}
+
+impl From<&ConnectorEnrichment> for ConnectorEnrichmentView {
+    fn from(e: &ConnectorEnrichment) -> Self {
+        Self {
+            operator_label: e.operator_label.clone(),
+            description: e.description.clone(),
+            category: e.category.clone(),
+            icon_name: e.icon_name.clone(),
+            registry_names: e.registry_names.clone(),
+            trust_level: e.trust_level.clone(),
+            auth_help_url: e.auth_help_url.clone(),
+            auth_help_text: e.auth_help_text.clone(),
+            auth_help_i18n_key: e.auth_help_i18n_key.clone(),
+            oauth_pre_registered_client_id_env: e.oauth_pre_registered_client_id_env.clone(),
+            oauth: e.oauth,
+            examples: e.examples.clone(),
+            argument_descriptions: e
+                .package_arguments
+                .iter()
+                .map(|a| a.description.clone())
+                .collect(),
+        }
+    }
 }
 
 /// Pair of a package identifier and its enrichment view.
@@ -333,20 +413,10 @@ pub struct EnrichmentEntry {
 #[tauri::command]
 pub fn list_mcp_enrichments() -> Vec<EnrichmentEntry> {
     load_builtin_enrichments()
-        .into_iter()
+        .iter()
         .map(|e| EnrichmentEntry {
-            package_identifier: e.package_identifier,
-            enrichment: ConnectorEnrichmentView {
-                operator_label: e.operator_label.get("en").cloned().unwrap_or_default(),
-                category: e.category,
-                icon_name: e.icon_name,
-                trust_level: e.trust_level,
-                auth_help_url: e.auth_help_url,
-                auth_help_text: e.auth_help_text.and_then(|m| m.get("en").cloned()),
-                auth_help_i18n_key: e.auth_help_i18n_key,
-                oauth_pre_registered_client_id_env: e.oauth_pre_registered_client_id_env,
-                examples: e.examples,
-            },
+            package_identifier: e.package_identifier.clone(),
+            enrichment: ConnectorEnrichmentView::from(e),
         })
         .collect()
 }
@@ -384,6 +454,49 @@ mod tests {
         assert_eq!(view.version, "1.0.0");
         assert_eq!(view.website_url.as_deref(), Some("https://notion.so"));
         assert!(view.packages.is_none());
+    }
+
+    #[test]
+    fn test_the_view_of_a_selection_entry_tells_whether_it_signs_in_with_the_account() {
+        // GIVEN the selection entries of Notion, signed in with the account,
+        //       and of GitHub, keyed
+        let enrichments = crate::mcp::enrichments::compiled_enrichments();
+        let view_of = |id: &str| {
+            enrichments
+                .iter()
+                .find(|e| e.registry_names.iter().any(|n| n == id))
+                .map(ConnectorEnrichmentView::from)
+                .expect("selection entry")
+        };
+
+        // WHEN each is sent to the interface
+        let notion = serde_json::to_value(view_of("com.notion/mcp")).expect("serialises");
+        let github = serde_json::to_value(view_of("io.github.github/github-mcp-server"))
+            .expect("serialises");
+
+        // THEN the view carries the declared mode
+        assert_eq!(notion["oauth"], serde_json::json!(true));
+        assert_eq!(github["oauth"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn test_infer_category_tells_documents_sales_and_design_apart_from_tasks() {
+        // GIVEN registry entries a person looks for by what they are for
+        let cases = [
+            ("notion-pages", "Read Notion pages", "documents"),
+            ("confluence-server", "Pages of the team wiki", "documents"),
+            ("hubspot-mcp", "Contacts and deals of the CRM", "crm"),
+            ("figma-tools", "Inspect frames and components", "design"),
+            ("asana-mcp", "Create and assign tasks", "productivity"),
+        ];
+
+        for (name, description, expected) in cases {
+            // WHEN its category is inferred from its name and description
+            let category = infer_category(name, Some(description));
+
+            // THEN the usage it serves is the one named
+            assert_eq!(category.as_deref(), Some(expected), "{name}");
+        }
     }
 
     #[test]
@@ -443,5 +556,29 @@ mod tests {
         // THEN the editor's entry is official and the other community
         assert_eq!(editor.trust_level, "verified_official");
         assert_eq!(account.trust_level, "community");
+    }
+
+    #[test]
+    fn test_list_mcp_enrichments_sends_the_label_and_help_in_both_locales() {
+        // GIVEN the selection compiled into the application, where Brave Search
+        // is named "Recherche Brave" in French
+
+        // WHEN the interface lists the enrichments
+        let entries = serde_json::to_value(list_mcp_enrichments()).unwrap();
+
+        // THEN the label and the authentication help arrive keyed by locale
+        let brave = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["package_identifier"] == "@modelcontextprotocol/server-brave-search")
+            .unwrap();
+        assert_eq!(
+            brave["enrichment"]["operator_label"]["fr"],
+            "Recherche Brave"
+        );
+        assert_eq!(brave["enrichment"]["operator_label"]["en"], "Brave Search");
+        assert!(brave["enrichment"]["auth_help_text"]["fr"].is_string());
+        assert!(brave["enrichment"]["auth_help_text"]["en"].is_string());
     }
 }

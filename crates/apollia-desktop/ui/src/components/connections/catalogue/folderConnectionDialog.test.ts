@@ -20,9 +20,8 @@ vi.hoisted(() => {
 
 import "$lib/i18n";
 import fr from "$lib/i18n/fr.json";
-import FolderConnectionDialog from "./FolderConnectionDialog.svelte";
-import CatalogueSheet from "./CatalogueSheet.svelte";
-import ConnectionSummaryDetail from "../detail/ConnectionSummaryDetail.svelte";
+import AddConnectionWindow from "./AddConnectionWindow.svelte";
+import ConnectionCard from "../detail/ConnectionCard.svelte";
 import type { Connection } from "$lib/types";
 
 const noop = () => {};
@@ -37,6 +36,10 @@ const FOLDER: Connection = {
   remote: false,
   official: false,
   state: "connected",
+  status: "working",
+  reason: null,
+  checkedAt: null,
+  package: null,
   tools: [
     { id: "file_read", family: "read", familySource: "builtin", prechecked: true },
     { id: "file_edit", family: "write_or_delete", familySource: "builtin", prechecked: false },
@@ -55,81 +58,54 @@ async function french(): Promise<void> {
   await waitLocale("fr");
 }
 
-describe("the folder in the selection", () => {
-  test("the add sheet offers Folder first, built in", async () => {
-    // GIVEN the add sheet, in French
+describe("the folder in the add window", () => {
+  test("the add window offers Folder under files, and the mailbox under communication", async () => {
+    // GIVEN the add window, in French
     await french();
 
     // WHEN it is rendered
-    const html = renderToString(CatalogueSheet as never, {
+    const html = renderToString(AddConnectionWindow as never, {
       props: {
-        open: true, registry: [], agents: [], installedNames: new Set(), installedByPackage: new Map(),
-        registryLoading: false, catalogueTier: "curated", onclose: noop, onconnect: noop,
-        onmanage: noop, oninstalled: noop, onaddnative: noop, onaddfolder: noop,
+        open: true, query: "", chosen: null, selection: [], publicEntries: [], failures: [],
+        catalogueTier: "curated", loading: false, agents: [], installedNames: new Set(),
+        installedByPackage: new Map(), onclose: noop, onchoose: noop, onback: noop,
+        onexploreall: noop, onadd: noop, onmanage: noop,
+        adding: false, resume: null, onadded: noop, ondone: noop, onsignin: noop,
+        ontry: noop, ontryprompt: noop, onopenrule: noop,
       } as never,
     }).body;
+    const files = html.slice(html.indexOf('data-testid="catalogue-usage-files"'));
+    const communication = html.slice(
+      html.indexOf('data-testid="catalogue-usage-communication"'),
+      html.indexOf('data-testid="catalogue-usage-documents"'),
+    );
 
-    // THEN "Dossier" comes before the native accounts, with the "Intégrée" badge
-    expect(html).toContain('data-testid="catalogue-folder"');
-    expect(html.indexOf("catalogue-folder")).toBeLessThan(html.indexOf("catalogue-native-google"));
+    // THEN "Dossier" sits under "Fichiers", the mailbox under "Communication"
+    expect(files).toContain('data-testid="catalogue-folder"');
+    expect(communication).toContain('data-testid="catalogue-native-mailbox"');
+    expect(text(html)).toContain(fr.connections.usage.files);
     expect(text(html)).toContain(fr.connections.folder.name);
-    expect(text(html)).toContain(fr.connections.badge_builtin);
   });
 });
 
-describe("the folder added", () => {
-  test("the dialog names the folder, its path and what agents may do there", async () => {
-    // GIVEN a folder just added, in French
-    await french();
-
-    // WHEN the dialog is rendered
-    const html = renderToString(FolderConnectionDialog as never, {
-      props: { open: true, outcome: { kind: "added", connection: FOLDER }, onclose: noop, onchooseanother: noop, onopenrule: noop } as never,
-    }).body;
-    const words = text(html);
-
-    // THEN the title, the readable path, both abilities and both buttons are there
-    expect(words).toContain(fr.connections.folder.added_title.replace("{name}", "Clients"));
-    expect(words).toContain("Documents › Clients");
-    expect(words).toContain(fr.connections.folder.ability_read);
-    expect(words).toContain(fr.connections.folder.ability_write);
-    expect(html).toContain('data-testid="folder-connection-choose-another"');
-    expect(html).toContain('data-testid="folder-connection-done"');
-  });
-
-  test("a refusal shows the one refusal box", async () => {
-    // GIVEN a folder refused by the organisation
-    await french();
-    const outcome = {
-      kind: "refused",
-      refusal: { code: "policy_unreadable", by: "organisation", reason: "the connection policy could not be read" },
-    };
-
-    // WHEN the dialog is rendered
-    const html = renderToString(FolderConnectionDialog as never, {
-      props: { open: true, outcome, onclose: noop, onchooseanother: noop, onopenrule: noop } as never,
-    }).body;
-
-    // THEN the refusal box is shown, not the folder
-    expect(html).toContain('data-testid="connection-refusal"');
-    expect(html).not.toContain('data-testid="folder-connection-added"');
-  });
-
-  test("the page of a folder gives its path and a way to remove it", async () => {
+describe("the folder connection", () => {
+  test("the card of a folder gives its path and a way to remove it", async () => {
     // GIVEN a folder connection, in French
     await french();
+    const handlers = { onupdated: noop, onremoved: noop, onreload: noop, onrepair: noop };
 
-    // WHEN its page is rendered, and the page of a mailbox
-    const folderPage = renderToString(ConnectionSummaryDetail as never, {
-      props: { connection: FOLDER, label: "Clients" } as never,
+    // WHEN its card is rendered, and the card of a mailbox
+    const folderPage = renderToString(ConnectionCard as never, {
+      props: { connection: FOLDER, label: "Clients", ...handlers } as never,
     }).body;
-    const mailPage = renderToString(ConnectionSummaryDetail as never, {
-      props: { connection: { ...FOLDER, id: "imap:ada@example.com", kind: "imap", path: undefined, account: "ada@example.com" }, label: "Mail" } as never,
+    const mailPage = renderToString(ConnectionCard as never, {
+      props: { connection: { ...FOLDER, id: "imap:ada@example.com", kind: "imap", path: undefined, account: "ada@example.com" }, label: "Mail", ...handlers } as never,
     }).body;
 
-    // THEN only the folder carries its path and the remove button
+    // THEN the folder carries its path, the mailbox its address, and both the same Remove
     expect(text(folderPage)).toContain("/Users/ada/Documents/Clients");
-    expect(folderPage).toContain('data-testid="connection-folder-remove"');
-    expect(mailPage).not.toContain('data-testid="connection-folder-remove"');
+    expect(text(mailPage)).toContain("ada@example.com");
+    expect(folderPage).toContain('data-testid="connection-remove-btn"');
+    expect(mailPage).toContain('data-testid="connection-remove-btn"');
   });
 });

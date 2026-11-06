@@ -5,6 +5,292 @@ All notable changes to Apollia OS are documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning 2.0.0](https://semver.org/).
 
+## [0.3.1] - 2026-11-06
+
+Changes since `0.3.0`. Connections are rebuilt from the screen to the engine:
+one page shows every connection with its true state, one window adds any of
+them, and a connection is checked, repaired, paused or removed in one gesture
+from its card. Google Workspace works as in 0.3.0; only the place where its
+OAuth client is entered has moved, into developer mode. The engine now
+follows the graphics card of the machine, and a source reads scanned pages
+and pictures on every system.
+
+### Highlights
+
+- **One page for every connection.** Accounts, mailboxes, folders and
+  services share one list and one card. Each connection says whether it works,
+  why not, and the one action that repairs it; what needs repair comes first.
+- **One window to add a connection.** A single search answers from Apollia's
+  selection, this computer, the public catalogue and a service's address, and
+  every addition goes through the same three steps: connect it, choose which
+  agents may use it, try it.
+- **Pause and remove for real.** A pause keeps every access and runs nothing
+  until it is resumed; a removal says what goes with the connection before it
+  erases it.
+- **Services start when they are needed.** MCP servers start at their first
+  call and stop after a while without one, and Apollia's launch no longer waits
+  for any of them.
+- **Microsoft asks for less.** Apollia asks for your own OneDrive files only,
+  reads only the folders and files you choose, and guides a work account whose
+  organisation requires an administrator's approval.
+- **The engine that suits the card.** The runtime probes the cards and their
+  driver and rates every `llama-server` variant of the channel (`cuda-12`,
+  `cuda-13`, `rocm`, `vulkan`, `cpu`); the AI screen, **Engines** and
+  `apollia-os engine` offer the recommended one, and a choice applies the
+  next time a model is loaded.
+- **Scanned pages and pictures are read.** A scanned PDF page and a `.png`,
+  `.jpg` or `.tiff` file are found by the search like any other text, with
+  the recognition engine carried by the command-line binary and the desktop
+  application on macOS, Linux and Windows.
+
+### Added
+
+#### The Connections page
+
+- A list and a card side by side, with a search and a filter by kind
+  (accounts, mailboxes, services, folders). The page keeps its selection, its
+  search and its filter when you leave it and come back. Each account is a line
+  of its own, and a connection a package installed says which package brought
+  it.
+- Five states: **Working**, **Needs repair** with its reason in plain words,
+  **Paused**, **Blocked by your organisation**, and **Not checked yet** for a
+  connection nothing has tried, listed with the others rather than at the top.
+  A state found by a check, a use or a sign-in says when it was found;
+  **Paused** and **Not checked yet** carry no time. A state is kept across restarts and reaches the page as soon
+  as it changes.
+- **Check** tries a connection of any kind on request: an account signs in, a
+  mailbox opens, a folder is looked for, a service is started and asked for its
+  tools.
+- The one action that repairs: **Sign in again**, **Enter the password**,
+  **Choose the folder**, **Start again** or **See the rule**. A folder chosen
+  again keeps its connection and its agents' accesses, and is searched in its
+  new content at once: nothing from the former folder comes back in an answer,
+  even while the new one is read.
+- **Pause** and **Resume** on every kind of connection. While paused, its
+  agents keep their accesses, a call of one of its tools is refused with the
+  reason and written in the Activity log, a mailbox's as any other, a folder
+  is neither read, listed, written nor searched, even inside another folder
+  the agent holds (a file tool or the context of a code folder in it is
+  refused the same way, a listing or search of the folder around it leaves it
+  out, a file not found is never pointed to one in it, and the search of
+  sources says it is paused, all from the agent's next action, even in a
+  conversation under way), the agent's sheet marks the access **Paused**, and a service is
+  stopped and never started again, at launch or on request. The pause holds across a restart. A resume shows on
+  the list and the card at once.
+- **Remove** lists what goes with the connection, its settings, the files
+  installed for it, its sign-in, its secrets, the tools each agent held through
+  it, for a folder its source and index, and for a Microsoft account the
+  OneDrive folders and files chosen for it, then erases them and names
+  anything it could not erase.
+- **Agents that use it** on the card, and **Give to an agent** to give a
+  connection to several agents at once, each gift written in the Activity log.
+  An agent on the default access keeps it when it is given a connection: the
+  connection is added on top, marked **On top** on its sheet.
+- **Activity over 7 days** on the card, when it was last used and how many
+  actions each agent took with it, and **See in the journal**, which opens the
+  Activity log on that connection alone. A mailbox shares its tools with every
+  other mailbox, so its activity is not counted on its own.
+- The tools of a service added outside Apollia's selection can be given
+  another action family with **Change**. The choice prevails over what the
+  server declares, is kept across restarts until the service is removed, and
+  is written in the Activity log with the family before and after.
+- The technical detail of a connection, its identifier, origin and raw
+  reason, shows in developer mode only.
+
+#### Adding a connection
+
+- One window with a single search, answered in four groups: **Offered by
+  Apollia**, **On this computer** (a folder, a mailbox), **Public catalogue**,
+  asked only on **Explore all** and marked **Not verified**, and **Connect a
+  service by its address**. The card of each entry says what it asks before
+  anything is added.
+- One flow for every kind, in three steps: **Connect**, **Who can use it**,
+  where Apollia, the agent of the Chat, comes checked and the other agents can
+  be checked, and **Try it**. Cancelling before the connection exists brings
+  the search back.
+- A service reached by its address takes a name, the address and, when it
+  asks for one, a key. Its transport, a local command, headers and variables
+  are in developer mode.
+- Apollia's selection is read from a signed online index when the window
+  opens, so an entry can be added or corrected without a new version. An index
+  whose signature does not hold is refused, and the copy kept on the computer
+  or the selection built into the application is shown instead.
+  `mcp.catalogue_enabled = false` turns the online index off, and
+  `mcp.catalogue_url` and `mcp.catalogue_mirror_url` name where it is read.
+- The selection reads in the language of the interface. A service added from
+  it is named after its entry, so a translated label no longer changes the
+  accesses its agents hold.
+
+#### Chat
+
+- When a request needs a connection that is not there, Apollia says so and
+  offers **Connect** it in the conversation; when it is connected but not
+  given to Apollia, it offers **Allow Apollia**. Once done, the request is
+  played again. Apollia looks this up through a tool of its own, on this
+  computer, against its selection; nothing is added to the prompt, and an
+  entry the organisation policy would refuse is never offered.
+- The **@** picker offers the resources of a service that is asleep, from the
+  list it last gave. Reading one starts the service. A paused service is never
+  started, and its resources are not offered.
+
+#### Microsoft 365
+
+- **OneDrive files Apollia can read** on the card of a Microsoft account:
+  browse the drive, choose folders and files, remove a choice. Agents read
+  only inside what is chosen, and nothing at all until something is.
+- When a work account's organisation requires an administrator to approve
+  Apollia, the sign-in window shows the approval address and a request
+  written for the administrator, both ready to copy, and the connection reads
+  **Blocked by your organisation**. Its card in **Connections** shows the same
+  address and request, with **Retry** to connect again, in place of **See the
+  rule**. The block lifts as soon as an account connects.
+
+#### API
+
+- `GET /api/v1/connections/{id}/agents` and `POST /api/v1/connections/{id}/grants`
+  read and give the agents of a connection.
+- `POST /api/v1/connections/{id}/check`, `POST /api/v1/connections/{id}/pause`
+  and `POST /api/v1/connections/{id}/resume`.
+- `DELETE /api/v1/connections/{id}` removes a connection of any kind and
+  answers what was erased; `?dry_run=1` erases nothing and answers what would
+  be.
+- `PUT /api/v1/connections/{id}/tools/{tool}/family` gives a tool another
+  family.
+- `tool_prefix` on `GET /api/v1/audit/journal` and `GET /api/v1/audit/export`,
+  and `GET /api/v1/audit/activity`, which counts what each agent did with a
+  connection.
+- `GET /api/v1/connectors/onedrive/{account_id}/choices`, `.../browse` and
+  `.../choices/{item_id}` read and change the OneDrive choices of an account.
+- A `ConnectionStateChanged` event announces each state found.
+
+#### The engine that suits the card
+
+- The engine channel offers `llama-server` in `cuda-12`, `cuda-13`, `rocm`,
+  `vulkan` and `cpu`. The runtime probes the cards and their driver, rates
+  each variant recommended, compatible or incompatible with its reason, and
+  the AI screen and **Engines** offer the recommended one. A CUDA package
+  carries the CUDA runtime next to the server, on Linux as on Windows, so the
+  NVIDIA driver is all a machine needs.
+- `apollia-os engine list`, `check`, `use`, `channel`, `install`, `import`
+  and `remove --confirm`: the cards, the variants and their verdict, the
+  engine in service, an installation online or from a directory copied from
+  a release, and the choice of `engines.gguf`, which now takes `cuda-12`,
+  `cuda-13` and `rocm` and applies the next time a model is loaded.
+- The runtime reads the engine channel from the registry of Apollia, then
+  from its GitHub Releases mirror when the registry does not answer; the
+  signature of the manifest decides in both cases.
+- A how-to, **Enable CUDA on a server**, online and without a network.
+
+#### Scanned pages and pictures
+
+- A source now reads scanned pages and pictures: a PDF page that is a single
+  scanned image, and `.png`, `.jpg` and `.tiff` files, are recognised and
+  found by the search like any other text. The command-line binary and the
+  desktop application carry the recognition engine on macOS, Linux and
+  Windows, and nothing has to be installed beside them.
+- The reading language downloads the first time a source holds a scanned
+  page, checked against its pinned digest. Without a network, it is imported
+  from a file with **Import a reading language** on the AI screen, or copied
+  into the `tessdata/` folder of the models directory on a server; the pages
+  waiting for it are read again without a restart.
+- The pages waiting for recognition, and those that cannot be read, show on
+  the source in the agent's sheet and in `apollia-os source show`.
+- `apollia-os doctor` reports whether recognition is compiled in and how many
+  reading languages are in place.
+
+### Changed
+
+- MCP servers start at the first call of one of their tools and stop after
+  `mcp.idle_stop_secs` without a call, 900 seconds by default (60 to 86400),
+  to start again at the next call. Apollia's launch waits for none of them; a
+  server whose tools are not known yet is started at launch in the background
+  to learn them. What a server last published is kept in `mcp.db`, so its
+  tools stay offered while it sleeps and survive a restart.
+- `mcp.tool_loading` is read when Apollia starts and no longer applies while
+  it runs: restart Apollia after changing it. `mcp.idle_stop_secs` is read at
+  start too.
+- An MCP tool found through `tool_search` is decided on the family its server
+  declares, on every path that calls it, as a tool declared up front already
+  was. A tool its server declares read-only is therefore no longer
+  unclassified in deferred loading: it runs without asking, or offers
+  **Always for this agent** when it reads an account.
+- Microsoft accounts ask for `Files.Read`, your own files, instead of
+  `Files.Read.All`, and Apollia holds the limit of the chosen OneDrive folders
+  and files on the computer.
+- A value typed as a header when a service is added or edited, and a value of
+  a variable whose name marks it secret, goes to the secret store; the
+  settings of the connection keep only a reference to it, and the raw settings
+  read back through the API mask it.
+- The OAuth client of an account provider, your own Google client or your own
+  Microsoft registration, is entered in developer mode, in the technical
+  detail of the card.
+- A connection the organisation policy forbids reads **Blocked by your
+  organisation**, and **See the rule** on its card opens **Permissions**, in
+  place of a separate list.
+- `confirm()` dialogs on the Connections page are replaced by confirmations
+  in the page.
+
+- The application menu keeps its width on every screen, the chat included,
+  and follows the one choice you make with its toggle; it no longer folds into
+  a rail by itself when the chat is shown. Its icons are drawn at one size and
+  one stroke, and the breadcrumb and the command palette use the same ones.
+- The embedded llama.cpp engine moves to build b12064: eleven more model
+  architectures are offered for chat, and five more tokenizers load.
+
+### Fixed
+
+- A chat that used a tool of a connection on an OpenAI-compatible engine that
+  checks tool names, such as MLX, failed with "missing field `error`". Tools
+  are now sent under a name the engine accepts, and their calls come back
+  under their own.
+- **Web Browser** is back in the selection of connections, and a connection
+  added by its address can be given to an agent like any other.
+- On Windows, the memory of the graphics card is read in full: a card with
+  more than 4 GB was taken for a 4 GB one, and models were sized for it.
+- On Windows, a factory reset is carried out at the next start, before
+  anything opens a file, instead of stopping half way on a file in use.
+- A package shipped with Apollia is installed again when its content changed
+  under the same version, so a fix to a shipped package reaches a machine
+  that already had that version.
+- The agent workshop leaves a small local model room for its answer: the
+  creation of an agent no longer fails on "the answer is not JSON" with a 4B
+  model.
+- A deletion of a calendar event or a task says that it requires approval,
+  in the interface and to the model, instead of promising a confirmation
+  phrase the approval card never asks for.
+- The Google card and the help of `llm setup --local` no longer speak of
+  v0.1 or of a cloud provider.
+- The certificate roots and their verifier take the distrust of the emSign
+  intermediates, and the network dependencies take their security fixes.
+- A damaged or truncated `.xls` workbook in a source no longer brings the
+  indexing down: it is reported as a damaged file, and its reading no longer
+  allocates whatever its header claims.
+
+### Upgrading from 0.3.0
+
+- **OneDrive reads nothing until you choose.** A Microsoft account already
+  connected keeps working for mail and calendar, but its agents read no
+  OneDrive file until folders or files are chosen on its card, under
+  **OneDrive files Apollia can read**.
+- **Secrets move to the secret store.** At the first launch of 0.3.1, the
+  header values and secret variable values that 0.3.0 kept in the settings of
+  an MCP server are moved to the secret store, and each server moved is
+  logged. Nothing has to be typed again.
+- **Restart after changing `mcp.tool_loading`.** A change saved while Apollia
+  runs waits for the next start.
+- **Google Workspace is unchanged.** It still needs your own OAuth client;
+  its section now shows in developer mode.
+- **0.3.1 is the first version that reads the engine channel.** A 0.3.0
+  copy cannot verify it and keeps its embedded engine; the variants above
+  reach a machine once it runs 0.3.1.
+- **`LLAMA_ARG_*` no longer reaches the engine.** The daemon launches
+  `llama-server` without them; pass extra engine flags through
+  `APOLLIA_LLAMA_EXTRA_ARGS`.
+- **No way back to 0.3.0.** 0.3.1 raises the schema of several databases under
+  `~/.apollia` at its first start, and 0.3.0 refuses to open a database whose
+  schema is newer than its own. Keep a copy of the folder before upgrading if
+  you may go back.
+
 ## [0.3.0] - 2026-10-20
 
 The desktop application is named Apollia Desktop from this version on.
@@ -735,9 +1021,20 @@ of unknown family is removed and will be asked again.
 #### SDK contract
 
 - `ctx.user_context` no longer exists. Read the profile through `ctx.profile`,
-  which answers only when the agent's profile source is checked.
-- `@tool` no longer takes `dangerous`; declare the action family that says
-  what the tool does.
+  which answers only when the agent's profile source is checked: declare
+  `sources = ["profile"]` under `[agents.defaults]` of the package, or let
+  the user check the source on the agent sheet; `ctx.profile` is `None`
+  otherwise.
+- `@tool` no longer takes `dangerous`, and `action` is required: one of
+  `read`, `read_personal`, `write_or_delete`, `send_external` or
+  `execute_code`. Every family except `read` is sensitive, so a former
+  `dangerous=True` becomes the family that says what the tool does, for
+  example `action="write_or_delete"`.
+- `ctx.secrets`, `ctx.datasources` and `ctx.templates` read nothing: the
+  `secrets`, `datasources` and `templates` of the former `@agent` decorator
+  have no counterpart in `apollia.toml`. `get` returns `None` on
+  `ctx.secrets` and raises `FileNotFoundError` on the other two. Pass the
+  value as an argument of the tool or the workflow instead.
 - A package manifest (`apollia.toml` of a package) refuses any key it does not
   know. Fix the key the error names.
 - An agent's tools, agents and workflows are an access list: a tool the agent
@@ -1188,6 +1485,7 @@ cycle, before anything was published.
   are on no Apollia code path. Lift condition: the pyo3 0.29 migration.
 - Private vulnerability reporting via GitHub Security Advisories.
 
-[0.3.0]: https://github.com/Apollia-OS/apollia-os/compare/v0.2.0-preview...main
+[0.3.1]: https://github.com/Apollia-OS/apollia-os/compare/v0.3.0...main
+[0.3.0]: https://github.com/Apollia-OS/apollia-os/compare/v0.2.0-preview...v0.3.0
 [0.2.0-preview]: https://github.com/Apollia-OS/apollia-os/compare/v0.1.0-preview...v0.2.0-preview
 [0.1.0-preview]: https://github.com/Apollia-OS/apollia-os/releases/tag/v0.1.0-preview

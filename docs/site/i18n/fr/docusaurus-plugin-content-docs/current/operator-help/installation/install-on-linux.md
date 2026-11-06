@@ -64,10 +64,12 @@ apollia-os --version
 apollia-os doctor
 ```
 
-`doctor` vérifie le répertoire de données, le fichier de configuration, les deux
-bases, le répertoire des modèles, Python, la posture de bac à sable et la socket
-du runtime. Il ne détecte **pas** votre GPU. La commande qui rapporte le matériel
-détecté est une autre, et elle a besoin du daemon démarré :
+`doctor` vérifie le répertoire de données, le fichier de configuration, les
+deux bases, le répertoire des modèles, `recognition` (si cette version lit les
+pages scannées, et quelles langues de lecture sont en place), Python, la
+posture de bac à sable et la socket du runtime. Il ne détecte **pas** votre
+GPU. La commande qui rapporte le matériel détecté est une autre, et elle a
+besoin du daemon démarré :
 
 ```sh
 apollia-os model hardware --json
@@ -100,10 +102,11 @@ régler : avec un pilote qui fonctionne, le moteur utilise la carte. Le bundle
 
 **Une carte NVIDIA peut aller plus loin.** Il y a un installeur par système, et
 aucun installeur à part pour les cartes NVIDIA. Quand l'application détecte une
-telle carte, son écran IA propose le moteur accéléré, **Accélérer avec votre
-carte NVIDIA** : un clic le télécharge, une fois sa signature vérifiée, et le
-prochain chargement d'un modèle l'utilise. Sous Linux, ce moteur s'appuie sur
-les bibliothèques CUDA de la machine.
+telle carte, son écran IA propose le moteur accéléré qui convient à la carte et
+à son pilote, **Accélérer avec le moteur CUDA 13** par exemple : un clic le
+télécharge, une fois sa signature vérifiée, et le prochain chargement d'un
+modèle l'utilise. Le moteur porte les bibliothèques CUDA dont il a besoin : la
+machine n'a à fournir que le pilote NVIDIA.
 
 **La dictée tourne sur le processeur dans les paquets de bureau.** La
 reconnaissance vocale tourne dans le sidecar `apollia-runner`, bâti sur

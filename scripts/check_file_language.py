@@ -250,6 +250,9 @@ OUT_OF_SCOPE = (
     # Byte fixtures for the fuzz targets: their whole purpose is to carry text
     # no parser expects, accents included.
     "fuzz/seeds/",
+    # A published crate copied byte for byte: its text is its authors', and
+    # the accented lines the detector reads as French are Turkish test data.
+    "third_party/tesseract-rs/",
 )
 
 # Documents written in French on purpose. `NEVER mix` is not `NEVER French`,
@@ -270,6 +273,8 @@ FRENCH_DOCUMENTS = (
 # after the page it illustrates.
 BILINGUAL_DATA = (
     "crates/apollia-desktop/src/mcp/enrichments.json",
+    # The connection catalogue as published: the same entries, one label per locale.
+    "crates/apollia-desktop/src/mcp/remote_catalogue/fixtures/",
     "crates/apollia-desktop/ui/src/lib/i18n/en.json",
     "crates/apollia-desktop/ui/src/lib/i18n/fr.json",
     "crates/apollia-desktop/ui/src/lib/i18n/glossary.json",
@@ -345,6 +350,7 @@ FRENCH_DATA: dict[str, int] = {
     # The accented French words recognition must give back from a scanned page.
     "crates/apollia-sources/tests/ocr_reader.rs": 9,
     "crates/apollia-sources/src/indexer/tests/recognition.rs": 2,
+    "crates/apollia-sources/src/indexer/tests/arrival.rs": 1,
     "crates/apollia-cli/src/commands/mod.rs": 2,
     "crates/apollia-core/src/observability.rs": 1,
     "crates/apollia-core/src/utils.rs": 2,

@@ -10,7 +10,10 @@ use apollia_core::events::{subscribe_resilient, ResilientReceiver};
 /// an MLX model elsewhere is refused with its reason by the router. Both read
 /// `[llm.guardrails]` from `guardrails_file` at every launch, under the
 /// settings `org_policy` fixes.
-pub(in crate::supervisor) fn start_local_engines(
+///
+/// Locating the llama-server binary rates the machine, which runs the
+/// installed engine builds: it is done off the async workers.
+pub(in crate::supervisor) async fn start_local_engines(
     system_db_path: &std::path::Path,
     guardrails_file: std::path::PathBuf,
     event_sender: &EventBusSender,
@@ -19,14 +22,24 @@ pub(in crate::supervisor) fn start_local_engines(
     Option<Arc<crate::llama_server::LlamaServerSupervisor>>,
     Option<Arc<crate::mlx_engine::MlxEngineSupervisor>>,
 ) {
-    let llama = crate::llama_server::LlamaServerSupervisor::new(
-        crate::llama_server::LlamaServerConfig::default(),
-        Some(system_db_path.to_path_buf()),
-        Some(event_sender.clone()),
-        Some(guardrails_file.clone()),
+    let (system_db, events, file, imposed) = (
+        system_db_path.to_path_buf(),
+        event_sender.clone(),
+        guardrails_file.clone(),
         org_policy.imposed_settings(),
-    )
-    .ok();
+    );
+    let llama = tokio::task::spawn_blocking(move || {
+        crate::llama_server::LlamaServerSupervisor::new(
+            crate::llama_server::LlamaServerConfig::default(),
+            Some(system_db),
+            Some(events),
+            Some(file),
+            imposed,
+        )
+    })
+    .await
+    .ok()
+    .and_then(Result::ok);
     if let Some(supervisor) = &llama {
         Arc::clone(supervisor).spawn_supervision();
     }
@@ -258,24 +271,34 @@ pub(in crate::supervisor) fn migrate_mcp_from_toml(
 
 /// Start the MCP client manager (always, even when the server list is empty)
 /// and spawn the legacy `mcp.toml` config watcher when that file still exists.
+///
+/// No server is started here: each one starts at the first call of one of
+/// its tools, and stops after `idle_stop` without a call, so a server that
+/// does not answer never delays the API.
 pub(in crate::supervisor) async fn start_mcp_manager(
     server_configs: Vec<apollia_mcp::config::McpServerConfig>,
     tool_registry_handle: &ToolRegistryHandle,
     event_sender: &EventBusSender,
-    mcp_config_path: &std::path::Path,
-    loading_mode: LoadingMode,
+    data_dir: &std::path::Path,
+    (loading_mode, idle_stop): (LoadingMode, std::time::Duration),
 ) -> Option<McpClientManagerHandle> {
+    let mcp_config_path = data_dir.join("mcp.toml");
+    let mcp_db_path = data_dir.join(apollia_core::paths::DataFile::Mcp.file_name());
     // Always start the McpClientManager actor, even when the server list is
     // empty. Without this, the desktop "Add MCP server" flow cannot register a
     // first server: every write route checks require_mcp_handle and returns
     // 503 "MCP is not configured" until at least one server exists in mcp.db at
     // boot, a chicken-and-egg trap for first-time users.
     let server_count = server_configs.len();
-    match McpClientManagerHandle::start(
+    match McpClientManagerHandle::start_keeping_tools(
         server_configs,
         tool_registry_handle,
         Some(event_sender.clone()),
         loading_mode,
+        apollia_mcp::manager::OnDemand {
+            tool_store: apollia_mcp::tool_store::ToolIndexStore::new(mcp_db_path),
+            idle_stop: Some(idle_stop),
+        },
     )
     .await
     {
@@ -284,7 +307,7 @@ pub(in crate::supervisor) async fn start_mcp_manager(
             let total_tools: usize = status.iter().map(|s| s.tools_count).sum();
             info!(
                 servers = server_count,
-                connected = status.len(),
+                connected = status.iter().filter(|s| s.connected).count(),
                 tools = total_tools,
                 "mcp.bootstrap.completed"
             );
@@ -293,7 +316,7 @@ pub(in crate::supervisor) async fn start_mcp_manager(
             // deprecated migration path kept for back-compat.
             if mcp_config_path.exists() {
                 apollia_triggers::handlers::config_watch::McpConfigWatcher::spawn(
-                    mcp_config_path.to_path_buf(),
+                    mcp_config_path,
                     handle.clone(),
                 );
             }
@@ -447,3 +470,7 @@ pub(in crate::supervisor) fn seed_default_desktop_channel_if_needed(
     }
     info!("notification.seed.completed");
 }
+
+#[cfg(test)]
+#[path = "bootstrap_mcp_tests.rs"]
+mod mcp_tests;

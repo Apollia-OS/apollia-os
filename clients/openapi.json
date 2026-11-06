@@ -7,7 +7,7 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "0.3.0"
+    "version": "0.3.1"
   },
   "paths": {
     "/api/v1/a2a/agents": {
@@ -1688,6 +1688,77 @@
         }
       }
     },
+    "/api/v1/audit/activity": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "`GET /api/v1/audit/activity`: the last use of the tools of a connection\nand the number of actions each agent took with them over a period.",
+        "description": "An action is a tool call of the connection that ended, successfully or\nnot. The journal is read whole for the period, without an index. 400 when\nthe prefix is missing or a bound cannot be read, 503 when the journal is\nnot configured.",
+        "operationId": "get_connection_activity",
+        "parameters": [
+          {
+            "name": "tool_prefix",
+            "in": "query",
+            "description": "The prefix the tools of the connection share, such as `mcp:notion/`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Start of the period, included: a day (`YYYY-MM-DD`, UTC) or an RFC 3339\ninstant. Defaults to seven days before the request.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "End of the period, excluded: a day or an RFC 3339 instant. Defaults to\nno end.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The last use and the actions per agent of the connection over the period",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionActivityResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No tool prefix, or a bound of the period that cannot be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Audit journal not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/audit/anchor": {
       "get": {
         "tags": [
@@ -1798,6 +1869,15 @@
             "name": "result",
             "in": "query",
             "description": "Comma-separated results: `success`, `failure`, `refused`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tool_prefix",
+            "in": "query",
+            "description": "Comma-separated prefixes of tool names, such as `mcp:notion/`. When\nset, the export holds the entries whose tool starts with one of them.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1933,6 +2013,15 @@
             "name": "result",
             "in": "query",
             "description": "Comma-separated results: `success`, `failure`, `refused`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tool_prefix",
+            "in": "query",
+            "description": "Comma-separated prefixes of tool names, such as `mcp:notion/` for the tools of one connection. When set, only the entries whose tool starts with one of them are paged.",
             "required": false,
             "schema": {
               "type": "string"
@@ -3524,6 +3613,96 @@
       }
     },
     "/api/v1/connections/folders/{id}": {
+      "put": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "`PUT /api/v1/connections/folders/{id}`: point a folder connection at\nanother folder, its identifier, label and accesses kept.",
+        "operationId": "repoint_folder_connection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Identifier of the stored folder, the part of the connection identifier after `folder:`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepointFolderBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The connection now points at the folder; the connection it is",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The path is not a folder of this machine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused by the connection admission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No folder connection has this identifier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another connection already holds the folder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "system.db could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "connections"
@@ -3587,6 +3766,434 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FolderErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/agents": {
+      "get": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "`GET /api/v1/connections/{id}/agents`: the agents that hold at least one\ntool of the connection.",
+        "operationId": "get_connection_agents",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connection identifier, as `GET /api/v1/connections` lists it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The agents holding tools of the connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionAgents"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Connection not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/check": {
+      "post": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "`POST /api/v1/connections/{id}/check`: check one connection now, and\nanswer it with the state found, dated.",
+        "operationId": "check_connection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connection identifier, as `GET /api/v1/connections` lists it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; the read-only probe of an MCP server",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CheckConnectionBody"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Checked; the connection with the state found, kept and announced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Connection not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store could not be read or written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "MCP not configured, for an MCP server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/grants": {
+      "post": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "`POST /api/v1/connections/{id}/grants`: grant tools of the connection to\nseveral agents at once. Every agent's list is written, or none is.",
+        "operationId": "grant_connection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connection identifier, as `GET /api/v1/connections` lists it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantConnectionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Granted; the agents holding tools of the connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionAgents"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Connection or agent not found; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No agent or no tool named, or a tool the connection does not bring; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Audit journal not available; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/pause": {
+      "post": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "`POST /api/v1/connections/{id}/pause`: none of the tools of the\nconnection runs until it is resumed; the accesses of the agents are kept.",
+        "operationId": "pause_connection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connection identifier, as `GET /api/v1/connections` lists it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "In pause; the connection as the list now shows it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Connection not found; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store could not be read or written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Governance not available; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/resume": {
+      "post": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "`POST /api/v1/connections/{id}/resume`: the tools of the connection run\nagain, with the accesses the agents held before its pause.",
+        "operationId": "resume_connection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connection identifier, as `GET /api/v1/connections` lists it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resumed; the connection as the list now shows it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Connection not found; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store could not be read or written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Governance not available; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/tools/{tool}/family": {
+      "put": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "`PUT /api/v1/connections/{id}/tools/{tool}/family`: give a tool of a\nconnection the selection does not classify another action family.",
+        "operationId": "set_tool_family",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connection identifier, as `GET /api/v1/connections` lists it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tool",
+            "in": "path",
+            "description": "Name of the tool on its server",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolFamilyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Reclassified and journaled; the connection as the list now shows it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A family the operator cannot give; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Connection or tool not found; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The selection, or Apollia's code, classifies this tool; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store could not be read or written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The MCP repository is not available; nothing written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
                 }
               }
             }
@@ -3817,6 +4424,291 @@
           },
           "500": {
             "description": "The preferences could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/onedrive/{account_id}/browse": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`GET /api/v1/connectors/onedrive/{account_id}/browse`: the children of a\nfolder of the drive, each marked chosen or not, for the user to choose from.",
+        "operationId": "browse_onedrive",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Microsoft account identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "folder_id",
+            "in": "query",
+            "description": "Folder to list; the root of the drive when absent.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The children of the folder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OneDriveEntry"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty or oversized account or folder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is not connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The choices could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "OneDrive answered with an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/onedrive/{account_id}/choices": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`GET /api/v1/connectors/onedrive/{account_id}/choices`: the folders and\nfiles the account lets Apollia read.",
+        "operationId": "list_onedrive_choices",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Microsoft account identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The chosen folders and files",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OneDriveChoiceView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty or oversized account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The choices could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connectors/onedrive/{account_id}/choices/{item_id}": {
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`PUT /api/v1/connectors/onedrive/{account_id}/choices/{item_id}`: let\nApollia read the folder or file `item_id`, as OneDrive describes it.",
+        "operationId": "choose_onedrive_item",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Microsoft account identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "OneDrive item id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The choices as recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OneDriveChoiceView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty or oversized input, or the root of the drive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account is not connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The choices could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "OneDrive answered with an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "`DELETE /api/v1/connectors/onedrive/{account_id}/choices/{item_id}`: stop\nletting Apollia read the folder or file `item_id`.",
+        "operationId": "forget_onedrive_item",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "description": "Microsoft account identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "OneDrive item id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The choices as recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OneDriveChoiceView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty or oversized input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The choices could not be written",
             "content": {
               "application/json": {
                 "schema": {
@@ -4558,6 +5450,99 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/engines/{engine}/{tag}/{variant}": {
+      "delete": {
+        "tags": [
+          "engines"
+        ],
+        "summary": "`DELETE /api/v1/engines/{engine}/{tag}/{variant}`: removes one installed\nbuild of the engine store.",
+        "description": "The embedded engine has no tag of its own: `GET /api/v1/engines` lists it\nwith `tag` null, and this route addresses it by the reserved tag\n`embedded`, always to refuse it (`embedded`), confirmation or not. An\nengine or a variant this build does not know answers `not_found` first.\n\nThe build `engines.gguf` names, which no process runs, is refused without\n`confirm=true` (`chosen`), and `after` says what the setting comes down to\nonce it is gone: `auto`, or the tag of the build of the chosen variant\nthat takes its place. With it the build goes; when no other build of the\nchosen variant is left, `engines.gguf` is first written back to `auto`,\nand the `engine.removed` event says so (`choice_reset`, `after`). A build\na process runs stays refused (`in_service`) whatever the confirmation.",
+        "operationId": "remove_engine",
+        "parameters": [
+          {
+            "name": "engine",
+            "in": "path",
+            "description": "Engine, as the list names it: `llama-server`, `vllm-mlx`, `nodejs`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "path",
+            "description": "Upstream tag of the build; the reserved tag `embedded` names the engine shipped with the application, which is never removed",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "variant",
+            "in": "path",
+            "description": "Variant, as the list names it: `cuda-12`, `vulkan`, `cpu`...",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "confirm",
+            "in": "query",
+            "description": "Remove the build `engines.gguf` names; `false` when absent",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The build and its directory are gone"
+          },
+          "403": {
+            "description": "The organisation policy fixes `engines.gguf` to this build (`locked`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineRemovalErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such build installed (`not_found`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineRemovalErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The build in service (`in_service`), the embedded engine (`embedded`), or the build `engines.gguf` names without `confirm=true` (`chosen`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineRemovalErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The build could not be deleted (`store`) or the setting written back (`config`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineRemovalErrorBody"
                 }
               }
             }
@@ -8616,7 +9601,7 @@
           {
             "name": "search",
             "in": "query",
-            "description": "Keyword forwarded to the registry. A search always asks the network;\nwithout one, a fresh cache answers.",
+            "description": "Keyword forwarded to the registry's own search. A search always asks\nthe network and falls back to the cache; without one, the cache answers\neven when stale, and the whole registry is read again behind it.",
             "required": false,
             "schema": {
               "type": "string"
@@ -8711,11 +9696,11 @@
           "mcp"
         ],
         "summary": "`GET /api/v1/mcp/resources`, List MCP resources aggregated across servers.",
-        "description": "Returns the same data as the agent-facing `mcp_resources_list` tool: one\nentry per resource exposed by a connected MCP server, tagged with its owning\nserver. Feeds the desktop @-mention picker.\n\nReturns an empty array (not an error) when no MCP configuration is active,\nso the picker degrades to \"no resources\" rather than a failure state.",
+        "description": "Returns the same data as the agent-facing `mcp_resources_list` tool: one\nentry per resource exposed by an MCP server, tagged with its owning\nserver. Feeds the desktop @-mention picker.\nA server that runs no session answers the list it last gave, without\nstarting; one never listed starts in the background and joins a later\nanswer. A paused server offers nothing.\n\nReturns an empty array (not an error) when no MCP configuration is active,\nso the picker degrades to \"no resources\" rather than a failure state.",
         "operationId": "list_resources",
         "responses": {
           "200": {
-            "description": "MCP resources aggregated across connected servers"
+            "description": "MCP resources aggregated across servers, running or not"
           }
         }
       }
@@ -8725,12 +9710,12 @@
         "tags": [
           "mcp"
         ],
-        "summary": "`GET /api/v1/mcp/servers`, List all connected MCP servers with their status.",
-        "description": "Returns an empty array when no MCP configuration is active.",
+        "summary": "`GET /api/v1/mcp/servers`, List every MCP server the runtime runs or knows, with its status.",
+        "description": "A server that runs no session yet is listed with `connected: false` and\n`dormant: true`: it starts at the next call of one of its tools, and its\ntool count is what it last published.\nReturns an empty array when no MCP configuration is active.",
         "operationId": "list_servers",
         "responses": {
           "200": {
-            "description": "Connected MCP servers with their status"
+            "description": "MCP servers with their status, dormant ones included"
           }
         }
       },
@@ -8873,7 +9858,7 @@
           "mcp"
         ],
         "summary": "`DELETE /api/v1/mcp/servers/:name`, Remove an MCP server and delete it from `mcp.db`.",
-        "description": "Shuts down the session, unregisters the server, removes its database entry,\nthen journals the removal.\nReturns `200 OK` with `{\"removed\": \"<name>\"}` on success.\nReturns `404 Not Found` when no server with the given name is managed.\nReturns `503 Service Unavailable` when MCP is not configured.",
+        "description": "Shuts down the session when there is one, unregisters the server, removes\nits database entry, then journals the removal. A server that never started\nis removed all the same. `DELETE /api/v1/connections/{id}` removes what\nelse the server leaves behind.\nReturns `200 OK` with `{\"removed\": \"<name>\"}` on success.\nReturns `404 Not Found` when the server is neither running nor stored.\nReturns `503 Service Unavailable` when MCP is not configured.",
         "operationId": "remove_server",
         "parameters": [
           {
@@ -8891,7 +9876,7 @@
             "description": "Server removed"
           },
           "404": {
-            "description": "Server not found",
+            "description": "Server neither running nor stored",
             "content": {
               "application/json": {
                 "schema": {
@@ -8976,6 +9961,16 @@
               }
             }
           },
+          "409": {
+            "description": "The connection is paused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Repository error",
             "content": {
@@ -9005,7 +10000,7 @@
           "mcp"
         ],
         "summary": "`GET /api/v1/mcp/servers/:name/raw_config`, Return the persisted launch\nconfiguration of a server (command, args, env, transport, …) as stored in\n`mcp.db`.",
-        "description": "The `env` map contains either literal values for non-secret variables or\n`${APOLLIA_SECRET:NAME}` placeholders for secret ones, actual secret\nmaterial is never returned. Used by the desktop \"Modifier les arguments\"\nflow to fetch the current config, patch `args`, and PUT the result back\nwithout losing the rest of the configuration.\n\nReturns `404 Not Found` when no server with `name` is persisted.\nReturns `503 Service Unavailable` when the MCP repository is unavailable.",
+        "description": "The `env` map contains either literal values for non-secret variables or\n`${APOLLIA_SECRET:NAME}` placeholders for secret ones, actual secret\nmaterial is never returned: a secret still kept in clear (a header of a\nremote server, a variable whose name marks it secret) is shown as the\nplaceholder of its variable, and a configuration sent back with that\nplaceholder keeps the stored value. Used by the desktop \"Modifier les arguments\"\nflow to fetch the current config, patch `args`, and PUT the result back\nwithout losing the rest of the configuration.\n\nReturns `404 Not Found` when no server with `name` is persisted.\nReturns `503 Service Unavailable` when the MCP repository is unavailable.",
         "operationId": "get_server_raw_config",
         "parameters": [
           {
@@ -9100,6 +10095,16 @@
           },
           "404": {
             "description": "Server not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The connection is paused",
             "content": {
               "application/json": {
                 "schema": {
@@ -18914,6 +19919,77 @@
           }
         }
       }
+    },
+    "/api/v1/connections/{id}": {
+      "delete": {
+        "tags": [
+          "connections"
+        ],
+        "summary": "`DELETE /api/v1/connections/{id}`: remove a connection of any kind, and\nanswer what was erased; with `?dry_run=1`, erase nothing and answer what\nwould be.",
+        "operationId": "remove_connection",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Connection identifier, as `GET /api/v1/connections` lists it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "description": "`1` (or `true`) to erase nothing and answer what the removal would\nerase.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed, or on a dry run what would be; what was erased, and what could not be",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionRemoval"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Connection not found; nothing erased",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store could not be read or written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Secret store or audit journal not available; nothing erased",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -19251,6 +20327,33 @@
           "phase": {
             "type": "string",
             "description": "The phase to move to, in its snake_case name (`ai_setup`...)."
+          }
+        }
+      },
+      "AgentActivity": {
+        "type": "object",
+        "description": "What one agent did with the tools of a connection over the period.",
+        "required": [
+          "actions",
+          "lastUsedAt"
+        ],
+        "properties": {
+          "actions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tool calls of the connection that ended over the period.",
+            "minimum": 0
+          },
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent, `None` for calls whose entry names none."
+          },
+          "lastUsedAt": {
+            "type": "string",
+            "description": "When the last of them ended, RFC 3339 UTC."
           }
         }
       },
@@ -20120,6 +21223,48 @@
           }
         }
       },
+      "AvailablePackage": {
+        "type": "object",
+        "description": "One package the channel offers for this platform.",
+        "required": [
+          "engine",
+          "tag",
+          "variant",
+          "size",
+          "installed"
+        ],
+        "properties": {
+          "engine": {
+            "$ref": "#/components/schemas/EngineName",
+            "description": "Engine."
+          },
+          "installed": {
+            "type": "boolean",
+            "description": "Whether this exact build is installed here."
+          },
+          "released": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Day the build was published, when the manifest states it."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Archive size in bytes.",
+            "minimum": 0
+          },
+          "tag": {
+            "type": "string",
+            "description": "Upstream tag."
+          },
+          "variant": {
+            "$ref": "#/components/schemas/EngineVariant",
+            "description": "Variant."
+          }
+        }
+      },
       "BatchAccess": {
         "type": "object",
         "description": "One sensitive access of the agent a batch runs.",
@@ -20771,6 +21916,19 @@
           }
         }
       },
+      "CheckConnectionBody": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/connections/{id}/check`, which may be left out.",
+        "properties": {
+          "probe": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Read-only tool call an MCP server is probed with after its handshake,\nwhen its connector declares one; ignored for any other kind."
+          }
+        }
+      },
       "ClearAgentModelResponse": {
         "type": "object",
         "description": "Body of `DELETE /api/v1/llm/agents/{agent}/model`.",
@@ -21235,6 +22393,7 @@
           "remote",
           "official",
           "state",
+          "status",
           "tools"
         ],
         "properties": {
@@ -21244,6 +22403,13 @@
               "null"
             ],
             "description": "Account the connection acts as, when it has one."
+          },
+          "checkedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When its state was last found, RFC 3339 in UTC; absent when it never\nwas."
           },
           "id": {
             "type": "string",
@@ -21261,6 +22427,13 @@
             "type": "boolean",
             "description": "Published by the service's own publisher."
           },
+          "package": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the installed package that brought it, when one did."
+          },
           "path": {
             "type": [
               "string",
@@ -21272,13 +22445,59 @@
             "type": "string",
             "description": "Where the connection was found before it was added."
           },
+          "reason": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Why it is not working, absent when it works: a key the interface translates, the technical detail, and the address the repairing action opens when it has one.",
+            "required": [
+              "key"
+            ],
+            "properties": {
+              "address": {
+                "type": "string",
+                "description": "The address the repairing action opens, to be copied: for an administrator approval, the approval page."
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "key": {
+                "type": "string",
+                "enum": [
+                  "not_checked",
+                  "sign_in_again",
+                  "password_refused",
+                  "folder_not_found",
+                  "unreachable",
+                  "failing",
+                  "forbidden_by_policy",
+                  "admin_approval_required"
+                ]
+              }
+            }
+          },
           "remote": {
             "type": "boolean",
             "description": "Sends data off this machine. Computed, see [`is_remote`]."
           },
           "state": {
             "$ref": "#/components/schemas/ConnectionState",
-            "description": "Whether it can be used right now."
+            "description": "Whether it can be used right now, in the detail its kind gives."
+          },
+          "status": {
+            "type": "string",
+            "description": "What its user reads: working, needs repair, paused, blocked by the organisation, or not checked yet (nothing has found it in any state).",
+            "enum": [
+              "working",
+              "needs_repair",
+              "paused",
+              "blocked",
+              "not_checked"
+            ]
           },
           "tools": {
             "type": "array",
@@ -21286,6 +22505,118 @@
               "$ref": "#/components/schemas/ConnectionTool"
             },
             "description": "Tools the connection brings."
+          }
+        }
+      },
+      "ConnectionAgent": {
+        "type": "object",
+        "description": "One agent that holds at least one tool of a connection.",
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "byDefault",
+          "tools"
+        ],
+        "properties": {
+          "byDefault": {
+            "type": "boolean",
+            "description": "Whether the agent holds these tools through the default access, nobody\nhaving chosen its access."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the agent is active."
+          },
+          "id": {
+            "type": "string",
+            "description": "Identifier of the agent."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name of the agent."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tools of the connection the agent holds, in the order of its\naccess."
+          }
+        }
+      },
+      "ConnectionAgents": {
+        "type": "object",
+        "description": "The agents that hold the tools of one connection.",
+        "required": [
+          "connection",
+          "agents",
+          "sharedWith"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectionAgent"
+            },
+            "description": "Every agent holding at least one of its tools, by identifier."
+          },
+          "connection": {
+            "type": "string",
+            "description": "Identifier of the connection."
+          },
+          "sharedWith": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Other connections its tools reach as well, by identifier: the other\nmailboxes, for a mailbox, since the mailbox tools are common to all of\nthem. Empty for every other kind."
+          }
+        }
+      },
+      "ConnectionActivityResponse": {
+        "type": "object",
+        "description": "Response body of `GET /api/v1/audit/activity`.",
+        "required": [
+          "toolPrefix",
+          "since",
+          "actions",
+          "agents"
+        ],
+        "properties": {
+          "actions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tool calls of the connection that ended over the period.",
+            "minimum": 0
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentActivity"
+            },
+            "description": "One line per agent, the most active first."
+          },
+          "lastUsedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the last of them ended, RFC 3339 UTC; `None` when none did."
+          },
+          "since": {
+            "type": "string",
+            "description": "Start of the period read, RFC 3339 UTC."
+          },
+          "toolPrefix": {
+            "type": "string",
+            "description": "The prefix the activity was read for."
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "End of the period read, RFC 3339 UTC; `None` when it has no end."
           }
         }
       },
@@ -21301,7 +22632,7 @@
       },
       "ConnectionState": {
         "type": "string",
-        "description": "Whether a connection can be used right now.",
+        "description": "Whether a connection can be used right now, in the detail its kind gives.\n\nWhat its user reads is [`Connection::status`], one of four states.",
         "enum": [
           "connected",
           "degraded",
@@ -22571,6 +23902,62 @@
           }
         }
       },
+      "OneDriveChoiceView": {
+        "type": "object",
+        "description": "One chosen folder or file, as a client reads it.",
+        "required": [
+          "id",
+          "name",
+          "is_folder",
+          "path"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Graph item id."
+          },
+          "is_folder": {
+            "type": "boolean",
+            "description": "`true` for a folder, which admits everything under it."
+          },
+          "name": {
+            "type": "string",
+            "description": "Name at the time of the choice."
+          },
+          "path": {
+            "type": "string",
+            "description": "Path of the item in the drive, `/drive/root:/Documents/Clients`."
+          }
+        }
+      },
+      "OneDriveEntry": {
+        "type": "object",
+        "description": "One item of a folder being browsed.",
+        "required": [
+          "id",
+          "name",
+          "is_folder",
+          "chosen"
+        ],
+        "properties": {
+          "chosen": {
+            "type": "boolean",
+            "description": "`true` when the item itself is chosen."
+          },
+          "id": {
+            "type": "string",
+            "description": "Graph item id."
+          },
+          "is_folder": {
+            "type": "boolean",
+            "description": "`true` for a folder, which can be opened or chosen whole."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name."
+          }
+        }
+      },
       "EditAnswerRequest": {
         "type": "object",
         "description": "Request body for `PUT /api/v1/sessions/{id}/messages/{message_id}`.",
@@ -22986,6 +24373,195 @@
           "nodejs"
         ]
       },
+      "EngineRating": {
+        "type": "object",
+        "description": "The verdict on one variant.",
+        "required": [
+          "variant",
+          "verdict"
+        ],
+        "properties": {
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EngineRatingReason",
+                "description": "Why it is not recommended, or the caveat of a recommendation no build\nfully qualified for, when a code says it."
+              }
+            ]
+          },
+          "variant": {
+            "$ref": "#/components/schemas/EngineVariant",
+            "description": "Variant rated."
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/EngineVerdict",
+            "description": "How well it suits this machine."
+          }
+        }
+      },
+      "EngineRatingReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The NVIDIA driver is older than the build needs.",
+            "required": [
+              "have",
+              "need",
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "driver_too_old"
+                ]
+              },
+              "have": {
+                "type": "string",
+                "description": "The driver of the machine, as `nvidia-smi` prints it."
+              },
+              "need": {
+                "type": "string",
+                "description": "The driver the build needs."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "CUDA 13 dropped the architecture of the card (Maxwell, Pascal, Volta).",
+            "required": [
+              "cc",
+              "code"
+            ],
+            "properties": {
+              "cc": {
+                "type": "string",
+                "description": "The compute capability of the card, `6.1`."
+              },
+              "code": {
+                "type": "string",
+                "enum": [
+                  "arch_dropped_in_cuda13"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The gfx target of the card is not in the list of the build.",
+            "required": [
+              "gfx",
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "gfx_not_in_build"
+                ]
+              },
+              "gfx": {
+                "type": "string",
+                "description": "The gfx target, `gfx906`."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "No Vulkan loader is installed.",
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "no_vulkan_loader"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An NVIDIA card is there, but no driver answers for it.",
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "no_nvidia_driver"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The channel offers no build of this variant for the platform.",
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "not_built_for_platform"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "No card of the kind this build drives.",
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "no_gpu"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The installed build lists no device with `--list-devices`.",
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "engine_sees_no_device"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The host has no ROCm runtime (`libamdhip64`), which the Linux ROCm\nbuild loads from the machine.",
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "no_rocm_runtime"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Why a variant is not recommended, as a code the interface translates."
+      },
       "EngineRefusalCode": {
         "type": "string",
         "description": "Why the store refused, as a stable word an interface can branch on. The\nsentence of the error says the same to a reader.",
@@ -23003,6 +24579,31 @@
           "storage"
         ]
       },
+      "EngineRemovalErrorBody": {
+        "type": "object",
+        "description": "A refused removal: the message and its stable code.",
+        "required": [
+          "error",
+          "code"
+        ],
+        "properties": {
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "With `chosen`, what `engines.gguf` comes down to once the build is\ngone: `auto`, or the tag of the build of the chosen variant that\ntakes its place."
+          },
+          "code": {
+            "type": "string",
+            "description": "Stable code: `not_found`, `in_service`, `embedded`, `chosen`,\n`locked`, `config`, `store`."
+          },
+          "error": {
+            "type": "string",
+            "description": "What went wrong, for a person."
+          }
+        }
+      },
       "EngineSettingsBody": {
         "type": "object",
         "description": "Body of the settings routes.",
@@ -23013,7 +24614,7 @@
         "properties": {
           "base_url": {
             "type": "string",
-            "description": "Base address manifests and archives are fetched from."
+            "description": "The mirror manifests and archives are fetched from, the only one read\nwhen set. Empty when none is set: the registry of Apollia is read\nfirst, then its GitHub mirror."
           },
           "channel": {
             "$ref": "#/components/schemas/EngineChannel",
@@ -23034,10 +24635,21 @@
         "type": "string",
         "description": "A build of an engine for one kind of hardware.",
         "enum": [
-          "cuda",
+          "cuda-12",
+          "cuda-13",
+          "rocm",
           "vulkan",
           "cpu",
           "metal"
+        ]
+      },
+      "EngineVerdict": {
+        "type": "string",
+        "description": "How well a variant suits this machine.",
+        "enum": [
+          "recommended",
+          "compatible",
+          "incompatible"
         ]
       },
       "EnginesResponse": {
@@ -23047,17 +24659,21 @@
           "engines",
           "channel",
           "updates",
-          "cuda_proposable",
+          "available",
+          "ratings",
           "verifiable"
         ],
         "properties": {
+          "available": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AvailablePackage"
+            },
+            "description": "The packages the verified manifest offers for this platform, installed\nor not. Empty until a manifest verified."
+          },
           "channel": {
             "$ref": "#/components/schemas/EngineChannel",
             "description": "The followed channel."
-          },
-          "cuda_proposable": {
-            "type": "boolean",
-            "description": "True when an NVIDIA card is detected and no CUDA engine is installed."
           },
           "dictation": {
             "oneOf": [
@@ -23077,6 +24693,17 @@
             },
             "description": "Engines embedded in the bundle, then installed ones."
           },
+          "hardware": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HardwareView",
+                "description": "The cards of the machine; `null` when the probe did not answer in time."
+              }
+            ]
+          },
           "manifest_sequence": {
             "type": [
               "integer",
@@ -23086,12 +24713,12 @@
             "description": "Sequence of the last verified manifest of that channel, if any.",
             "minimum": 0
           },
-          "nvidia_card": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Name of the NVIDIA card detected, when there is one."
+          "ratings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EngineRating"
+            },
+            "description": "Per `llama-server` variant, whether it suits this machine and why.\nEmpty until a manifest verified, or when the hardware is not known."
           },
           "updates": {
             "type": "array",
@@ -23488,6 +25115,40 @@
           }
         }
       },
+      "GpuCardVendor": {
+        "type": "string",
+        "description": "The maker of a card.",
+        "enum": [
+          "nvidia",
+          "amd",
+          "intel",
+          "other"
+        ]
+      },
+      "GrantConnectionBody": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/connections/{id}/grants`.",
+        "required": [
+          "agents",
+          "tools"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Identifiers of the agents to grant the tools to."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tools of the connection to grant, as `GET /api/v1/connections` lists\nthem."
+          }
+        }
+      },
       "GuardrailCheckDto": {
         "type": "object",
         "description": "The load guardrail's view of a load.",
@@ -23574,6 +25235,65 @@
           "refused"
         ]
       },
+      "HardwareCard": {
+        "type": "object",
+        "description": "One graphics card of the machine.",
+        "required": [
+          "vendor",
+          "name",
+          "timed_out"
+        ],
+        "properties": {
+          "compute_capability": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The NVIDIA compute capability, `8.9`."
+          },
+          "driver_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The NVIDIA driver version, `580.65.06`."
+          },
+          "gfx_target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The gfx target of an AMD card, `gfx1100`."
+          },
+          "kfd_accessible": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether `/dev/kfd` opens. AMD under Linux only."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its name."
+          },
+          "timed_out": {
+            "type": "boolean",
+            "description": "True when the driver did not answer within the probe limit."
+          },
+          "vendor": {
+            "$ref": "#/components/schemas/GpuCardVendor",
+            "description": "Its maker."
+          },
+          "vram_gb": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Its dedicated memory in GiB, when known."
+          }
+        }
+      },
       "HardwareResponse": {
         "type": "object",
         "required": [
@@ -23621,6 +25341,32 @@
           "total_ram_gb": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "HardwareView": {
+        "type": "object",
+        "description": "The cards of the machine and what is installed around them.",
+        "required": [
+          "cards",
+          "vulkan_loader",
+          "rocm_runtime"
+        ],
+        "properties": {
+          "cards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HardwareCard"
+            },
+            "description": "Every card, NVIDIA ones first."
+          },
+          "rocm_runtime": {
+            "type": "boolean",
+            "description": "Whether the host's ROCm runtime is installed. Linux only."
+          },
+          "vulkan_loader": {
+            "type": "boolean",
+            "description": "Whether a Vulkan loader is installed."
           }
         }
       },
@@ -27957,6 +29703,19 @@
           }
         }
       },
+      "RepointFolderBody": {
+        "type": "object",
+        "description": "Body of `PUT /api/v1/connections/folders/{id}`.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path of the folder, as the system picker answered it."
+          }
+        }
+      },
       "RequiredConnectionPreview": {
         "type": "object",
         "description": "A connection the package requires.",
@@ -28042,6 +29801,8 @@
           "mission",
           "examples",
           "access",
+          "access_by_default",
+          "access_added",
           "sources",
           "autonomy",
           "planning",
@@ -28055,6 +29816,17 @@
               "type": "string"
             },
             "description": "Tools granted."
+          },
+          "access_added": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tools of `access` given on top of the default access; empty for\nan agent that does not hold it."
+          },
+          "access_by_default": {
+            "type": "boolean",
+            "description": "Whether the agent holds the default access, read again at every run,\nrather than a list chosen for it."
           },
           "autonomy": {
             "type": "string",
@@ -28107,7 +29879,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Fields whose value is the user's rather than the package's:\n`name`, `mission`, `examples`, `access`, `sources`, `autonomy`,\n`planning`, `profile`."
+            "description": "Fields whose value is the user's rather than the package's:\n`name`, `mission`, `examples`, `access`, `access_added`, `sources`,\n`autonomy`, `planning`, `profile`. `access_added` names the tools\ngiven on top of the default access, which `access` lists after it."
           },
           "package": {
             "type": [
@@ -30695,6 +32467,19 @@
           }
         }
       },
+      "ToolFamilyBody": {
+        "type": "object",
+        "description": "Body of `PUT /api/v1/connections/{id}/tools/{tool}/family`.",
+        "required": [
+          "family"
+        ],
+        "properties": {
+          "family": {
+            "type": "string",
+            "description": "The family the tool takes: `read`, `read_personal`,\n`write_or_delete`, `send_external`, `execute_code` or `unclassified`."
+          }
+        }
+      },
       "ToolListResponse": {
         "type": "object",
         "description": "Response body for `GET /api/v1/tools`.",
@@ -32232,6 +34017,79 @@
             "description": "The file it was written to, when the source is a file or a folder."
           }
         }
+      },
+      "ConnectionRemoval": {
+        "type": "object",
+        "description": "What a removal erased, or would erase.",
+        "required": [
+          "connection",
+          "dryRun",
+          "removed",
+          "left"
+        ],
+        "properties": {
+          "connection": {
+            "type": "string",
+            "description": "Identifier of the connection."
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "Whether nothing was erased, the list saying what would be."
+          },
+          "left": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemovedItem"
+            },
+            "description": "What could not be erased; empty on a dry run."
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemovedItem"
+            },
+            "description": "What was erased, or would be."
+          }
+        }
+      },
+      "RemovedItem": {
+        "type": "object",
+        "description": "One thing a removal erases.",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent the tool is taken from, for an agent access."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RemovedKind",
+            "description": "What it is."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its name: the server, the folder of installed files, the secret key,\nthe tool taken away, the source, the path of a OneDrive choice."
+          }
+        }
+      },
+      "RemovedKind": {
+        "type": "string",
+        "description": "The kinds of things a removal erases.",
+        "enum": [
+          "configuration",
+          "installed_files",
+          "token",
+          "secret",
+          "agent_access",
+          "source",
+          "state",
+          "onedrive_choice"
+        ]
       }
     },
     "securitySchemes": {

@@ -18,17 +18,25 @@ pub(super) struct AskedConsent {
     pub(super) always_offered: bool,
 }
 
-/// The family of the tool `name`, as its descriptor declares it. The search
-/// over the deferred tools reads an in-memory index and acts on nothing else;
-/// a tool nothing describes is unclassified.
+/// The family of the tool `name`, as its descriptor declares it. A deferred
+/// MCP tool has no descriptor: its family is the one the tool index carries,
+/// decided by the MCP manager from the selection entry, then the server's
+/// hints. The search over the deferred tools reads an in-memory index and acts
+/// on nothing else; the search over the connections reads Apollia's selection
+/// and the servers configured on this machine; a tool nothing describes is
+/// unclassified.
 pub(super) fn family_of(
     name: &str,
     descriptor: Option<&apollia_tools::ToolDescriptor>,
+    mcp_index: Option<&[apollia_mcp::tool_search::ToolIndexSnapshot]>,
 ) -> ActionFamily {
     match descriptor {
         Some(descriptor) => descriptor.family,
         None if name == apollia_mcp::tool_search::TOOL_SEARCH_NAME => ActionFamily::Exempt,
-        None => ActionFamily::Unclassified,
+        None if name == crate::chat::connection_lookup::CONNECTION_LOOKUP_NAME => {
+            ActionFamily::Read
+        }
+        None => apollia_mcp::tool_search::tool_family(name, None, mcp_index.unwrap_or(&[])),
     }
 }
 
@@ -53,6 +61,10 @@ pub(in crate::chat) fn refusal_text(reason: &DecisionReason) -> String {
     match reason {
         DecisionReason::Policy { detail } => format!("Tool {detail}"),
         DecisionReason::Rule { .. } => "Tool refused by a permission rule".to_string(),
+        DecisionReason::Paused { connection_id } => format!(
+            "Tool refused: the connection {connection_id} is paused; \
+             the user can resume it from the connections"
+        ),
         DecisionReason::FailClosed => {
             "Tool refused: governance cannot read what it decides from".to_string()
         }
@@ -77,11 +89,24 @@ impl BuiltInChatAgent {
         acc: &ReactAccumulators,
         rewritten_by_hook: bool,
     ) -> AccessDecision {
-        let argument = apollia_permissions::extract_first_arg(&call.arguments);
+        let data_dir = self.governance.data_dir();
+        let argument =
+            crate::governance::call_argument(&call.name, &call.arguments, data_dir.as_deref());
+        let reaches = crate::governance::call_reaches(
+            &crate::governance::Caller {
+                agent_id: &self.agent_id,
+                data_dir: data_dir.as_deref(),
+                folders: &self.folders,
+            },
+            &call.name,
+            &call.arguments,
+            &self.governance.state().paused,
+        );
         let decision = self.governance.decide(&AccessCall {
             agent_id: &self.agent_id,
             access_id: &call.name,
             argument: argument.as_deref(),
+            reaches: &reaches,
             family,
             unattended: self.unattended,
             granted_for_run: acc.authorized.contains(&call.name),
@@ -136,7 +161,7 @@ impl BuiltInChatAgent {
     }
 
     /// Records in the journal a call governance refused because of the
-    /// policy or a rule. Neither the call's argument nor its result is
+    /// policy, a rule, or its connection in pause. Neither the call's argument nor its result is
     /// recorded.
     pub(super) fn journal_refusal(
         &self,
@@ -156,6 +181,12 @@ impl BuiltInChatAgent {
                 access_id: call.name.clone(),
                 family,
                 rule_id: *rule_id,
+            },
+            DecisionReason::Paused { connection_id } => GovernanceEvent::PausedRefused {
+                agent_id: self.agent_id.clone(),
+                access_id: call.name.clone(),
+                family,
+                connection_id: connection_id.clone(),
             },
             _ => return,
         };

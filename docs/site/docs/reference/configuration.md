@@ -239,8 +239,12 @@ MCP client: approvals, tool loading, and the bridge that serves exposed agents a
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `mcp.tool_loading` | one of eager, deferred | `"deferred"` | Load every MCP tool schema up front, or on first use. The organization policy can fix it. |
+| `mcp.idle_stop_secs` | integer | `900` | Seconds without a call after which an MCP server is stopped, started again at its next call (60 to 86400). The organization policy can fix it. |
 | `mcp.tool_search_limit` | integer | `20` | Results returned by the tool_search tool (1 to 500). The organization policy can fix it. |
 | `mcp.server_enabled` | boolean | `false` | Let an MCP client reach the agents and workflows marked exposed, through apollia-os mcp server. The organization policy can fix it. |
+| `mcp.catalogue_url` | string | `"https://registry.apollia.fr/mcp/stable/index.json"` | Address of the signed index of the connection catalogue. The organization policy can fix it. |
+| `mcp.catalogue_mirror_url` | string | `"https://github.com/Apollia-OS/apollia-os/releases/latest/download/mcp-stable-index.json"` | Address tried when the connection catalogue does not answer; empty disables it. The organization policy can fix it. |
+| `mcp.catalogue_enabled` | boolean | `true` | Read the online index of the connection catalogue. The organization policy can fix it. |
 
 ### `[hooks]`
 
@@ -328,7 +332,7 @@ Settings of the local inference engines.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `engines.log_level` | one of error, warning, info, debug | `"debug"` | Log level of the local engine, applied when a model is next loaded. The organization policy can fix it. |
-| `engines.gguf` | one of auto, embedded, cuda, vulkan, cpu, metal | `"auto"` | Engine that serves GGUF models: the automatic choice, the engine shipped with the application, or a variant installed by the engine store. A variant no longer installed falls back to the automatic choice. Read at the next start. The organization policy can fix it. |
+| `engines.gguf` | one of auto, embedded, cuda, cuda-12, cuda-13, rocm, vulkan, cpu, metal | `"auto"` | Engine that serves GGUF models: the automatic choice, the engine shipped with the application, or a variant installed by the engine store (cuda takes the best CUDA build installed). A variant no longer installed falls back to the automatic choice. Applied when a model is next loaded. The organization policy can fix it. |
 | `engines.mlx` | one of auto, embedded, metal | `"auto"` | Engine that serves MLX models on a Mac with Apple Silicon: the automatic choice, the engine shipped with the application, or the one installed by the engine store. Read at the next start. The organization policy can fix it. |
 | `engines.auto_update` | boolean | `true` | Download and verify the update of a chosen engine when the followed channel announces one; off, the update is only announced. The organization policy can fix it. |
 | `engines.auto_purge` | boolean | `false` | After an update of an engine, delete the builds of its variant left unused the longest, beyond two; the build in service and the shipped engine are never deleted. The organization policy can fix it. |

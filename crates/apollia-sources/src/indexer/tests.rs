@@ -10,7 +10,9 @@ use super::*;
 use crate::index::{index_path, SkipReason};
 use crate::SourceRegistryHandle;
 
+mod arrival;
 mod recognition;
+mod repointed;
 
 /// An embedder that never leaves the process: an eight-dimension vector
 /// counted from the bytes of each text, the model named by the test, every
@@ -88,6 +90,11 @@ impl World {
         }
     }
 
+    /// The models folder by default, `<data_dir>/models`.
+    fn models(&self) -> PathBuf {
+        self.data.path().join("models")
+    }
+
     fn root(&self) -> PathBuf {
         std::fs::canonicalize(self.docs.path()).unwrap()
     }
@@ -122,7 +129,11 @@ impl World {
 
     async fn start(&self, stub: &Arc<Stub>) {
         self.registry
-            .start_indexing_every(Shared(Arc::clone(stub)), Duration::from_secs(3600))
+            .start_indexing_every(
+                Shared(Arc::clone(stub)),
+                self.models(),
+                Duration::from_secs(3600),
+            )
             .await
             .unwrap();
     }
@@ -130,12 +141,20 @@ impl World {
     /// [`Self::start`], the language data of recognition fetched through
     /// `ocr_data`.
     async fn start_fetching(&self, stub: &Arc<Stub>, ocr_data: OcrDataFetch) {
+        let recognition = Recognition {
+            models_dir: self.models(),
+            fetch: Some(ocr_data),
+            open: Arc::new(Ocr::open),
+        };
+        self.start_with(stub, Duration::from_secs(3600), recognition)
+            .await;
+    }
+
+    /// Starts the indexer sweeping every `interval`, scanned pages read
+    /// through `recognition`.
+    async fn start_with(&self, stub: &Arc<Stub>, interval: Duration, recognition: Recognition) {
         self.registry
-            .start_indexing_fetching(
-                Shared(Arc::clone(stub)),
-                Duration::from_secs(3600),
-                Some(ocr_data),
-            )
+            .start_indexing_with(Shared(Arc::clone(stub)), interval, recognition)
             .await
             .unwrap();
     }
@@ -502,6 +521,85 @@ async fn test_a_source_removed_stops_being_indexed_and_loses_its_index() {
 
     // THEN its index file is gone
     assert!(!index.exists());
+}
+
+/// Points the one folder connection of `world` at `to`, as
+/// `PUT /api/v1/connections/folders/{id}` does.
+fn repoint(world: &World, to: &Path) {
+    let connections = FolderConnectionStore::open(&world.data.path().join("system.db")).unwrap();
+    let connection = connections.list().unwrap().remove(0);
+    connections
+        .repoint(&connection.id, to.to_str().unwrap())
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_a_repointed_folder_is_indexed_on_its_new_folder_and_drops_the_old_one() {
+    // GIVEN a ready folder source on a folder holding `old.txt`, and another
+    // folder holding `new.txt`
+    let world = World::new();
+    world.write("old.txt", "The lease of the Lyon office.");
+    let other = tempfile::tempdir().unwrap();
+    let other_root = std::fs::canonicalize(other.path()).unwrap();
+    std::fs::write(
+        other_root.join("new.txt"),
+        "The lease of the Nantes office.",
+    )
+    .unwrap();
+    let stub = Stub::new("e5-small");
+    world.start(&stub).await;
+    let id = world.folder_source().await;
+    world.refresh().await;
+    assert_eq!(
+        world.documents(&id),
+        BTreeSet::from([key(&world.root().join("old.txt"))])
+    );
+
+    // WHEN its connection is pointed at the other folder and the index
+    // brought in step, without a restart
+    repoint(&world, &other_root);
+    world.refresh().await;
+
+    // THEN the index holds the new folder's file and no longer the old one
+    assert_eq!(
+        world.documents(&id),
+        BTreeSet::from([key(&other_root.join("new.txt"))])
+    );
+    assert_eq!(world.state(&id).await, IndexState::Ready);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_a_folder_emptied_then_repointed_indexes_the_new_folder() {
+    // GIVEN a ready folder source whose folder is emptied, and another
+    // folder holding `new.txt`
+    let world = World::new();
+    let old = world.write("old.txt", "The lease of the Lyon office.");
+    let other = tempfile::tempdir().unwrap();
+    let other_root = std::fs::canonicalize(other.path()).unwrap();
+    std::fs::write(
+        other_root.join("new.txt"),
+        "The lease of the Nantes office.",
+    )
+    .unwrap();
+    let stub = Stub::new("e5-small");
+    world.start(&stub).await;
+    let id = world.folder_source().await;
+    world.refresh().await;
+    std::fs::remove_file(&old).unwrap();
+    world.refresh().await;
+    assert!(world.documents(&id).is_empty());
+
+    // WHEN its connection is pointed at the other folder and the index
+    // brought in step
+    repoint(&world, &other_root);
+    world.refresh().await;
+
+    // THEN the new folder's file is indexed
+    assert_eq!(
+        world.documents(&id),
+        BTreeSet::from([key(&other_root.join("new.txt"))])
+    );
+    assert_eq!(world.state(&id).await, IndexState::Ready);
 }
 
 #[test]

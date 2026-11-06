@@ -5,22 +5,22 @@
     "The two image sets are SEPARATE per locale, under /img/operator-help/{en,fr}/. The English pages reference en/, the French ones fr/, checked: 85 references on each side.",
     "So this script publishes into en/ ONLY. An earlier note claimed there was a single shared set: that was true before the move to per-locale directories, and false since. The symptom it produced: the English pages showed French captures, because a single set had been copied into both directories.",
     "The prelude switches the interface to English (settings > appearance > language-en) before the first capture. Do not remove it: without it the run photographs whatever language the previous run left.",
-    "The three captures of the permission rules are taken on the Authorizations screen (route authorizations), where the rules, the standing consents and their withdrawal moved: the list with the rules for every agent, the revoke-all dialog, then the detail of the first agent."
+    "The three captures of the permission rules are taken on the Authorizations screen (route authorizations), where the rules, the standing consents and their withdrawal moved: the list with the rules for every agent, the revoke-all dialog, then the detail of the first agent.",
+    "The second shot of setting up a channel shows a channel card as it stands: the card (ChannelRow.svelte, a <li>) has no handler of its own, its actions sit on its test button and its menu, so the book waits for the first card instead of clicking it."
   ],
   "stopOnError": false,
   "dynamicTestids": [
+    "agent-sheet-tab-activity",
+    "agent-sheet-tab-sheet",
     "automation-history-seed-trigger-daily-digest",
     "automation-menu-seed-trigger-daily-digest",
     "automation-row-seed-trigger-daily-digest",
     "automation-wizard-next-0",
-    "catalogue-tab-custom",
-    "catalogue-tab-discover",
     "command-item-companion.toggle",
     "command-item-help.onboarding_reset",
-    "connections-sidebar-filter-all",
+    "connections-kind-filter-all",
     "danger-card-factory-reset",
     "global-event-task.completed",
-    "mcp-detail-tab-overview",
     "observability-tab-llm-costs",
     "observability-tab-timeline",
     "period-7d",
@@ -32,9 +32,7 @@
     "settings-nav-notifications",
     "settings-nav-profile",
     "settings-nav-stt",
-    "trigger-logs-filter-all",
-    "agent-sheet-tab-activity",
-    "agent-sheet-tab-sheet"
+    "trigger-logs-filter-all"
   ],
   "steps": [
     {
@@ -510,10 +508,6 @@
       "timeoutMs": 5000
     },
     {
-      "kind": "click",
-      "testid": "catalogue-tab-discover"
-    },
-    {
       "kind": "sleep",
       "ms": 700
     },
@@ -523,7 +517,7 @@
     },
     {
       "kind": "click",
-      "testid": "catalogue-tab-custom"
+      "testid": "catalogue-address"
     },
     {
       "kind": "waitFor",
@@ -658,7 +652,7 @@
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-detail-tabbar",
+      "testid": "connection-card-state",
       "timeoutMs": 5000
     },
     {
@@ -670,12 +664,8 @@
       "label": "integration-tester-une-connexion-mcp-1"
     },
     {
-      "kind": "click",
-      "testid": "mcp-detail-tab-overview"
-    },
-    {
       "kind": "waitFor",
-      "testid": "mcp-test-btn",
+      "testid": "connection-check-btn",
       "timeoutMs": 5000
     },
     {
@@ -909,7 +899,7 @@
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-all",
+      "testid": "connections-kind-filter-all",
       "timeoutMs": 5000
     },
     {
@@ -920,17 +910,12 @@
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-detail-tabbar",
+      "testid": "connection-card-state",
       "timeoutMs": 10000
     },
     {
-      "kind": "click",
-      "testid": "mcp-detail-tab-overview",
-      "timeoutMs": 5000
-    },
-    {
       "kind": "waitFor",
-      "testid": "mcp-tools-count",
+      "testid": "connection-detail-tools",
       "timeoutMs": 8000
     },
     {
@@ -1651,7 +1636,7 @@
       "label": "notifications-configurer-un-canal-1"
     },
     {
-      "kind": "click",
+      "kind": "waitFor",
       "testidPrefix": "channel-card-",
       "nth": 0,
       "timeoutMs": 8000

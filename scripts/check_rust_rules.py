@@ -136,7 +136,7 @@ ARC_MUTEX_COUNTS: dict[str, int] = {
     "crates/apollia-llm/src/meta_orchestrator.rs": 1,
     "crates/apollia-llm/src/repository.rs": 1,
     "crates/apollia-llm/src/router.rs": 1,
-    "crates/apollia-mcp/src/session.rs": 3,
+    "crates/apollia-mcp/src/session/rpc.rs": 1,
     "crates/apollia-mcp/src/transport/stdio.rs": 1,
     "crates/apollia-oria/src/actor.rs": 2,
     "crates/apollia-oria/src/engine.rs": 2,
@@ -288,6 +288,11 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     # stopped must get an error back, not wait. The test binds port 0 and
     # releases it to obtain a port nothing listens on.
     "crates/apollia-desktop/src/attached/tests.rs": 1,
+    # The deadline of an embedded read is the subject: the runtime is a
+    # port-0 listener that holds its answer until the test releases it, so
+    # a read gives up at its deadline while the write variant waits past it.
+    # No sleep: the order is set by the release, not by the clock.
+    "crates/apollia-desktop/src/commands/mod.rs": 1,
     # One helper, the transport is the subject: these tests prove that a
     # virtualenv gets built, that pip refuses an altered digest, and that the
     # rewritten command starts. The helper builds the local wheel the
@@ -298,14 +303,33 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     # installs from an integrity lock, refuses an altered digest, and that the
     # rewritten command starts offline. One helper packs the tarball the fake
     # registry serves (its digest is npm's own), the other runs the entry point
-    # the installer wrote; neither can be observed without a process.
-    "crates/apollia-desktop/src/mcp/npm_server/tests.rs": 2,
+    # the installer wrote; neither can be observed without a process. A third
+    # helper writes the fake `node` of the machine, which answers `--version`
+    # and plays npm, to show that the fallback installs with `npm ci`.
+    "crates/apollia-desktop/src/mcp/npm_server/tests.rs": 3,
+    # The process is the subject: the bounded runner of the hardware probes is
+    # proven on a fake tool that answers, one that hangs and must be killed,
+    # and a program that is absent; none is observable without a process. The
+    # helper that writes those fake tools is shared by the probe tests.
+    "crates/apollia-llm/src/hardware/bounded.rs": 4,
     "crates/apollia-llm/src/meta_orchestrator.rs": 1,
     "crates/apollia-llm/src/repository.rs": 1,
     "crates/apollia-llm/src/retry.rs": 1,
+    # The registry is the subject: a fake registry holds a port-0 bind for the
+    # whole test and holds back pages until the test opens its gate, and one
+    # deadline fails a read that waits for those pages instead of hanging.
+    "crates/apollia-mcp/src/registry/catalogue.rs": 2,
     "crates/apollia-mcp/src/transport/http.rs": 3,
+    # The process is the subject: the search for the Node.js of the machine
+    # keeps a candidate by the release `node --version` answers. One helper
+    # writes the fake `node` that answers it and logs what it was asked, or
+    # that never answers, to show the deadline of the search stops it.
+    "crates/apollia-mcp/src/transport/node/machine/tests.rs": 1,
     "crates/apollia-mcp/src/transport/sse.rs": 3,
-    "crates/apollia-mcp/src/transport/stdio.rs": 1,
+    # The process is the subject: one test spawns a subprocess, another writes
+    # the store's fake `node` as a script that execs `cat`, since a link to
+    # `cat` runs no tool where coreutils is one multicall binary (uutils).
+    "crates/apollia-mcp/src/transport/stdio.rs": 2,
     "crates/apollia-notifications/src/channels/webhook.rs": 8,
     "crates/apollia-notifications/src/engine.rs": 1,
     "crates/apollia-notifications/src/inactivity_watcher.rs": 5,
@@ -323,6 +347,11 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     # stand-in holds a port-0 bind for the whole test, and the silent-port
     # test releases one to obtain a port nothing listens on.
     "crates/apollia-runtime/src/api/routes_chat/prompt_template/tests.rs": 2,
+    # The clock is the subject: the engine list must answer within its
+    # deadline while the hardware probe hangs, so the stand-in probe sleeps
+    # past that deadline and the test observes that the route does not wait.
+    # The same fake registry and deadline, behind the registry route.
+    "crates/apollia-runtime/src/api/routes_mcp_registry.rs": 2,
     "crates/apollia-runtime/src/api/server.rs": 13,
     # The mailbox and the whole-bus event streams never end: each probe reads
     # its first frame under a deadline, which is what fails it rather than a
@@ -337,6 +366,15 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     # Same helper and same reason for Node.js, published in the same signed
     # manifest: the fake server counts the archive requests.
     "crates/apollia-runtime/src/engine_store/node/tests.rs": 1,
+    # The process is the subject: an installed build is rated by the devices
+    # it lists, so one helper writes fake engines as shell scripts that list a
+    # device or none, and the test reads what spawning each one answered.
+    "crates/apollia-runtime/src/engine_store/compat/tests.rs": 1,
+    # The clock is the subject: a rating of the machine must come back within
+    # its deadline while installed builds hang, and keep their silence, so two
+    # stand-in listings sleep past that deadline and the tests observe that
+    # the rating does not wait for them, nor ask them again.
+    "crates/apollia-runtime/src/engine_store/compat/listings/tests.rs": 2,
     # The listener is the subject: the compatible server is a second TCP
     # listener, and "nothing listens", "the port is taken" and "the port
     # refuses after a stop" are only observable on a real port. One helper,
@@ -376,11 +414,19 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     # process can show. The site is the shebang of the fake engine, one helper
     # shared by the supervisor and embedder tests.
     "crates/apollia-runtime/src/llama_server/embeddings/tests.rs": 1,
+    # The process is the subject: an inherited `LLAMA_ARG_*` must not reach
+    # the engine whose `--version` banner is read, which only a launched
+    # process can show. The site is the shebang of that fake engine.
+    "crates/apollia-runtime/src/llama_server/engine_env/tests.rs": 1,
     # The process is the subject: changing a load setting of a resident model
     # has to stop its child and launch another, which only a launched process
     # can show. The site is the shell script of the fake engine, one helper
     # shared by the reload tests.
     "crates/apollia-runtime/src/llama_server/reload/tests.rs": 1,
+    # The process is the subject: an engine chosen after start has to serve
+    # the next launch, which only a launched process can show. The site is
+    # the shell script of the fake engine.
+    "crates/apollia-runtime/src/llama_server/binary/tests.rs": 1,
     # The process and the clock are the subject: the MLX supervisor has to
     # respawn an engine that dies, with backoff, and stop it for good on
     # shutdown. Two `kill` spawns make the engine die, one sleep polls for the
@@ -403,6 +449,10 @@ TIME_SENSITIVE_TEST_COUNTS: dict[str, int] = {
     # interval inside it; every other test of the indexer asks for its pass
     # and awaits the reply.
     "crates/apollia-sources/src/indexer/tests.rs": 2,
+    # The periodic sweep is the subject: a language copied into the models
+    # folder is noticed with no request, so the only observable is the state
+    # of the source once a sweep has run. One bounded poll interval.
+    "crates/apollia-sources/src/indexer/tests/arrival.rs": 1,
     "crates/apollia-tools/src/executor.rs": 1,
     "crates/apollia-tools/src/file_path_extractor.rs": 2,
     "crates/apollia-tools/src/journal.rs": 2,

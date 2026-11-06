@@ -197,6 +197,16 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_families: BTreeMap<String, apollia_tools::ActionFamily>,
 
+    /// Action family the operator gave each tool, keyed by the tool's name on
+    /// this server.
+    ///
+    /// Kept in `mcp.db` apart from the server row: saving a configuration
+    /// never writes it, so a connection added again keeps it, and reading one
+    /// fills it (see `McpServerRepository::set_operator_family`). It wins over
+    /// the hints the server declares, never over [`Self::tool_families`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub operator_families: BTreeMap<String, apollia_tools::ActionFamily>,
+
     /// Where the connection comes from, written by the caller that adds it.
     ///
     /// `None` keeps the origin already stored for this name, and a connection
@@ -532,6 +542,23 @@ impl McpServerConfig {
             .any(|v| v.contains("${APOLLIA_OAUTH}") || v.contains("${APOLLIA_SECRET:"))
     }
 
+    /// The keys of every `${APOLLIA_SECRET:KEY}` placeholder its env values
+    /// name, sorted, each once. Each is stored under
+    /// [`static_secret_user`] of this server and the key.
+    #[must_use]
+    pub fn static_secret_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .env
+            .values()
+            .flat_map(|value| placeholders(value))
+            .filter_map(|var| var.strip_prefix("APOLLIA_SECRET:").map(str::to_owned))
+            .filter(|key| !key.is_empty())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     /// Resolve `${VAR}` placeholders in every env value.
     ///
     /// Plain `${VAR}` placeholders are resolved from the system environment.
@@ -588,6 +615,30 @@ fn looks_like_package_identifier(command: &str) -> bool {
     }
     // Bare slash-segmented identifier (e.g. `io.github.foo/bar-mcp`).
     cmd.contains('/')
+}
+
+/// The secret store user under which the static secret `key` of the server
+/// `server_name` is kept, in the service [`MCP_STATIC_SECRET_SERVICE`]:
+/// `"{server_name}:{key}"`.
+#[must_use]
+pub fn static_secret_user(server_name: &str, key: &str) -> String {
+    format!("{server_name}:{key}")
+}
+
+/// The variable names of the closed `${VAR}` placeholders of `value`, in
+/// order.
+fn placeholders(value: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut remaining = value;
+    while let Some(start) = remaining.find("${") {
+        remaining = &remaining[start + 2..];
+        let Some(end) = remaining.find('}') else {
+            break;
+        };
+        out.push(&remaining[..end]);
+        remaining = &remaining[end + 1..];
+    }
+    out
 }
 
 /// Replace all `${VAR}` occurrences in `value`, dispatching to either the
@@ -665,7 +716,7 @@ async fn resolve_single_var(
             server: server_name.to_string(),
             var: var_name.to_string(),
         })?;
-        let key = format!("{}:{}", server_name, secret_key);
+        let key = static_secret_user(server_name, secret_key);
         return store
             .get_secret(&key)
             .map_err(|_| McpConfigError::UnresolvedEnvVar {
@@ -785,6 +836,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -814,6 +866,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN
@@ -845,6 +898,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -871,6 +925,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -903,6 +958,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN
@@ -932,6 +988,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -958,6 +1015,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -985,6 +1043,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN validation rejects with a guidance-bearing error.
@@ -1013,6 +1072,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -1047,6 +1107,7 @@ mod tests {
                 max_tools: 256,
                 tags: vec![],
                 tool_families: Default::default(),
+                operator_families: Default::default(),
                 origin: None,
             };
             // WHEN / THEN: must accept all of these.
@@ -1110,6 +1171,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         }
     }
@@ -1126,6 +1188,33 @@ mod tests {
         let resolved = config.resolve_env(Some(&store)).await.unwrap();
         // THEN the keyring value is injected
         assert_eq!(resolved["KEY"], "tok_abc123");
+    }
+
+    #[test]
+    fn test_static_secret_keys_are_read_from_every_placeholder() {
+        // GIVEN env values naming two secrets, one twice and one beside a
+        // literal, an OAuth token, a plain variable and an unclosed brace
+        let config = server_with_env(
+            "notion",
+            HashMap::from([
+                ("A".to_string(), "${APOLLIA_SECRET:TOKEN}".to_string()),
+                (
+                    "B".to_string(),
+                    "Bearer ${APOLLIA_SECRET:X-Api-Key}".to_string(),
+                ),
+                ("C".to_string(), "${APOLLIA_SECRET:TOKEN}".to_string()),
+                ("D".to_string(), "${APOLLIA_OAUTH} ${HOME}".to_string()),
+                ("E".to_string(), "${APOLLIA_SECRET:OPEN".to_string()),
+            ]),
+        );
+
+        // WHEN its static secret keys are read
+        let keys = config.static_secret_keys();
+
+        // THEN each secret is named once, sorted, under the user the
+        //      resolver reads
+        assert_eq!(keys, ["TOKEN", "X-Api-Key"]);
+        assert_eq!(static_secret_user("notion", "TOKEN"), "notion:TOKEN");
     }
 
     #[tokio::test]
@@ -1282,6 +1371,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -1308,6 +1398,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -1334,6 +1425,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -1360,6 +1452,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -1386,6 +1479,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -1409,6 +1503,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -1432,6 +1527,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN
@@ -1458,6 +1554,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
         // WHEN / THEN

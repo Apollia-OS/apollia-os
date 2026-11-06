@@ -245,8 +245,12 @@ Client MCP : approbations, chargement des outils, et le pont qui sert les agents
 | Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
 | `mcp.tool_loading` | l'une de eager, deferred | `"deferred"` | Charger tous les schémas d'outils MCP d'emblée, ou au premier usage. La politique de l'organisation peut l'imposer. |
+| `mcp.idle_stop_secs` | entier | `900` | Secondes sans appel après lesquelles un serveur MCP est arrêté, puis redémarré à son appel suivant (60 à 86400). La politique de l'organisation peut l'imposer. |
 | `mcp.tool_search_limit` | entier | `20` | Résultats rendus par l'outil tool_search (1 à 500). La politique de l'organisation peut l'imposer. |
 | `mcp.server_enabled` | booléen | `false` | Laisser un client MCP atteindre les agents et workflows marqués exposés, par apollia-os mcp server. La politique de l'organisation peut l'imposer. |
+| `mcp.catalogue_url` | chaîne | `"https://registry.apollia.fr/mcp/stable/index.json"` | Adresse de l'index signé du catalogue des connexions. La politique de l'organisation peut l'imposer. |
+| `mcp.catalogue_mirror_url` | chaîne | `"https://github.com/Apollia-OS/apollia-os/releases/latest/download/mcp-stable-index.json"` | Adresse essayée quand le catalogue des connexions ne répond pas ; vide, elle est désactivée. La politique de l'organisation peut l'imposer. |
+| `mcp.catalogue_enabled` | booléen | `true` | Lire l'index en ligne du catalogue des connexions. La politique de l'organisation peut l'imposer. |
 
 ### `[hooks]`
 
@@ -334,7 +338,7 @@ Réglages des moteurs d'inférence locaux.
 | Clé | Type | Défaut | Rôle |
 | --- | --- | --- | --- |
 | `engines.log_level` | l'une de error, warning, info, debug | `"debug"` | Niveau de journal du moteur local, appliqué au prochain chargement d'un modèle. La politique de l'organisation peut l'imposer. |
-| `engines.gguf` | l'une de auto, embedded, cuda, vulkan, cpu, metal | `"auto"` | Moteur qui sert les modèles GGUF : le choix automatique, le moteur livré avec l'application, ou une variante installée par le magasin de moteurs. Une variante qui n'est plus installée retombe sur le choix automatique. Lu au démarrage suivant. La politique de l'organisation peut l'imposer. |
+| `engines.gguf` | l'une de auto, embedded, cuda, cuda-12, cuda-13, rocm, vulkan, cpu, metal | `"auto"` | Moteur qui sert les modèles GGUF : le choix automatique, le moteur livré avec l'application, ou une variante installée par le magasin de moteurs (cuda prend le meilleur build CUDA installé). Une variante qui n'est plus installée retombe sur le choix automatique. Appliqué au prochain chargement d'un modèle. La politique de l'organisation peut l'imposer. |
 | `engines.mlx` | l'une de auto, embedded, metal | `"auto"` | Moteur qui sert les modèles MLX sur un Mac à puce Apple : le choix automatique, le moteur livré avec l'application, ou celui installé par le magasin de moteurs. Lu au démarrage suivant. La politique de l'organisation peut l'imposer. |
 | `engines.auto_update` | booléen | `true` | Télécharger et vérifier la mise à jour d'un moteur choisi quand le canal suivi en annonce une ; éteint, la mise à jour est seulement annoncée. La politique de l'organisation peut l'imposer. |
 | `engines.auto_purge` | booléen | `false` | Après la mise à jour d'un moteur, supprimer les versions de sa variante inutilisées depuis le plus longtemps, au-delà de deux ; la version en service et le moteur livré avec l'application ne sont jamais supprimés. La politique de l'organisation peut l'imposer. |

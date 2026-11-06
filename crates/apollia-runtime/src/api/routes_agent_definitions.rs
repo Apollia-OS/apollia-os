@@ -33,7 +33,7 @@ use crate::coordinator::ExecutionBackend;
 use crate::governance::{GovernanceHandle, OverrideChange};
 
 /// Who the journal names for a change made through the API.
-const API_ACTOR: &str = "api";
+pub(crate) const API_ACTOR: &str = "api";
 
 /// Where an agent comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -75,6 +75,12 @@ pub struct ResolvedAgentResponse {
     pub examples: Vec<String>,
     /// Tools granted.
     pub access: Vec<String>,
+    /// Whether the agent holds the default access, read again at every run,
+    /// rather than a list chosen for it.
+    pub access_by_default: bool,
+    /// The tools of `access` given on top of the default access; empty for
+    /// an agent that does not hold it.
+    pub access_added: Vec<String>,
     /// Sources checked.
     pub sources: Vec<String>,
     /// The model assigned to the agent, if any.
@@ -90,8 +96,9 @@ pub struct ResolvedAgentResponse {
     /// it runs with the default profile.
     pub profile: Option<String>,
     /// Fields whose value is the user's rather than the package's:
-    /// `name`, `mission`, `examples`, `access`, `sources`, `autonomy`,
-    /// `planning`, `profile`.
+    /// `name`, `mission`, `examples`, `access`, `access_added`, `sources`,
+    /// `autonomy`, `planning`, `profile`. `access_added` names the tools
+    /// given on top of the default access, which `access` lists after it.
     pub overridden: Vec<String>,
     /// The definition as the package declares it, before any override.
     #[schema(value_type = Object)]
@@ -100,6 +107,17 @@ pub struct ResolvedAgentResponse {
 
 impl From<ResolvedAgent> for ResolvedAgentResponse {
     fn from(agent: ResolvedAgent) -> Self {
+        let access_by_default = apollia_tools::reads_by_default(&agent);
+        let access_added = if access_by_default {
+            agent
+                .access_added
+                .iter()
+                .filter(|tool| agent.access.contains(tool))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         Self {
             id: agent.id,
             origin: agent.origin.into(),
@@ -110,6 +128,8 @@ impl From<ResolvedAgent> for ResolvedAgentResponse {
             mission: agent.mission,
             examples: agent.examples,
             access: agent.access,
+            access_by_default,
+            access_added,
             sources: agent.sources,
             model: agent.model.map(Into::into),
             autonomy: agent.autonomy.as_str().to_owned(),
@@ -136,7 +156,7 @@ pub struct SetOverrideRequest {
     pub value: serde_json::Value,
 }
 
-fn open_agents<B: ExecutionBackend + Clone>(
+pub(crate) fn open_agents<B: ExecutionBackend + Clone>(
     state: &AppState<B>,
 ) -> Result<AgentRepository, ApiError> {
     let path = apollia_core::paths::DataFile::Agents.path(&state.data_dir);
@@ -148,7 +168,7 @@ fn open_agents<B: ExecutionBackend + Clone>(
     })
 }
 
-fn store_error(err: AgentRepositoryError) -> ApiError {
+pub(crate) fn store_error(err: AgentRepositoryError) -> ApiError {
     match err {
         AgentRepositoryError::NotFound(name) => {
             api_err(StatusCode::NOT_FOUND, format!("agent '{name}' not found"))
@@ -158,7 +178,7 @@ fn store_error(err: AgentRepositoryError) -> ApiError {
     }
 }
 
-fn override_error(err: AgentOverrideError) -> ApiError {
+pub(crate) fn override_error(err: AgentOverrideError) -> ApiError {
     match err {
         AgentOverrideError::Store(e) => store_error(e),
         other => api_err(StatusCode::INTERNAL_SERVER_ERROR, other),
@@ -169,7 +189,7 @@ fn parse_field(raw: &str) -> Result<OverrideField, ApiError> {
     OverrideField::parse(raw).map_err(|e| api_err(StatusCode::UNPROCESSABLE_ENTITY, e))
 }
 
-fn governance<B: ExecutionBackend + Clone>(
+pub(crate) fn governance<B: ExecutionBackend + Clone>(
     state: &AppState<B>,
 ) -> Result<GovernanceHandle, ApiError> {
     state
@@ -185,7 +205,10 @@ fn governance<B: ExecutionBackend + Clone>(
 }
 
 /// The override writer of an API call.
-fn writer<'a>(repo: &'a AgentRepository, governance: &'a GovernanceHandle) -> OverrideWriter<'a> {
+pub(crate) fn writer<'a>(
+    repo: &'a AgentRepository,
+    governance: &'a GovernanceHandle,
+) -> OverrideWriter<'a> {
     OverrideWriter {
         repo,
         governance,
@@ -194,7 +217,7 @@ fn writer<'a>(repo: &'a AgentRepository, governance: &'a GovernanceHandle) -> Ov
 }
 
 /// The agent `name` resolved, with the model `system.db` assigns it.
-fn resolved<B: ExecutionBackend + Clone>(
+pub(crate) fn resolved<B: ExecutionBackend + Clone>(
     state: &AppState<B>,
     repo: &AgentRepository,
     name: &str,
@@ -252,19 +275,62 @@ fn default_access_setting<B: ExecutionBackend + Clone>(
     }
 }
 
+/// The tools switched off on this machine: the `[tools] disabled` list of
+/// the configuration file read now, and the tools governance disables.
+fn disabled_tools<B: ExecutionBackend + Clone>(state: &AppState<B>) -> Vec<String> {
+    use apollia_core::config::{resolve_setting, PolicySettings};
+    let configured: Vec<String> = state
+        .config_path
+        .as_ref()
+        .and_then(|path| {
+            resolve_setting(path, TOOLS_DISABLED_KEY, &PolicySettings::none())
+                .inspect_err(|error| {
+                    tracing::event!(
+                        tracing::Level::WARN,
+                        key = TOOLS_DISABLED_KEY,
+                        error = %error,
+                        detail = "only the tools governance disables are left out",
+                        "agents.disabled_tools.setting_unreadable"
+                    );
+                })
+                .ok()
+        })
+        .and_then(|setting| serde_json::from_value(setting.value).ok())
+        .unwrap_or_default();
+    crate::governance::tool_gate(state.governance.as_ref(), &state.data_dir, &configured)
+        .disabled_tools
+}
+
+/// Key of the operator's list of tools switched off.
+const TOOLS_DISABLED_KEY: &str = "tools.disabled";
+
 /// `agent` as its card shows it: an agent created without code nobody chose
 /// an access for lists the default access, read against the machine.
 async fn shown<B: ExecutionBackend + Clone>(
     state: &AppState<B>,
     agent: ResolvedAgent,
 ) -> ResolvedAgentResponse {
+    in_force(state, agent).await.into()
+}
+
+/// `agent` with its default access written in when nobody chose one, and the
+/// tools given on top of it, read against the tools of the machine; a tool
+/// switched off is left out.
+pub(crate) async fn in_force<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+    agent: ResolvedAgent,
+) -> ResolvedAgent {
     match state.tool_registry_handle.as_ref() {
         Some(registry) => {
-            apollia_tools::with_default_access(agent, registry, &default_access_setting(state))
-                .await
-                .into()
+            apollia_tools::with_default_access(
+                agent,
+                registry,
+                &default_access_setting(state),
+                &disabled_tools(state),
+            )
+            .await
         }
-        None => agent.into(),
+        None => agent,
     }
 }
 

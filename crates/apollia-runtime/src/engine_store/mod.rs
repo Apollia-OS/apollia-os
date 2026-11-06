@@ -19,7 +19,7 @@
 //!     {
 //!       "engine": "llama-server",
 //!       "tag": "b6000",
-//!       "variant": "cuda",
+//!       "variant": "cuda-12",
 //!       "platform": "windows-x64",
 //!       "size": 412345678,
 //!       "url": "llama-b6000-bin-win-cuda-12.4-x64.zip",
@@ -29,9 +29,14 @@
 //! }
 //! ```
 //!
-//! - `engine` is `llama-server`, `vllm-mlx` or `nodejs`; `variant` is `cuda`,
-//!   `vulkan`, `cpu` or `metal`; `platform` is `<os>-<arch>`, with `os` in
-//!   `macos`, `linux`, `windows` and `arch` in `x64`, `arm64`.
+//! - `engine` is `llama-server`, `vllm-mlx` or `nodejs`; `variant` is
+//!   `cuda-12`, `cuda-13`, `rocm`, `vulkan`, `cpu` or `metal`, and `cuda`, the
+//!   name of the one CUDA build published before, reads as `cuda-12`;
+//!   `platform` is `<os>-<arch>`, with `os` in `macos`, `linux`, `windows`
+//!   and `arch` in `x64`, `arm64`.
+//! - A package of an engine or a variant this build does not know is left
+//!   out and logged; the other packages of the manifest stay installable, so
+//!   a channel can publish a new variant without breaking older copies.
 //! - A `nodejs` package is a pinned Node.js LTS release (`tag` `v22.11.0`),
 //!   always under the `cpu` variant. Its upstream archive is repackaged as
 //!   zip like the others, and installed the first time a tool server needs
@@ -62,20 +67,27 @@
 //!
 //! Under `<data_dir>/engines/`:
 //!
-//! - `settings.json`: the followed channel and the base address;
+//! - `settings.json`: the followed channel and the mirror, when one is set;
 //! - `sequences.json`: the highest sequence accepted per channel;
 //! - `manifests/<channel>.json` and `.minisig`: the last verified manifest,
 //!   verified again whenever it is read;
 //! - `<engine>/<tag>/<variant>/`: an installed package, with its record
 //!   `.apollia-engine.json` written only once the digest matched and the
-//!   archive was extracted. A directory without it is not an engine.
+//!   archive was extracted. A directory without it is not an engine. A CUDA
+//!   12 build an earlier version filed under `cuda/` is read where it is.
 //!
 //! The manifest of a channel is fetched from
-//! `<base_url>/engines-<channel>/engines.json`, and each archive from its
-//! `url` relative to that manifest.
+//! `<base>/engines-<channel>/engines.json`, its signature beside it, and each
+//! archive from its `url` relative to that manifest, on the base that served
+//! it. The bases are the registry of Apollia, then its mirror on GitHub
+//! Releases when the registry cannot be reached or answers an error status;
+//! a mirror set in the settings replaces both, with no fallback. No base is
+//! trusted: a manifest whose signature, channel or sequence is refused stops
+//! the fetch, and the next base is not asked.
 
 mod archive;
 pub mod auto_update;
+pub mod compat;
 mod fetch;
 pub mod install_job;
 mod installed;
@@ -93,15 +105,19 @@ pub use fetch::{
     refresh_manifest, updates, VariantUpdate, MANIFEST_FILE, SIGNATURE_FILE,
 };
 pub use installed::{
-    find_binary, installed_packages, newest_installed, package_dir, preferred_llama_server,
-    wanted_llama_variant, InstalledPackage, Source, RECORD_FILE,
+    find_binary, installed_llama_variants, installed_packages, newest_installed, package_dir,
+    preferred_llama_server, wanted_llama_variant, InstalledPackage, Source, AUTOMATIC_ORDER,
+    RECORD_FILE,
 };
 pub use manifest::{
     archive_kind, compare_tags, current_platform, verify_manifest, ArchiveKind, Channel, Engine,
     Manifest, Package, Variant, MANIFEST_FORMAT,
 };
 pub use selection::{EngineChoices, Resolved};
-pub use settings::{cached_manifest, EngineStoreSettings, DEFAULT_BASE_URL};
+pub use settings::{
+    cached_manifest, mirror_of, EngineStoreSettings, DEFAULT_BASE_URLS, GITHUB_BASE_URL,
+    REGISTRY_BASE_URL,
+};
 
 /// Errors raised by the engine store. Each message is meant to be shown.
 #[derive(Debug, thiserror::Error)]

@@ -1,6 +1,6 @@
 [package]
 name = "apollia-desktop"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 description = "Apollia Desktop - desktop application (Tauri v2 + embedded Apollia OS runtime)"
 # Inherited rather than restated: the Windows installer reads the publisher and
@@ -35,6 +35,7 @@ apollia-tools        = { workspace = true }
 apollia-permissions  = { workspace = true }
 apollia-aip      = { workspace = true }
 apollia-auth        = { workspace = true }
+apollia-signing     = { workspace = true }
 dashmap             = { workspace = true }
 chrono           = { workspace = true }
 uuid             = { workspace = true }

@@ -17,6 +17,13 @@ use thiserror::Error;
 use crate::config::McpServerConfig;
 use crate::origin::{ConnectionOrigin, Provenance};
 
+mod operator;
+mod resources;
+mod tools;
+
+pub use resources::StoredResource;
+pub use tools::StoredTool;
+
 /// Errors returned by [`McpServerRepository`].
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -43,14 +50,15 @@ pub enum McpRepoError {
 }
 
 /// Current schema version of `mcp.db`.
-const MCP_SCHEMA_VERSION: u32 = 5;
+const MCP_SCHEMA_VERSION: u32 = 8;
 
 /// Numbered migration steps of `mcp.db`.
 ///
 /// Step `k` migrates the file from version `k` to `k + 1`; the list length
 /// always equals [`MCP_SCHEMA_VERSION`].
-const MCP_MIGRATIONS: &[apollia_core::schema::Migration] =
-    &[migrate_v1, migrate_v2, migrate_v3, migrate_v4, migrate_v5];
+const MCP_MIGRATIONS: &[apollia_core::schema::Migration] = &[
+    migrate_v1, migrate_v2, migrate_v3, migrate_v4, migrate_v5, migrate_v6, migrate_v7, migrate_v8,
+];
 
 /// v1: the pre-versioning lineage of the file, replayed idempotently.
 ///
@@ -132,6 +140,62 @@ fn migrate_v5(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch("ALTER TABLE mcp_servers DROP COLUMN requires_approval")?;
     }
     Ok(())
+}
+
+/// v6: the tools each server answered its last `tools/list` with, so a
+/// server that is not running still says what it can do. Nothing is carried
+/// from v5: the table fills at the next `tools/list` of each server.
+fn migrate_v6(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mcp_tools (
+            server            TEXT NOT NULL,
+            name              TEXT NOT NULL,
+            title             TEXT,
+            description       TEXT,
+            input_schema_json TEXT NOT NULL DEFAULT '{}',
+            annotations_json  TEXT,
+            fetched_at        TEXT NOT NULL,
+            PRIMARY KEY (server, name)
+        );",
+    )
+}
+
+/// v7: the family the operator gave a tool of a connection the selection
+/// does not classify. Apart from `mcp_servers`, so saving a configuration,
+/// which rewrites `tool_families_json`, never touches it. Nothing is carried
+/// from v6: no operator family existed.
+fn migrate_v7(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mcp_operator_families (
+            server TEXT NOT NULL,
+            tool   TEXT NOT NULL,
+            family TEXT NOT NULL,
+            set_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            PRIMARY KEY (server, tool)
+        );",
+    )
+}
+
+/// v8: the resources each server answered its last `resources/list` with,
+/// so a server that is not running still offers them, and one row per
+/// server that answered a list, so a server that answered an empty one is
+/// told apart from one never asked. Nothing is carried from v7: both tables
+/// fill at the next `resources/list` of each server.
+fn migrate_v8(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mcp_resource_lists (
+            server     TEXT PRIMARY KEY,
+            fetched_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mcp_resources (
+            server      TEXT NOT NULL,
+            uri         TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            mime_type   TEXT,
+            description TEXT,
+            PRIMARY KEY (server, uri)
+        );",
+    )
 }
 
 /// SQLite-backed repository for [`McpServerConfig`] entries.
@@ -241,8 +305,16 @@ impl McpServerRepository {
              ORDER BY name",
         )?;
         let rows = stmt.query_map([], row_to_config)?;
-        rows.map(|r| r.map_err(McpRepoError::Db))
-            .collect::<Result<Vec<_>, _>>()
+        let mut configs = rows
+            .map(|r| r.map_err(McpRepoError::Db))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut operator = self.all_operator_families()?;
+        for config in &mut configs {
+            if let Some(families) = operator.remove(&config.name) {
+                config.operator_families = families;
+            }
+        }
+        Ok(configs)
     }
 
     /// Returns the server with `name`, or `None` if it does not exist.
@@ -257,7 +329,11 @@ impl McpServerRepository {
         )?;
         let mut rows = stmt.query_map(params![name], row_to_config)?;
         match rows.next() {
-            Some(row) => Ok(Some(row?)),
+            Some(row) => {
+                let mut config = row?;
+                config.operator_families = self.operator_families(name)?;
+                Ok(Some(config))
+            }
             None => Ok(None),
         }
     }
@@ -303,7 +379,9 @@ impl McpServerRepository {
 
     /// Deletes the server with `name`.
     ///
-    /// Returns [`McpRepoError::NotFound`] when no row was deleted.
+    /// The tools and resources kept for the server, and the families the
+    /// operator gave its tools, leave with it. Returns
+    /// [`McpRepoError::NotFound`] when no row was deleted.
     pub fn delete(&self, name: &str) -> Result<(), McpRepoError> {
         let affected = self
             .conn
@@ -311,6 +389,9 @@ impl McpServerRepository {
         if affected == 0 {
             return Err(McpRepoError::NotFound(name.to_string()));
         }
+        self.forget_tools(name)?;
+        self.forget_resources(name)?;
+        self.forget_operator_families(name)?;
         Ok(())
     }
 
@@ -328,6 +409,30 @@ impl McpServerRepository {
             return Err(McpRepoError::NotFound(name.to_string()));
         }
         Ok(())
+    }
+
+    /// Names of the servers whose `enabled` flag is off: the servers the user
+    /// put in pause, which are kept but never started.
+    pub fn disabled_names(&self) -> Result<std::collections::HashSet<String>, McpRepoError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM mcp_servers WHERE enabled = 0")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|r| r.map_err(McpRepoError::Db))
+            .collect::<Result<_, _>>()
+    }
+
+    /// Whether the server with `name` is enabled; `None` when no server has
+    /// that name.
+    pub fn is_server_enabled(&self, name: &str) -> Result<Option<bool>, McpRepoError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT enabled FROM mcp_servers WHERE name = ?1")?;
+        let mut rows = stmt.query_map(params![name], |row| row.get::<_, i64>(0))?;
+        match rows.next() {
+            Some(row) => Ok(Some(row? != 0)),
+            None => Ok(None),
+        }
     }
 
     /// Imports a list of [`McpServerConfig`] in a single pass.
@@ -418,6 +523,7 @@ fn row_to_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpServerConfig> {
         max_tools: max_tools as u32,
         tags,
         tool_families,
+        operator_families: Default::default(),
         origin,
     })
 }
@@ -443,6 +549,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         }
     }
@@ -545,6 +652,33 @@ mod tests {
     }
 
     #[test]
+    fn test_disabled_servers_are_read_and_kept_by_a_save() {
+        // GIVEN two servers, one switched off
+        let dir = TempDir::new().unwrap();
+        let repo = McpServerRepository::open(&dir.path().join("mcp.db")).unwrap();
+        repo.save(&stdio_config("notion")).unwrap();
+        repo.save(&stdio_config("sqlite")).unwrap();
+        repo.set_enabled("notion", false).unwrap();
+
+        // WHEN the flag is read, then the switched-off one is saved again
+        let disabled = repo.disabled_names().unwrap();
+        repo.save(&stdio_config("notion")).unwrap();
+
+        // THEN only that one reads disabled, and a save does not switch it on
+        assert_eq!(
+            disabled,
+            std::collections::HashSet::from(["notion".to_owned()])
+        );
+        assert_eq!(repo.is_server_enabled("notion").unwrap(), Some(false));
+        assert_eq!(repo.is_server_enabled("sqlite").unwrap(), Some(true));
+        assert_eq!(repo.is_server_enabled("ghost").unwrap(), None);
+        assert_eq!(
+            repo.disabled_names().unwrap(),
+            std::collections::HashSet::from(["notion".to_owned()])
+        );
+    }
+
+    #[test]
     fn test_set_enabled_persists() {
         // GIVEN a server with enabled=true (default)
         let dir = TempDir::new().unwrap();
@@ -585,6 +719,7 @@ mod tests {
             max_tools: 256,
             tags: vec![],
             tool_families: Default::default(),
+            operator_families: Default::default(),
             origin: None,
         };
 
@@ -647,6 +782,7 @@ mod tests {
                 apollia_tools::ActionFamily::ReadPersonal,
             )]
             .into(),
+            operator_families: Default::default(),
             origin: Some(ConnectionOrigin {
                 provenance: Provenance::Registry,
                 official: true,

@@ -131,6 +131,10 @@ pub struct SessionOverrides {
     /// Accesses the agent does not hold, proposed for the conversation: each
     /// of their calls asks, unless a standing consent covers it.
     pub proposed_accesses: Vec<String>,
+    /// Offers the search over the connections the user can add
+    /// ([`crate::chat::connection_lookup`]), whose executor the invoker of the
+    /// conversation holds. Set for Apollia in a conversation only.
+    pub connection_lookup: bool,
 }
 
 /// The request settings of one turn, read once and applied to each call.
@@ -281,6 +285,10 @@ pub struct BuiltInChatAgent {
     /// Workspace directory injected into the system prompt so the LLM knows its
     /// effective working directory (project workspace or ~/.apollia/ for free chat).
     workspace_path: Option<std::path::PathBuf>,
+    /// The folders granted to the agent and those in pause, read once for
+    /// the turn: the decision on a file tool names the folder its path lands
+    /// in from them, without opening a store at each call.
+    folders: apollia_tools::FolderRoots,
     /// Aggregated MCP tool index for deferred mode.
     ///
     /// `Some` only when the session runs in deferred mode: `build_tool_specs`

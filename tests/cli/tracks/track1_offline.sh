@@ -498,6 +498,24 @@ check_content "audit export without --output: usage error" 'required arguments w
 check_content "audit export --format pdf: usage error naming the formats" 'possible values: csv, json' bash -c "'$BIN' --socket '$OFFSOCK' audit export --format pdf --output '$RUN_TMP/journal-off.pdf' 2>&1; true"
 check_exit   "llm status (off) → 2"    2  "$BIN" --socket "$OFFSOCK" llm status
 check_exit   "llm backends list (off) → 2" 2 "$BIN" --socket "$OFFSOCK" llm backends list
+# The engine leaves read and write through the runtime alone: off, each is
+# exit 2 and gives the one hint the CLI writes for a runtime not started.
+check_exit   "engine list (off) → 2"   2  "$BIN" --socket "$OFFSOCK" engine list
+check_exit   "engine check (off) → 2"  2  "$BIN" --socket "$OFFSOCK" engine check
+check_exit   "engine use auto (off) → 2" 2 "$BIN" --socket "$OFFSOCK" engine use auto
+check_exit   "engine channel (off) → 2" 2 "$BIN" --socket "$OFFSOCK" engine channel
+check_content "engine list (off): the shared hint" 'Start it with `apollia-os start`' bash -c "'$BIN' --socket '$OFFSOCK' engine list 2>&1; true"
+check_json_field "engine channel --json (off): runtime_error envelope" "d['error']['code']" "runtime_error" bash -c "'$BIN' --socket '$OFFSOCK' engine channel --json; true"
+check_exit   "engine channel nightly: usage error → 1" 1 "$BIN" --socket "$OFFSOCK" engine channel nightly
+check_exit   "engine install (off) → 2" 2 "$BIN" --socket "$OFFSOCK" engine install llama-server
+check_exit   "engine install nodejs --detach (off) → 2" 2 "$BIN" --socket "$OFFSOCK" engine install nodejs --detach
+check_exit   "engine import (off) → 2" 2 "$BIN" --socket "$OFFSOCK" engine import "$RUN_TMP"
+check_exit   "engine remove --confirm (off) → 2" 2 "$BIN" --socket "$OFFSOCK" engine remove llama-server b12064 cpu --confirm
+# Without --confirm and with no terminal, the removal is refused before the
+# runtime is asked: exit 1, whether a runtime answers or not.
+check_exit   "engine remove without --confirm → 1" 1 "$BIN" --socket "$OFFSOCK" engine remove llama-server b12064 cpu
+check_content "engine remove without --confirm: says --confirm" "use --confirm" bash -c "'$BIN' --socket '$OFFSOCK' engine remove llama-server b12064 cpu 2>&1 </dev/null; true"
+check_exit   "engine install llama-server opencl: usage error → 1" 1 "$BIN" --socket "$OFFSOCK" engine install llama-server opencl
 check_exit   "task list (off) → 2"     2  "$BIN" --socket "$OFFSOCK" task list
 check_exit   "trigger list (off) → 2"  2  "$BIN" --socket "$OFFSOCK" trigger list
 check_exit   "notify list (off) → 2"   2  "$BIN" --socket "$OFFSOCK" notify list
@@ -526,6 +544,8 @@ check_exit   "source delete without --confirm → 1" 1 "$BIN" --socket "$OFFSOCK
 # The report of the migration of the former projects is read from the daemon:
 # daemon off it refuses with 2, in human and in --json mode.
 check_exit   "source report (off) → 2"         2     "$BIN" --socket "$OFFSOCK" source report
+check_exit   "source show (off) → 2"           2     "$BIN" --socket "$OFFSOCK" source show src-absent
+check_exit   "source show --json (off) → 2"    2     "$BIN" --socket "$OFFSOCK" --json source show src-absent
 check_exit   "source report --json (off) → 2"  2     "$BIN" --socket "$OFFSOCK" --json source report
 # The preview of a workbook or a CSV file is read by the daemon: daemon off it
 # refuses with 2, in human and in --json mode; a file that is not there is

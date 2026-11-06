@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use apollia_auth::ConnectorProvider;
 use apollia_mcp::config::McpServerConfig;
@@ -86,7 +86,7 @@ fn test_two_mcp_servers_and_one_google_account_are_three_connections_with_tools(
             ActionFamily::Read,
             FamilySource::Server,
         )],
-        package_servers: HashSet::new(),
+        package_servers: HashMap::new(),
         native_accounts: vec![(
             ConnectorProvider::Google,
             vec!["ada@example.com".to_owned()],
@@ -94,6 +94,9 @@ fn test_two_mcp_servers_and_one_google_account_are_three_connections_with_tools(
         imap_accounts: Vec::new(),
         forbidden: HashSet::new(),
         folders: Vec::new(),
+        mcp_index: Vec::new(),
+        states: HashMap::new(),
+        paused: HashSet::new(),
     };
 
     // WHEN the connections are listed
@@ -219,7 +222,7 @@ fn test_provenance_comes_from_the_package_then_the_stored_origin_then_custom() {
             ),
             with_origin(server("crm", "stdio", None), Provenance::Custom, false),
         ],
-        package_servers: HashSet::from(["crm".to_owned()]),
+        package_servers: HashMap::from([("crm".to_owned(), "crm-pack".to_owned())]),
         ..ConnectionSources::default()
     };
 
@@ -231,6 +234,9 @@ fn test_provenance_comes_from_the_package_then_the_stored_origin_then_custom() {
     assert_eq!(by_id(&list, "mcp:time").provenance, Provenance::Selection);
     assert_eq!(by_id(&list, "mcp:weather").provenance, Provenance::Registry);
     assert_eq!(by_id(&list, "mcp:crm").provenance, Provenance::Package);
+    // AND the package that brought one is named, and only there
+    assert_eq!(by_id(&list, "mcp:crm").package.as_deref(), Some("crm-pack"));
+    assert_eq!(by_id(&list, "mcp:time").package, None);
 }
 
 #[test]
@@ -369,6 +375,10 @@ fn test_the_wire_shape_is_camel_case() {
     assert_eq!(c["provenance"], "custom");
     assert_eq!(c["remote"], false);
     assert_eq!(c["state"], "connected");
+    assert_eq!(c["status"], "working");
+    assert_eq!(c["reason"], serde_json::Value::Null);
+    assert_eq!(c["checkedAt"], serde_json::Value::Null);
+    assert_eq!(c["package"], serde_json::Value::Null);
     assert_eq!(c["tools"][0]["familySource"], "server");
     assert_eq!(c["tools"][0]["family"], "read");
     assert_eq!(c["tools"][0]["prechecked"], false);
@@ -411,4 +421,203 @@ fn test_a_forbidden_connection_is_marked_forbidden_by_policy() {
         ConnectionState::ForbiddenByPolicy
     );
     assert_eq!(by_id(&list, "mcp:files").state, ConnectionState::Connected);
+    // AND they read as blocked by the organisation
+    assert_eq!(
+        by_id(&list, "mcp:fetch").status,
+        apollia_core::ConnectionStatus::Blocked
+    );
+    assert_eq!(
+        by_id(&list, "native:google:ada@example.com").status,
+        apollia_core::ConnectionStatus::Blocked
+    );
+}
+
+#[test]
+fn a_tool_its_server_declares_read_only_is_listed_read_in_deferred_loading() {
+    // GIVEN a custom server with no selection entry and no live session,
+    //       whose kept index holds a tool declared read-only, a tool declared
+    //       destructive and a tool with no hint
+    let index = |tool: &str, read_only: Option<bool>, destructive: Option<bool>| {
+        apollia_mcp::tool_search::ToolIndexSnapshot {
+            server_name: "navigateur".to_owned(),
+            tool_name: tool.to_owned(),
+            annotations: Some(apollia_mcp::protocol::McpToolAnnotations {
+                read_only_hint: read_only,
+                destructive_hint: destructive,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    };
+    let sources = ConnectionSources {
+        mcp_configs: vec![server(
+            "navigateur",
+            "http",
+            Some("http://localhost:8931/mcp"),
+        )],
+        mcp_index: vec![
+            index("browser_snapshot", Some(true), None),
+            index("browser_close", None, Some(true)),
+            index("browser_click", None, None),
+        ],
+        ..ConnectionSources::default()
+    };
+
+    // WHEN the connections are listed
+    let list = assemble(&sources);
+
+    // THEN each tool is classified by the hints its server declared
+    let tools = &by_id(&list, "mcp:navigateur").tools;
+    let family = |id: &str| {
+        let tool = tools.iter().find(|t| t.id == id).unwrap();
+        (tool.family, tool.family_source)
+    };
+    assert_eq!(
+        family("mcp:navigateur/browser_snapshot"),
+        (ActionFamily::Read, FamilySource::Server)
+    );
+    assert_eq!(
+        family("mcp:navigateur/browser_close"),
+        (ActionFamily::WriteOrDelete, FamilySource::Server)
+    );
+    assert_eq!(
+        family("mcp:navigateur/browser_click"),
+        (ActionFamily::Unclassified, FamilySource::Unsourced)
+    );
+}
+
+#[test]
+fn a_custom_server_in_deferred_loading_offers_every_tool_its_session_indexed() {
+    // GIVEN a custom server with no selection entry, whose live session
+    // indexed two tools and registered none, as deferred loading does
+    let index = |tool: &str| apollia_mcp::tool_search::ToolIndexSnapshot {
+        server_name: "navigateur".to_owned(),
+        tool_name: tool.to_owned(),
+        description: None,
+        tags: Vec::new(),
+        input_schema: None,
+        ..Default::default()
+    };
+    let sources = ConnectionSources {
+        mcp_configs: vec![server(
+            "navigateur",
+            "http",
+            Some("http://localhost:8931/mcp"),
+        )],
+        mcp_statuses: vec![healthy("navigateur")],
+        mcp_index: vec![index("browser_navigate"), index("browser_click")],
+        ..ConnectionSources::default()
+    };
+
+    // WHEN the connections are listed
+    let list = assemble(&sources);
+
+    // THEN the connection offers both tools, unclassified and unchecked, so
+    //      an agent sheet can grant them
+    let tools = &by_id(&list, "mcp:navigateur").tools;
+    let ids: Vec<&str> = tools.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "mcp:navigateur/browser_click",
+            "mcp:navigateur/browser_navigate"
+        ]
+    );
+    assert!(tools
+        .iter()
+        .all(|t| t.family == ActionFamily::Unclassified && !t.prechecked));
+}
+
+#[test]
+fn test_the_operator_family_wins_over_the_hints_in_the_deferred_list() {
+    // GIVEN a custom server in deferred loading whose operator classified
+    //       `lookup` as a write, and whose index still carries the family the
+    //       read-only hint of `lookup` gives
+    let mut config = server("files", "http", Some("http://localhost:8931/mcp"));
+    config
+        .operator_families
+        .insert("lookup".to_owned(), ActionFamily::WriteOrDelete);
+    let sources = ConnectionSources {
+        mcp_configs: vec![config],
+        mcp_statuses: vec![healthy("files")],
+        mcp_index: vec![apollia_mcp::tool_search::ToolIndexSnapshot {
+            server_name: "files".to_owned(),
+            tool_name: "lookup".to_owned(),
+            annotations: Some(apollia_mcp::protocol::McpToolAnnotations {
+                read_only_hint: Some(true),
+                ..Default::default()
+            }),
+            family: ActionFamily::Read,
+            family_source: FamilySource::Server,
+            ..Default::default()
+        }],
+        ..ConnectionSources::default()
+    };
+
+    // WHEN the connections are listed
+    let list = assemble(&sources);
+
+    // THEN the tool reads in the operator's family, from the operator
+    let tool = &by_id(&list, "mcp:files").tools[0];
+    assert_eq!(tool.id, "mcp:files/lookup");
+    assert_eq!(
+        (tool.family, tool.family_source),
+        (ActionFamily::WriteOrDelete, FamilySource::Operator)
+    );
+}
+
+#[test]
+fn test_a_server_without_a_session_lists_the_tools_kept_for_it() {
+    // GIVEN two custom servers with tools kept in `mcp.db`: `files`, in
+    //       pause with no session, whose `lookup` the operator classified,
+    //       and `live`, whose session serves its own index
+    let mut files = server("files", "http", Some("http://localhost:8931/mcp"));
+    files
+        .operator_families
+        .insert("lookup".to_owned(), ActionFamily::WriteOrDelete);
+    let live = server("live", "http", Some("http://localhost:8932/mcp"));
+    let kept = |name: &str| apollia_mcp::server_repository::StoredTool {
+        name: name.to_owned(),
+        title: None,
+        description: None,
+        input_schema: serde_json::json!({"type": "object"}),
+        annotations: Some(apollia_mcp::protocol::McpToolAnnotations {
+            read_only_hint: Some(true),
+            ..Default::default()
+        }),
+        fetched_at: "2026-10-01T00:00:00Z".to_owned(),
+    };
+    let stored = HashMap::from([
+        ("files".to_owned(), vec![kept("lookup"), kept("ping")]),
+        ("live".to_owned(), vec![kept("old")]),
+    ]);
+
+    // WHEN the kept tools are read for the list
+    let index = kept_tool_index(&[files, live], &[healthy("live")], &[], &stored);
+
+    // THEN only the server without a session contributes, each tool
+    //      classified as its next start will classify it
+    let families: Vec<(&str, &str, ActionFamily, FamilySource)> = index
+        .iter()
+        .map(|e| {
+            (
+                e.server_name.as_str(),
+                e.tool_name.as_str(),
+                e.family,
+                e.family_source,
+            )
+        })
+        .collect();
+    assert_eq!(
+        families,
+        [
+            (
+                "files",
+                "lookup",
+                ActionFamily::WriteOrDelete,
+                FamilySource::Operator
+            ),
+            ("files", "ping", ActionFamily::Read, FamilySource::Server),
+        ]
+    );
 }

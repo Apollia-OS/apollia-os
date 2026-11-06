@@ -9,6 +9,7 @@ fn call<'a>(access_id: &'a str, family: ActionFamily, argument: Option<&'a str>)
         agent_id: AGENT,
         access_id,
         argument,
+        reaches: &[],
         family,
         unattended: false,
         granted_for_run: false,
@@ -546,4 +547,276 @@ fn test_a_profile_proposal_is_asked_whatever_consent_stands() {
     // consent still covers the other write
     assert_eq!(asked, asked_without_always());
     assert!(matches!(allowed, AccessDecision::Allowed { .. }));
+}
+
+// Line 1, after the policy: every tool of a connection in pause is refused, reading ones
+// included and whatever consent stands; the reason names the connection, and
+// the tools of the other connections and those Apollia ships are left alone.
+#[test]
+fn test_tools_of_a_paused_connection_are_refused_with_the_pause() {
+    // GIVEN a paused MCP server, a paused Google account and a paused folder,
+    // and an agent holding a standing consent for sending outside
+    let mut state = GovernanceState {
+        paused: ["mcp:notion", "native:google:ada@example.com", "folder:f1"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        ..GovernanceState::default()
+    };
+    state
+        .consents
+        .insert((AGENT.into(), ConsentFamily::SendExternal));
+    let paused = [
+        ("mcp:notion/search", ActionFamily::Read, "mcp:notion"),
+        (
+            "conn:google:ada@example.com/gmail.send",
+            ActionFamily::SendExternal,
+            "native:google:ada@example.com",
+        ),
+        ("conn:folder:f1/read_file", ActionFamily::Read, "folder:f1"),
+    ];
+
+    for (tool, family, connection) in paused {
+        // WHEN a tool of each is decided
+        let decision = decide(&state, &call(tool, family, None), NOW);
+        // THEN it is refused because its connection is in pause
+        assert_eq!(
+            decision,
+            AccessDecision::Denied {
+                reason: DecisionReason::Paused {
+                    connection_id: connection.to_owned()
+                }
+            },
+            "{tool}"
+        );
+    }
+    // AND a tool of another server, of another account, and a native tool run
+    assert!(decide(
+        &state,
+        &call("mcp:files/read", ActionFamily::Read, None),
+        NOW
+    )
+    .is_allowed());
+    assert!(decide(
+        &state,
+        &call(
+            "conn:google:bob@example.com/gmail.search",
+            ActionFamily::Read,
+            None
+        ),
+        NOW
+    )
+    .is_allowed());
+    assert!(decide(&state, &call("web_search", ActionFamily::Read, None), NOW).is_allowed());
+}
+
+// Line 1, the policy before the pause: a connection both forbidden and in pause is refused by
+// the policy, which the user cannot lift by resuming it.
+#[test]
+fn test_the_policy_refuses_before_the_pause() {
+    // GIVEN a server the policy forbade and the user paused
+    let mut state = GovernanceState::default();
+    state
+        .policy
+        .forbidden_connections
+        .insert("mcp:files".into());
+    state.paused.insert("mcp:files".into());
+
+    // WHEN one of its tools is decided
+    let decision = decide(
+        &state,
+        &call("mcp:files/read", ActionFamily::Read, None),
+        NOW,
+    );
+
+    // THEN the policy is the reason
+    assert!(matches!(
+        decision,
+        AccessDecision::Denied {
+            reason: DecisionReason::Policy { .. }
+        }
+    ));
+}
+
+// Line 1: `connections.deny` names a connection in the admission vocabulary;
+// the call is read in it, so an entry refuses the tools it names.
+#[test]
+fn test_connections_deny_refuses_the_tools_of_the_kind_it_names() {
+    // GIVEN a policy whose `connections.deny` names Google, folders and IMAP,
+    // as an organisation writes it, with nothing forbidden at boot
+    let mut state = GovernanceState::default();
+    for name in ["native:google", "native:folder", "native:imap"] {
+        state.policy.denied.insert(name.to_owned());
+    }
+    let refused = [
+        "conn:google:ada@example.com/gmail.search",
+        "conn:folder:f1/read_file",
+        "imap.search",
+    ];
+
+    for tool in refused {
+        // WHEN a tool of each kind is decided
+        let decision = decide(&state, &call(tool, ActionFamily::Read, None), NOW);
+        // THEN the policy refuses it, naming the connection
+        assert_eq!(
+            decision,
+            AccessDecision::Denied {
+                reason: DecisionReason::Policy {
+                    detail: "refused by the organisation policy: this connection is not allowed"
+                        .to_owned()
+                }
+            },
+            "{tool}"
+        );
+    }
+    // AND a Microsoft account and a native tool are left alone
+    assert!(decide(
+        &state,
+        &call(
+            "conn:microsoft:bob@example.com/mail.list",
+            ActionFamily::Read,
+            None
+        ),
+        NOW
+    )
+    .is_allowed());
+    assert!(decide(&state, &call("web_search", ActionFamily::Read, None), NOW).is_allowed());
+}
+
+// The connection of a call, as the connection list names it.
+#[test]
+fn test_the_listed_connection_of_a_call() {
+    // GIVEN a tool of each kind
+    // WHEN its connection is named
+    // THEN it is named as the connection list names it
+    assert_eq!(
+        listed_connection_of("mcp:notion/search").as_deref(),
+        Some("mcp:notion")
+    );
+    assert_eq!(
+        listed_connection_of("conn:google:ada@example.com/gmail.send").as_deref(),
+        Some("native:google:ada@example.com")
+    );
+    assert_eq!(
+        listed_connection_of("conn:folder:f1/read_file").as_deref(),
+        Some("folder:f1")
+    );
+    assert_eq!(listed_connection_of("imap.search"), None);
+    assert_eq!(listed_connection_of("web_search"), None);
+}
+
+// A mailbox tool is shared by every mailbox: the call is refused by the pause
+// of the mailbox it reads, and only of that one.
+#[test]
+fn test_a_mailbox_tool_is_refused_by_the_pause_of_the_mailbox_it_reads() {
+    // GIVEN one mailbox in pause
+    let state = GovernanceState {
+        paused: ["imap:ada@example.org".to_owned()].into_iter().collect(),
+        ..GovernanceState::default()
+    };
+
+    // WHEN a search of that mailbox, and one of another, are decided
+    let on_paused = decide(
+        &state,
+        &call(
+            "imap.search",
+            ActionFamily::ReadPersonal,
+            Some("ada@example.org"),
+        ),
+        NOW,
+    );
+    let on_other = decide(
+        &state,
+        &call(
+            "imap.search",
+            ActionFamily::ReadPersonal,
+            Some("bob@example.org"),
+        ),
+        NOW,
+    );
+
+    // THEN the first is refused by the pause of its mailbox, the second is not
+    assert_eq!(
+        on_paused,
+        AccessDecision::Denied {
+            reason: DecisionReason::Paused {
+                connection_id: "imap:ada@example.org".to_owned()
+            }
+        }
+    );
+    assert!(!matches!(on_other, AccessDecision::Denied { .. }));
+}
+
+// The mailbox store finds an address whatever its case: the decision matches
+// the paused mailbox the same way, and names it as it was paused.
+#[test]
+fn test_a_paused_mailbox_is_matched_whatever_the_case_of_its_address() {
+    // GIVEN the mailbox `Ada@Example.org` in pause
+    let state = GovernanceState {
+        paused: ["imap:Ada@Example.org".to_owned()].into_iter().collect(),
+        ..GovernanceState::default()
+    };
+
+    // WHEN a search names it in lower case
+    let decision = decide(
+        &state,
+        &call(
+            "imap.search",
+            ActionFamily::ReadPersonal,
+            Some("ada@example.org"),
+        ),
+        NOW,
+    );
+
+    // THEN the call is refused by its pause
+    assert_eq!(
+        decision,
+        AccessDecision::Denied {
+            reason: DecisionReason::Paused {
+                connection_id: "imap:Ada@Example.org".to_owned()
+            }
+        }
+    );
+}
+
+// A shared tool's call is refused by the pause of a connection it reaches,
+// and only by a paused one.
+#[test]
+fn test_a_call_is_refused_by_the_pause_of_a_folder_it_reaches() {
+    // GIVEN one folder in pause
+    let state = GovernanceState {
+        paused: ["folder:f1".to_owned()].into_iter().collect(),
+        ..GovernanceState::default()
+    };
+    let in_paused = ["folder:f1".to_owned()];
+    let in_other = ["folder:f2".to_owned()];
+
+    // WHEN a read reaching it, and one reaching another folder, are decided
+    let on_paused = decide(
+        &state,
+        &AccessCall {
+            reaches: &in_paused,
+            ..call("file_read", ActionFamily::Read, Some("/f1/a.md"))
+        },
+        NOW,
+    );
+    let on_other = decide(
+        &state,
+        &AccessCall {
+            reaches: &in_other,
+            ..call("file_read", ActionFamily::Read, Some("/f2/a.md"))
+        },
+        NOW,
+    );
+
+    // THEN the first is refused by the pause of its folder, the second runs
+    assert_eq!(
+        on_paused,
+        AccessDecision::Denied {
+            reason: DecisionReason::Paused {
+                connection_id: "folder:f1".to_owned()
+            }
+        }
+    );
+    assert!(on_other.is_allowed());
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { t } from "svelte-i18n";
+  import { locale, t } from "svelte-i18n";
+  import { argumentDescription, enrichmentLabel, pickLocale } from "$lib/connections/catalogueText";
   import { Eye, EyeOff, ExternalLink, Lock, LogIn, Monitor, ShieldCheck } from "lucide-svelte";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -7,6 +8,8 @@
   import { Textarea } from "$lib/components/ui/textarea";
   import { FormField } from "$lib/components/ui/form-field";
   import { handleExternalLinkClick } from "$lib/utils/externalLink";
+  import { developerMode } from "$lib/stores/developerMode";
+  import { fieldLabel, plainScopes } from "$lib/connections/addFlow";
   import type {
     ConnectorEnrichmentView,
     McpOAuthAccount,
@@ -113,22 +116,39 @@
   const isOAuthMode = $derived(probeMode === "oauth");
   // Resolved help text shown on the Auth step. Prefer the i18n key (so
   // connector-specific guidance is properly localised via svelte-i18n) and
-  // fall back to the legacy bilingual `auth_help_text` baked into the
-  // enrichments JSON, then to the generic default.
+  // fall back to the `auth_help_text` of the selection in the interface
+  // language, then to the generic default.
   const authHelpKey = $derived(enrichment?.auth_help_i18n_key ?? null);
-  const authHelpInline = $derived(enrichment?.auth_help_text ?? null);
+  const authHelpInline = $derived(pickLocale(enrichment?.auth_help_text, $locale));
   // The legacy fields (catalog headers / package env) should only render when
   // the probe outcome calls for them - never alongside the OAuth flow, where
   // they'd compete with the "Sign in" button and confuse the operator.
   const showLegacyFields = $derived(
     hasFields && (probeMode === "static" || probeMode === "idle" || probeMode === "probe_error"),
   );
-  const operatorLabel = $derived(enrichment?.operator_label ?? "");
+  const operatorLabel = $derived(enrichmentLabel(enrichment, $locale) ?? "");
   const oauthIdentityLabel = $derived(
     oauthAccount?.email ?? oauthAccount?.sub ?? null,
   );
 
   let revealed = $state<Record<string, boolean>>({});
+
+  // The name of a field and the identifiers of a sign-in's scopes are the
+  // developer mode's; the operator reads a key, a value, and what is granted.
+  const fieldWords = $derived({
+    key: $t("connections.add_flow.key_label"),
+    value: $t("connections.add_flow.value_label"),
+  });
+  function labelOf(envVar: RegistryEnvVarView): string {
+    return fieldLabel(envVar, $developerMode, fieldWords);
+  }
+  function hintOf(envVar: RegistryEnvVarView): string | undefined {
+    if (!$developerMode && !envVar.isSecret) return undefined;
+    return envVar.description ?? undefined;
+  }
+  const scopeWords = $derived(
+    oauthDiscovery ? plainScopes(oauthDiscovery.scope_descriptions, oauthSelectedScopes) : [],
+  );
 
   function toggleReveal(name: string): void {
     revealed = { ...revealed, [name]: !revealed[name] };
@@ -254,6 +274,15 @@
         <p class="text-caption-lg text-muted-foreground leading-[1.5]" data-testid="auth-oauth-preregistered-scope-note">
           {$t("integrations.wizard.oauth_preregistered_scope_note")}
         </p>
+      {:else if oauthDiscovery && !$developerMode}
+        {#if scopeWords.length > 0}
+          <div class="space-y-1" data-testid="auth-oauth-permissions">
+            <p class="text-sm font-medium text-foreground">{$t("connections.add_flow.permissions_title")}</p>
+            <ul class="ml-5 list-disc space-y-0.5 text-caption text-muted-foreground">
+              {#each scopeWords as word (word)}<li>{word}</li>{/each}
+            </ul>
+          </div>
+        {/if}
       {:else if oauthDiscovery}
         <div class="space-y-2" data-testid="auth-oauth-scopes">
           <div class="space-y-1">
@@ -373,7 +402,7 @@
             required={arg.isRequired}
             optional={!arg.isRequired}
             optionalLabel={`(${$t("integrations.wizard.optional")})`}
-            hint={arg.description ?? undefined}
+            hint={argumentDescription(enrichment, entry.index, $locale) ?? arg.description ?? undefined}
           >
             {#if arg.isRepeatable}
               <Textarea
@@ -411,13 +440,13 @@
       {#each envVars as envVar (envVar.name)}
         <FormField
           id={`env-${envVar.name}`}
-          label={envVar.name}
+          label={labelOf(envVar)}
           labelClass="text-sm text-foreground"
           class="space-y-1.5"
           required={envVar.isRequired}
           optional={!envVar.isRequired}
           optionalLabel={`(${$t("integrations.wizard.optional")})`}
-          hint={envVar.description ?? undefined}
+          hint={hintOf(envVar)}
         >
           {#if envVar.isSecret}
             <p class="flex items-center gap-1 text-caption text-muted-foreground" data-testid={`env-encrypted-note-${envVar.name}`}>
@@ -460,7 +489,7 @@
               type="text"
               value={values[envVar.name] ?? ""}
               oninput={(e) => onchange(envVar.name, (e.currentTarget as HTMLInputElement).value)}
-              placeholder={envVar.name}
+              placeholder={$developerMode ? envVar.name : ""}
               autocomplete="off"
               data-testid={`env-input-${envVar.name}`}
             />

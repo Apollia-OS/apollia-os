@@ -5,6 +5,11 @@
 //! records one [`GovernanceEvent::AccessChanged`] per tool granted or taken
 //! away, so the journal says who gave what to which agent.
 //!
+//! The access compared is the one the store holds for the agent: its list,
+//! or, for an agent on the default access, the tools given on top of it. The
+//! default itself is read from the machine at each run and no override write
+//! changes it, so it never shows as granted or taken away.
+//!
 //! The model of an agent is not an override (it lives in `agent_model` of
 //! `system.db`), but its assignment and its removal are recorded the same way,
 //! under the field [`MODEL_FIELD`], so the history of an agent reads every
@@ -59,6 +64,79 @@ impl OverrideWriter<'_> {
         self.repo.set_override(agent, field, value)?;
         self.record_change(agent, field, OverrideChange::Set)?;
         self.record_access_diff(agent, &before, &access_of(self.repo, agent)?)
+    }
+
+    /// Sets an access of several agents at once, each `(agent, field,
+    /// tools)` of `writes`, the field being [`OverrideField::Access`] (the
+    /// list in force) or [`OverrideField::AccessAdded`] (the tools on top of
+    /// the default access), and records each agent's change: its override,
+    /// then one [`GovernanceEvent::AccessChanged`] per tool granted or taken
+    /// away.
+    ///
+    /// The lists are stored in one transaction, so a refusal stores none and
+    /// records nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`OverrideWriter::set`].
+    pub fn set_access_of_many(
+        &self,
+        writes: &[(String, OverrideField, Vec<String>)],
+    ) -> Result<(), AgentOverrideError> {
+        let before = writes
+            .iter()
+            .map(|(agent, _, _)| access_of(self.repo, agent))
+            .collect::<Result<Vec<_>, _>>()?;
+        let values: Vec<(String, OverrideField, Value)> = writes
+            .iter()
+            .map(|(agent, field, tools)| (agent.clone(), *field, Value::from(tools.clone())))
+            .collect();
+        self.repo.set_overrides(&values)?;
+        for ((agent, field, _), before) in writes.iter().zip(&before) {
+            self.record_change(agent, *field, OverrideChange::Set)?;
+            self.record_access_diff(agent, before, &access_of(self.repo, agent)?)?;
+        }
+        Ok(())
+    }
+
+    /// Sets lists of tools of several agents at once, each `(agent, field,
+    /// tools)` of `writes`, and records each agent's change: its override,
+    /// then one [`GovernanceEvent::AccessChanged`] per tool granted or taken
+    /// away. An agent written in two fields (`access` and `access_added`)
+    /// has its access compared once, so each tool is journaled once.
+    ///
+    /// The lists are stored in one transaction, so a refusal stores none and
+    /// records nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`OverrideWriter::set`].
+    pub fn set_tool_lists_of_many(
+        &self,
+        writes: &[(String, OverrideField, Vec<String>)],
+    ) -> Result<(), AgentOverrideError> {
+        let mut agents: Vec<&str> = Vec::new();
+        for (agent, _, _) in writes {
+            if !agents.contains(&agent.as_str()) {
+                agents.push(agent);
+            }
+        }
+        let before = agents
+            .iter()
+            .map(|agent| access_of(self.repo, agent))
+            .collect::<Result<Vec<_>, _>>()?;
+        let values: Vec<(String, OverrideField, Value)> = writes
+            .iter()
+            .map(|(agent, field, tools)| (agent.clone(), *field, Value::from(tools.clone())))
+            .collect();
+        self.repo.set_overrides(&values)?;
+        for (agent, before) in agents.iter().zip(&before) {
+            for (_, field, _) in writes.iter().filter(|(written, _, _)| written == agent) {
+                self.record_change(agent, *field, OverrideChange::Set)?;
+            }
+            self.record_access_diff(agent, before, &access_of(self.repo, agent)?)?;
+        }
+        Ok(())
     }
 
     /// Removes the user's value of `field` for `agent`, and records it.
@@ -160,9 +238,17 @@ pub fn record_model_change(
     })
 }
 
+/// The access the store holds for `agent`: its list, or the tools given on
+/// top of the default access for an agent that holds it.
 fn access_of(repo: &AgentRepository, agent: &str) -> Result<Vec<String>, AgentRepositoryError> {
     repo.resolved(agent, None, super::global_default_autonomy())?
-        .map(|resolved: ResolvedAgent| resolved.access)
+        .map(|resolved: ResolvedAgent| {
+            if apollia_tools::reads_by_default(&resolved) {
+                resolved.access_added
+            } else {
+                resolved.access
+            }
+        })
         .ok_or_else(|| AgentRepositoryError::NotFound(agent.to_owned()))
 }
 

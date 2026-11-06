@@ -12,6 +12,11 @@
 //! runs them all, and the publication workflow runs that recipe before it
 //! signs anything with the real key.
 //!
+//! `test_published_layout_is_one_the_store_downloads_from` serves that output
+//! over HTTP under the layout the publication workflow writes to the
+//! registry, read from the workflow itself, and has the store download and
+//! install from it.
+//!
 //! `test_published_directory_is_signed_by_the_compiled_key` judges a real
 //! output directory, named by `APOLLIA_ENGINE_MANIFEST_DIR`, against the
 //! distribution key compiled into this tree: the last check before a
@@ -21,14 +26,17 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use apollia_runtime::engine_store::{
-    archive_kind, find_binary, import_from_dir, verify_manifest, Channel, Engine, EngineStore,
-    EngineStoreError, Manifest, Variant, MANIFEST_FILE, SIGNATURE_FILE,
+    archive_kind, find_binary, import_from_dir, install_package, installed_packages,
+    verify_manifest, Channel, Engine, EngineStore, EngineStoreError, EngineStoreSettings, Manifest,
+    Source, Variant, MANIFEST_FILE, SIGNATURE_FILE,
 };
 use sha2::{Digest, Sha256};
 
@@ -98,7 +106,11 @@ fn upstream(root: &Path) -> Upstream {
     let win = format!("llama-{LLAMA_TAG}-bin-win-cuda-x64.zip");
     make_zip(
         &dir.join(&win),
-        &[("llama-server.exe", "server"), ("ggml-cuda.dll", "kernels")],
+        &[
+            ("llama-server.exe", "server"),
+            ("ggml-cuda.dll", "kernels"),
+            ("llama-connect.exe", "tunnel"),
+        ],
     );
     let cudart = "cudart-llama-bin-win-cuda-x64.zip";
     make_zip(&dir.join(cudart), &[("cudart64_12.dll", "runtime")]);
@@ -113,6 +125,13 @@ fn upstream(root: &Path) -> Upstream {
         0o755,
     );
     write_file(&linux_dir.join("libllama.so.0"), "library", 0o644);
+    // The peer-to-peer tunnel tool upstream builds since b12064, which no
+    // published package may carry.
+    write_file(
+        &linux_dir.join("llama-connect"),
+        "#!/bin/sh\necho tunnel\n",
+        0o755,
+    );
     std::os::unix::fs::symlink("libllama.so.0", linux_dir.join("libllama.so")).unwrap();
     let linux = format!("llama-{LLAMA_TAG}-bin-ubuntu-cuda-x64.tar.gz");
     make_tar_gz(&dir.join(&linux), &staging, &linux_top);
@@ -150,12 +169,12 @@ fn upstream(root: &Path) -> Upstream {
     let pins = serde_json::json!({
         "packages": [
             {
-                "engine": "llama-server", "tag": LLAMA_TAG, "variant": "cuda",
+                "engine": "llama-server", "tag": LLAMA_TAG, "variant": "cuda-12",
                 "platform": "windows-x64", "released": "2026-10-01",
                 "sources": [source(&win), runtime],
             },
             {
-                "engine": "llama-server", "tag": LLAMA_TAG, "variant": "cuda",
+                "engine": "llama-server", "tag": LLAMA_TAG, "variant": "cuda-12",
                 "platform": "linux-x64",
                 "sources": [source(&linux)],
             },
@@ -184,8 +203,8 @@ fn script(upstream: &Upstream, out: &Path, sequence: u64) -> Command {
         .arg(&upstream.dir)
         .arg("--out")
         .arg(out)
-        .args(["--require", "llama-server/cuda/windows-x64"])
-        .args(["--require", "llama-server/cuda/linux-x64"])
+        .args(["--require", "llama-server/cuda-12/windows-x64"])
+        .args(["--require", "llama-server/cuda-12/linux-x64"])
         .args(["--require", "nodejs/cpu/linux-x64"])
         .env_remove("APOLLIA_DIST_SIGNING_KEY")
         .env_remove("APOLLIA_DIST_SIGNING_KEY_PASSWORD")
@@ -273,10 +292,46 @@ fn test_unsigned_manifest_is_one_the_store_parses_and_lists_only_zips() {
         assert_eq!(sha256_hex(&archive), package.sha256);
     }
     let windows = manifest
-        .newest(Engine::LlamaServer, Variant::Cuda, "windows-x64")
+        .newest(Engine::LlamaServer, Variant::Cuda12, "windows-x64")
         .unwrap();
     assert_eq!(windows.released.as_deref(), Some("2026-10-01"));
     assert!(!out.join(SIGNATURE_FILE).exists());
+}
+
+#[test]
+fn test_upstream_llama_connect_is_left_out_of_every_published_zip() {
+    // GIVEN upstream llama-server archives, a zip and a tar.gz, that both
+    // carry the llama-connect tunnel tool
+    let tmp = tempfile::tempdir().unwrap();
+    let upstream = upstream(tmp.path());
+    let out = tmp.path().join("out");
+
+    // WHEN the script builds the channel without signing
+    let mut command = script(&upstream, &out, 3);
+    command.arg("--no-sign");
+    let (ok, text) = run(command);
+    assert!(ok, "the script refused: {text}");
+
+    // THEN no published zip holds a llama-connect entry, and the server of
+    // each package is still there
+    let manifest = Manifest::parse(&std::fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+    let mut servers = 0;
+    for package in &manifest.packages {
+        let file = std::fs::File::open(out.join(&package.url)).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        for name in archive.file_names() {
+            let leaf = name.rsplit('/').next().unwrap_or(name);
+            assert!(
+                !leaf.starts_with("llama-connect"),
+                "{} carries {name}",
+                package.url
+            );
+            if leaf == "llama-server" || leaf == "llama-server.exe" {
+                servers += 1;
+            }
+        }
+    }
+    assert_eq!(servers, 2);
 }
 
 #[test]
@@ -323,7 +378,7 @@ fn test_missing_required_package_is_refused() {
 
     // THEN it refuses and names the packages the channel would lose
     assert!(!ok);
-    assert!(text.contains("llama-server/cuda/linux-x64"), "{text}");
+    assert!(text.contains("llama-server/cuda-12/linux-x64"), "{text}");
     assert!(!out.join(MANIFEST_FILE).exists());
 }
 
@@ -362,10 +417,10 @@ fn test_signed_manifest_is_accepted_then_refused_once_altered() {
     // THEN the manifest is accepted with its packages
     assert_eq!(manifest.sequence, 7);
     assert!(manifest
-        .newest(Engine::LlamaServer, Variant::Cuda, "windows-x64")
+        .newest(Engine::LlamaServer, Variant::Cuda12, "windows-x64")
         .is_some());
     assert!(manifest
-        .newest(Engine::LlamaServer, Variant::Cuda, "linux-x64")
+        .newest(Engine::LlamaServer, Variant::Cuda12, "linux-x64")
         .is_some());
 
     // WHEN one byte of the manifest changes
@@ -396,7 +451,7 @@ fn test_tar_gz_engine_comes_out_as_a_zip_the_store_installs() {
         .find(|p| p.engine == Engine::LlamaServer)
         .unwrap();
     assert_eq!(engine.tag, LLAMA_TAG);
-    assert_eq!(engine.variant, Variant::Cuda);
+    assert_eq!(engine.variant, Variant::Cuda12);
     let binary = find_binary(&engine.path, "llama-server").unwrap();
     assert_ne!(binary.metadata().unwrap().permissions().mode() & 0o111, 0);
     let link = binary.with_file_name("libllama.so");
@@ -452,6 +507,142 @@ fn test_signed_nodejs_package_is_accepted_then_refused_once_altered() {
     let refusal = import_from_dir(&fresh, &out).unwrap_err();
     assert!(matches!(refusal, EngineStoreError::Signature { .. }));
     assert!(!fresh.root.join("nodejs").exists());
+}
+
+/// Where the publication workflow puts each file of `out` on the registry,
+/// read from `.github/workflows/engines.yml`: the prefix of the channel, and
+/// the name given to the manifest and to its signature. Archives keep theirs.
+fn registry_layout(channel: &str) -> (String, String, String) {
+    let workflow =
+        std::fs::read_to_string(repo_root().join(".github/workflows/engines.yml")).unwrap();
+    let mut prefix = None;
+    let mut names = HashMap::new();
+    for line in workflow.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("prefix=\"") {
+            prefix = Some(rest.trim_end_matches('"').replace("${CHANNEL}", channel));
+        }
+        for file in [MANIFEST_FILE, SIGNATURE_FILE] {
+            let put = format!("put \"$OUT/{file}\" ");
+            if let Some(rest) = line.strip_prefix(&put) {
+                let name = rest.split_whitespace().next().unwrap().to_owned();
+                names.insert(file, name);
+            }
+        }
+    }
+    (
+        prefix.expect("engines.yml names no registry prefix"),
+        names
+            .remove(MANIFEST_FILE)
+            .expect("engines.yml publishes no manifest"),
+        names
+            .remove(SIGNATURE_FILE)
+            .expect("engines.yml publishes no signature"),
+    )
+}
+
+/// The files of `out` under the paths they are served at.
+fn served_files(
+    out: &Path,
+    prefix: &str,
+    manifest: &str,
+    signature: &str,
+) -> HashMap<String, Vec<u8>> {
+    let mut files = HashMap::new();
+    for entry in std::fs::read_dir(out).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let served = match name.as_str() {
+            MANIFEST_FILE => manifest.to_owned(),
+            SIGNATURE_FILE => signature.to_owned(),
+            _ => name,
+        };
+        files.insert(
+            format!("/{prefix}/{served}"),
+            std::fs::read(entry.path()).unwrap(),
+        );
+    }
+    files
+}
+
+/// Serve `files` on a port of its own, as the registry would, and return
+/// its base address.
+async fn serve(files: HashMap<String, Vec<u8>>) -> String {
+    let files = Arc::new(files);
+    let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+        let files = Arc::clone(&files);
+        async move {
+            match files.get(uri.path()) {
+                Some(bytes) => (axum::http::StatusCode::OK, bytes.clone()),
+                None => (axum::http::StatusCode::NOT_FOUND, Vec::new()),
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+#[ignore = "requires cargo tauri signer"]
+async fn test_published_layout_is_one_the_store_downloads_from() {
+    // GIVEN a signed channel, served under the layout the workflow writes
+    // to the registry
+    let tmp = tempfile::tempdir().unwrap();
+    let (out, public) = signed_publication(tmp.path());
+    let (prefix, manifest, signature) = registry_layout("stable");
+    let base = serve(served_files(&out, &prefix, &manifest, &signature)).await;
+    let linux = store(tmp.path(), &public, "linux-x64");
+    let settings = EngineStoreSettings {
+        channel: Channel::Stable,
+        base_url: Some(base),
+    };
+
+    // WHEN the store installs the Linux CUDA engine from it
+    let outcome = install_package(&linux, &settings, Engine::LlamaServer, Variant::Cuda12).await;
+
+    // THEN the signature held, and the engine is installed from the download
+    assert!(
+        outcome.is_ok(),
+        "the store cannot read {prefix}/{manifest}: {:?}",
+        outcome.as_ref().err()
+    );
+    let installed = outcome.unwrap();
+    assert_eq!(installed.tag, LLAMA_TAG);
+    assert_eq!(installed.source, Source::Downloaded);
+    assert!(find_binary(&installed.path, "llama-server").is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires cargo tauri signer"]
+async fn test_the_former_registry_layout_is_one_the_store_cannot_read() {
+    // GIVEN the same signed channel, served under the layout the registry
+    // was published with before: `engines/<channel>/manifest.json`
+    let tmp = tempfile::tempdir().unwrap();
+    let (out, public) = signed_publication(tmp.path());
+    let base = serve(served_files(
+        &out,
+        "engines/stable",
+        "manifest.json",
+        "manifest.json.minisig",
+    ))
+    .await;
+    let linux = store(tmp.path(), &public, "linux-x64");
+    let settings = EngineStoreSettings {
+        channel: Channel::Stable,
+        base_url: Some(base),
+    };
+
+    // WHEN the store installs from it
+    let err = install_package(&linux, &settings, Engine::LlamaServer, Variant::Cuda12)
+        .await
+        .unwrap_err();
+
+    // THEN no manifest is found there and nothing is installed
+    assert!(
+        matches!(err, EngineStoreError::HttpStatus { status: 404, ref url } if url.ends_with("/engines-stable/engines.json")),
+        "{err}"
+    );
+    assert!(installed_packages(&linux.root).is_empty());
 }
 
 #[test]

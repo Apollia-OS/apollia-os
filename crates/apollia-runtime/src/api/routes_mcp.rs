@@ -95,15 +95,18 @@ fn require_mcp_repo<B: ExecutionBackend + Clone>(
 
 // ─── read routes ─────────────────────────────────────────────────────────────
 
-/// `GET /api/v1/mcp/servers`, List all connected MCP servers with their status.
+/// `GET /api/v1/mcp/servers`, List every MCP server the runtime runs or knows, with its status.
 ///
+/// A server that runs no session yet is listed with `connected: false` and
+/// `dormant: true`: it starts at the next call of one of its tools, and its
+/// tool count is what it last published.
 /// Returns an empty array when no MCP configuration is active.
 #[utoipa::path(
     get,
     path = "/api/v1/mcp/servers",
     tag = "mcp",
     responses(
-        (status = 200, description = "Connected MCP servers with their status"),
+        (status = 200, description = "MCP servers with their status, dormant ones included"),
     )
 )]
 pub(crate) async fn list_servers<B: ExecutionBackend + Clone>(
@@ -119,8 +122,11 @@ pub(crate) async fn list_servers<B: ExecutionBackend + Clone>(
 /// `GET /api/v1/mcp/resources`, List MCP resources aggregated across servers.
 ///
 /// Returns the same data as the agent-facing `mcp_resources_list` tool: one
-/// entry per resource exposed by a connected MCP server, tagged with its owning
+/// entry per resource exposed by an MCP server, tagged with its owning
 /// server. Feeds the desktop @-mention picker.
+/// A server that runs no session answers the list it last gave, without
+/// starting; one never listed starts in the background and joins a later
+/// answer. A paused server offers nothing.
 ///
 /// Returns an empty array (not an error) when no MCP configuration is active,
 /// so the picker degrades to "no resources" rather than a failure state.
@@ -129,7 +135,7 @@ pub(crate) async fn list_servers<B: ExecutionBackend + Clone>(
     path = "/api/v1/mcp/resources",
     tag = "mcp",
     responses(
-        (status = 200, description = "MCP resources aggregated across connected servers"),
+        (status = 200, description = "MCP resources aggregated across servers, running or not"),
     )
 )]
 pub(crate) async fn list_resources<B: ExecutionBackend + Clone>(
@@ -176,7 +182,10 @@ pub(crate) async fn get_server_detail<B: ExecutionBackend + Clone>(
 ///
 /// The `env` map contains either literal values for non-secret variables or
 /// `${APOLLIA_SECRET:NAME}` placeholders for secret ones, actual secret
-/// material is never returned. Used by the desktop "Modifier les arguments"
+/// material is never returned: a secret still kept in clear (a header of a
+/// remote server, a variable whose name marks it secret) is shown as the
+/// placeholder of its variable, and a configuration sent back with that
+/// placeholder keeps the stored value. Used by the desktop "Modifier les arguments"
 /// flow to fetch the current config, patch `args`, and PUT the result back
 /// without losing the rest of the configuration.
 ///
@@ -214,7 +223,7 @@ pub(crate) async fn get_server_raw_config<B: ExecutionBackend + Clone>(
                 format!("server '{}' not found", name),
             )
         })?;
-    Ok(Json(config))
+    Ok(Json(apollia_mcp::secret_filing::masked(&config)))
 }
 
 /// `POST /api/v1/mcp/servers/:name/restart`, Restart a specific MCP server session.
@@ -239,6 +248,7 @@ pub(crate) async fn get_server_raw_config<B: ExecutionBackend + Clone>(
         (status = 200, description = "Server restarted or (re)connected"),
         (status = 400, description = "Fallback connect failed", body = crate::api::openapi::ApiErrorBody),
         (status = 403, description = "Forbidden by the organisation policy since the last start", body = crate::api::openapi::ApiErrorBody),
+        (status = 409, description = "The connection is paused", body = crate::api::openapi::ApiErrorBody),
         (status = 404, description = "Server not found", body = crate::api::openapi::ApiErrorBody),
         (status = 500, description = "Repository error", body = crate::api::openapi::ApiErrorBody),
         (status = 503, description = "MCP not configured", body = crate::api::openapi::ApiErrorBody),
@@ -320,10 +330,16 @@ pub(crate) async fn add_server<B: ExecutionBackend + Clone>(
 /// installer: admission, spawn, persistence, journal.
 pub(crate) async fn add_server_to<B: ExecutionBackend + Clone>(
     state: &AppState<B>,
-    config: McpServerConfig,
+    mut config: McpServerConfig,
 ) -> Result<McpServerStatus, JsonError> {
     let handle = require_mcp_handle(state)?;
     let repo = require_mcp_repo(state)?;
+    // A connection added again keeps the families the operator gave its tools.
+    if let Ok(guard) = repo.lock() {
+        if let Ok(families) = guard.operator_families(&config.name) {
+            config.operator_families = families;
+        }
+    }
 
     let request = AdmissionRequest::for_mcp_server(&config);
     if let AdmissionDecision::Refused { reason } = state.connection_governance.admit(&request) {
@@ -339,6 +355,8 @@ pub(crate) async fn add_server_to<B: ExecutionBackend + Clone>(
         json_err(code, e)
     })?;
 
+    let mut stored = config;
+    secrets::file_secrets(&state.secret_store, &mut stored, None)?;
     {
         let guard = repo.lock().map_err(|_| {
             json_err(
@@ -347,14 +365,14 @@ pub(crate) async fn add_server_to<B: ExecutionBackend + Clone>(
             )
         })?;
         guard
-            .save(&config)
+            .save(&stored)
             .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
     state
         .connection_governance
         .record_or_warn(&ConnectionEvent::Added {
-            connection_id: mcp_connection_id(&config.name),
+            connection_id: mcp_connection_id(&stored.name),
             kind: request.kind,
             remote: request.remote,
             provenance: request.provenance,
@@ -366,10 +384,12 @@ pub(crate) async fn add_server_to<B: ExecutionBackend + Clone>(
 
 /// `DELETE /api/v1/mcp/servers/:name`, Remove an MCP server and delete it from `mcp.db`.
 ///
-/// Shuts down the session, unregisters the server, removes its database entry,
-/// then journals the removal.
+/// Shuts down the session when there is one, unregisters the server, removes
+/// its database entry, then journals the removal. A server that never started
+/// is removed all the same. `DELETE /api/v1/connections/{id}` removes what
+/// else the server leaves behind.
 /// Returns `200 OK` with `{"removed": "<name>"}` on success.
-/// Returns `404 Not Found` when no server with the given name is managed.
+/// Returns `404 Not Found` when the server is neither running nor stored.
 /// Returns `503 Service Unavailable` when MCP is not configured.
 #[utoipa::path(
     delete,
@@ -378,7 +398,7 @@ pub(crate) async fn add_server_to<B: ExecutionBackend + Clone>(
     params(("name" = String, Path, description = "Server name")),
     responses(
         (status = 200, description = "Server removed"),
-        (status = 404, description = "Server not found", body = crate::api::openapi::ApiErrorBody),
+        (status = 404, description = "Server neither running nor stored", body = crate::api::openapi::ApiErrorBody),
         (status = 500, description = "Repository error", body = crate::api::openapi::ApiErrorBody),
         (status = 503, description = "MCP not configured", body = crate::api::openapi::ApiErrorBody),
     )
@@ -401,23 +421,32 @@ pub(crate) async fn remove_server_from<B: ExecutionBackend + Clone>(
     let handle = require_mcp_handle(state)?;
     let repo = require_mcp_repo(state)?;
 
-    handle.remove_server(name).await.map_err(|_| {
-        json_err(
-            StatusCode::NOT_FOUND,
-            format!("server '{}' not found", name),
-        )
-    })?;
-
-    {
+    // A server that never started, or whose session ended, has no session
+    // to stop: its configuration is removed all the same.
+    let stopped = handle.remove_server(name).await.is_ok();
+    let deleted = {
         let guard = repo.lock().map_err(|_| {
             json_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "repository lock poisoned",
             )
         })?;
-        guard
-            .delete(name)
-            .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let known = guard
+            .find_by_name(name)
+            .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .is_some();
+        if known {
+            guard
+                .delete(name)
+                .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        }
+        known
+    };
+    if !stopped && !deleted {
+        return Err(json_err(
+            StatusCode::NOT_FOUND,
+            format!("server '{}' not found", name),
+        ));
     }
 
     state
@@ -582,6 +611,7 @@ pub(crate) async fn test_live_server<B: ExecutionBackend + Clone>(
         (status = 200, description = "Configuration replaced and session restarted"),
         (status = 400, description = "New session failed to start", body = crate::api::openapi::ApiErrorBody),
         (status = 403, description = "Refused by the connection admission, or forbidden since the last start", body = crate::api::openapi::ApiErrorBody),
+        (status = 409, description = "The connection is paused", body = crate::api::openapi::ApiErrorBody),
         (status = 404, description = "Server not found", body = crate::api::openapi::ApiErrorBody),
         (status = 500, description = "Repository error", body = crate::api::openapi::ApiErrorBody),
         (status = 503, description = "MCP not configured", body = crate::api::openapi::ApiErrorBody),
@@ -615,8 +645,9 @@ pub(crate) async fn update_server_config<B: ExecutionBackend + Clone>(
                 )
             })?
     };
-    let config = merge_server_config_patch(existing, &patch)
+    let mut config = merge_server_config_patch(existing.clone(), &patch)
         .map_err(|e| json_err(StatusCode::BAD_REQUEST, e))?;
+    apollia_mcp::secret_filing::restore_masked(&mut config, &existing);
     refuse_forbidden(&state, &name)?;
     let request = AdmissionRequest::for_mcp_server(&config);
     if let AdmissionDecision::Refused { reason } = state.connection_governance.admit(&request) {
@@ -630,11 +661,25 @@ pub(crate) async fn update_server_config<B: ExecutionBackend + Clone>(
         )
     })?;
 
-    let status = handle
-        .add_server(config.clone())
-        .await
-        .map_err(|e| json_err(StatusCode::BAD_REQUEST, e))?;
+    let status = match handle.add_server(config.clone()).await {
+        Ok(status) => status,
+        Err(e) => {
+            // The configuration in `mcp.db` is still the previous one: start
+            // it again, so a change that fails does not take the server out.
+            if let Err(restore) = handle.add_server(existing).await {
+                tracing::event!(
+                    tracing::Level::WARN,
+                    server = %name,
+                    error = %restore,
+                    "mcp.server.config_update.restore_failed"
+                );
+            }
+            return Err(json_err(StatusCode::BAD_REQUEST, e));
+        }
+    };
 
+    let mut stored = config;
+    secrets::file_secrets(&state.secret_store, &mut stored, Some(&existing))?;
     {
         let guard = repo.lock().map_err(|_| {
             json_err(
@@ -643,7 +688,7 @@ pub(crate) async fn update_server_config<B: ExecutionBackend + Clone>(
             )
         })?;
         guard
-            .save(&config)
+            .save(&stored)
             .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
@@ -651,19 +696,31 @@ pub(crate) async fn update_server_config<B: ExecutionBackend + Clone>(
         .connection_governance
         .record_or_warn(&ConnectionEvent::Modified {
             connection_id: mcp_connection_id(&name),
-            remote: crate::connections::is_remote(&config.transport, config.url.as_deref()),
+            remote: crate::connections::is_remote(&stored.transport, stored.url.as_deref()),
             actor: ROUTE_ACTOR.to_owned(),
         });
 
     Ok(Json(status))
 }
 
+/// What a request to start a server in pause answers.
+pub const PAUSED_SERVER_REASON: &str = "this connection is paused: resume it to start it";
+
 /// Refuses to start the server `name` again when the policy forbade it at
-/// boot: it stays stopped until a start finds it admitted.
+/// boot, or when the user put it in pause (its `enabled` flag off): it stays
+/// stopped until a start finds it admitted, or until it is resumed.
 fn refuse_forbidden<B: ExecutionBackend + Clone>(
     state: &AppState<B>,
     name: &str,
 ) -> Result<(), JsonError> {
+    let paused = state
+        .mcp_server_repo
+        .as_ref()
+        .and_then(|repo| repo.lock().ok()?.is_server_enabled(name).ok().flatten())
+        == Some(false);
+    if paused {
+        return Err(json_err(StatusCode::CONFLICT, PAUSED_SERVER_REASON));
+    }
     if state
         .connection_governance
         .forbidden()
@@ -704,7 +761,14 @@ fn merge_server_config_patch(
 }
 
 #[cfg(test)]
-mod governance_tests;
+pub(crate) mod governance_tests;
+#[cfg(test)]
+mod on_demand_tests;
+#[cfg(test)]
+mod removal_tests;
+#[cfg(test)]
+mod secret_tests;
+mod secrets;
 
 // ─── tests ────────────────────────────────────────────────────────────────────
 
@@ -813,6 +877,7 @@ mod tests {
                 server_info: "notion-mcp".to_string(),
                 tools_count: 2,
                 connected: true,
+                dormant: false,
                 pid: Some(1234),
                 uptime_secs: Some(60),
                 last_call_at: None,
@@ -847,6 +912,7 @@ mod tests {
                 server_info: "notion-mcp".to_string(),
                 tools_count: 2,
                 connected: true,
+                dormant: false,
                 pid: None,
                 uptime_secs: Some(120),
                 last_call_at: None,
@@ -895,6 +961,7 @@ mod tests {
                 server_info: "notion-mcp-server".to_string(),
                 tools_count: 5,
                 connected: true,
+                dormant: false,
                 pid: None,
                 uptime_secs: Some(120),
                 last_call_at: None,
@@ -908,6 +975,7 @@ mod tests {
                 server_info: "mcp-server-sqlite".to_string(),
                 tools_count: 3,
                 connected: true,
+                dormant: false,
                 pid: None,
                 uptime_secs: Some(90),
                 last_call_at: None,

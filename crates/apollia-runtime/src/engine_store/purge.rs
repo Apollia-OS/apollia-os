@@ -115,6 +115,18 @@ pub fn purge_variant(root: &Path, engine: Engine, variant: Variant) -> Vec<Insta
     removed
 }
 
+/// Delete the one build `package` names, as a purge deletes it: its record
+/// first, then its directory, then the tag directory once it is empty. What
+/// may be deleted is the caller's to decide; the purge never deletes the
+/// newest tag, the removal route refuses the build in service.
+///
+/// # Errors
+///
+/// The I/O error that kept the record or the directory from going.
+pub fn remove_build(package: &InstalledPackage) -> std::io::Result<()> {
+    delete(package)
+}
+
 /// Delete one package. Its record goes first, so a directory half deleted is
 /// no longer an engine; the tag directory goes too once it is empty.
 fn delete(package: &InstalledPackage) -> std::io::Result<()> {
@@ -193,9 +205,9 @@ mod tests {
         // ago, b6000 an hour ago, and b7000 just installed by an update
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        file(root, Variant::Cuda, "b5000", Some(720));
-        file(root, Variant::Cuda, "b6000", Some(1));
-        let updated = file(root, Variant::Cuda, "b7000", None);
+        file(root, Variant::Cuda12, "b5000", Some(720));
+        file(root, Variant::Cuda12, "b6000", Some(1));
+        let updated = file(root, Variant::Cuda12, "b7000", None);
 
         // WHEN the purge that follows the update runs, the setting on
         let removed = purge_after_update(root, true, &[updated]);
@@ -205,8 +217,8 @@ mod tests {
             removed.iter().map(|p| p.tag.as_str()).collect::<Vec<_>>(),
             ["b5000"]
         );
-        assert_eq!(tags(root, Variant::Cuda), ["b6000", "b7000"]);
-        assert!(!package_dir(root, Engine::LlamaServer, "b5000", Variant::Cuda).exists());
+        assert_eq!(tags(root, Variant::Cuda12), ["b6000", "b7000"]);
+        assert!(!package_dir(root, Engine::LlamaServer, "b5000", Variant::Cuda12).exists());
         assert!(!root.join("llama-server").join("b5000").exists());
     }
 
@@ -216,18 +228,18 @@ mod tests {
         // takes, is the build used the longest ago
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        file(root, Variant::Cuda, "b5000", Some(2));
-        file(root, Variant::Cuda, "b6000", Some(1));
-        file(root, Variant::Cuda, "b7000", Some(720));
+        file(root, Variant::Cuda12, "b5000", Some(2));
+        file(root, Variant::Cuda12, "b6000", Some(1));
+        file(root, Variant::Cuda12, "b7000", Some(720));
 
         // WHEN the variant is purged
-        let removed = purge_variant(root, Engine::LlamaServer, Variant::Cuda);
+        let removed = purge_variant(root, Engine::LlamaServer, Variant::Cuda12);
 
         // THEN the build in service stays, and the least recently used of the
         // two others goes
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].tag, "b5000");
-        assert_eq!(tags(root, Variant::Cuda), ["b6000", "b7000"]);
+        assert_eq!(tags(root, Variant::Cuda12), ["b6000", "b7000"]);
     }
 
     #[test]
@@ -236,9 +248,9 @@ mod tests {
         // shares a tag directory with a CUDA build about to be deleted
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        file(root, Variant::Cuda, "b5000", Some(720));
-        file(root, Variant::Cuda, "b6000", Some(1));
-        let updated = file(root, Variant::Cuda, "b7000", None);
+        file(root, Variant::Cuda12, "b5000", Some(720));
+        file(root, Variant::Cuda12, "b6000", Some(1));
+        let updated = file(root, Variant::Cuda12, "b7000", None);
         file(root, Variant::Vulkan, "b5000", Some(900));
         file(root, Variant::Vulkan, "b6000", Some(800));
 
@@ -247,7 +259,7 @@ mod tests {
 
         // THEN only the CUDA variant lost a build
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].variant, Variant::Cuda);
+        assert_eq!(removed[0].variant, Variant::Cuda12);
         assert_eq!(tags(root, Variant::Vulkan), ["b5000", "b6000"]);
         assert!(package_dir(root, Engine::LlamaServer, "b5000", Variant::Vulkan).is_dir());
     }
@@ -257,16 +269,16 @@ mod tests {
         // GIVEN three filed tags of a variant
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        file(root, Variant::Cuda, "b5000", Some(720));
-        file(root, Variant::Cuda, "b6000", Some(1));
-        let updated = file(root, Variant::Cuda, "b7000", None);
+        file(root, Variant::Cuda12, "b5000", Some(720));
+        file(root, Variant::Cuda12, "b6000", Some(1));
+        let updated = file(root, Variant::Cuda12, "b7000", None);
 
         // WHEN the update is followed up with the setting off
         let removed = purge_after_update(root, false, &[updated]);
 
         // THEN the three builds are still there
         assert!(removed.is_empty());
-        assert_eq!(tags(root, Variant::Cuda), ["b5000", "b6000", "b7000"]);
+        assert_eq!(tags(root, Variant::Cuda12), ["b5000", "b6000", "b7000"]);
     }
 
     #[test]
@@ -274,7 +286,7 @@ mod tests {
         // GIVEN a filed build no launcher took, and a path outside the store
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let package = file(root, Variant::Cuda, "b6000", None);
+        let package = file(root, Variant::Cuda12, "b6000", None);
         let installed = last_used(&package);
         let outside = dir.path().join("elsewhere");
 

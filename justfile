@@ -124,6 +124,11 @@ build-desktop target="" runners="" backend="": _require-tauri
     export APOLLIA_DESKTOP_RUNNERS="$RUNNERS" APOLLIA_DESKTOP_LLAMA_BACKEND="$BACKEND" CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
     cargo tauri build ${ARGS[@]+"${ARGS[@]}"}
 
+# Stage verified Tesseract and Leptonica sources for a build with the ocr feature
+[group('build')]
+ocr-sources:
+    bash "{{root}}/packaging/fetch-tesseract-sources.sh"
+
 # Remove the build artifacts
 [group('build')]
 clean:
@@ -261,6 +266,9 @@ guards:
       "scripts/check_embedded_docs_size.py"
       "scripts/check_embedded_docs_size.py --selftest"
       "scripts/check_download_sums.py"
+      "scripts/check_download_sums.py --selftest"
+      "scripts/check_ocr_languages.py --selftest"
+      "scripts/gen_llama_support.py --selftest"
       "scripts/check_guard_verdicts.py"
       "scripts/check_http_clients.py"
       "scripts/check_i18n_catalogue.py"
@@ -275,6 +283,7 @@ guards:
       "scripts/check_python_rules.py"
       "scripts/check_swizzled_theme.py"
       "scripts/check_release_artifacts.py"
+      "scripts/release_ocr_e2e.py --selftest"
       "scripts/check_generated_clients.py"
       "scripts/check_connector_fixtures.py"
       "scripts/check_rust_rules.py"

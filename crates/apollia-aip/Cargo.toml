@@ -1,6 +1,6 @@
 [package]
 name = "apollia-aip"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Apollia OS - Agent Interface Protocol bridge (PyO3, Rust <-> Python async via pyo3-async-runtimes)"
@@ -13,6 +13,8 @@ apollia-tools         = { workspace = true }
 apollia-memory        = { workspace = true }
 apollia-llm           = { workspace = true, features = ["cloud"] }
 apollia-runtime       = { workspace = true }
+apollia-mcp           = { workspace = true }
+apollia-permissions   = { workspace = true }
 apollia-workspace     = { workspace = true }
 apollia-notifications = { workspace = true }
 apollia-stt           = { workspace = true, default-features = false }
@@ -33,7 +35,6 @@ minijinja           = { workspace = true }
 [dev-dependencies]
 apollia-auth = { workspace = true }
 tempfile = { workspace = true }
-apollia-mcp = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(kani)'] }

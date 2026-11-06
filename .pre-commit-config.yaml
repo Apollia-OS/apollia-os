@@ -13,14 +13,21 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
+      # `third_party/tesseract-rs/` is the published crate copied byte for
+      # byte, and the one change it carries is reviewed as its own commit
+      # against that copy. These two hooks are the ones that rewrite it (a
+      # trailing space in one file, a missing final newline in twelve): left
+      # to them, the comparison with the published crate would show
+      # differences nobody made on purpose. Every other hook reads the copy.
       - id: trailing-whitespace
         # `docs/site/src/theme/` mirrors four files of a third-party plugin,
         # byte for byte apart from two declared deviations, and
         # scripts/check_swizzled_theme.py holds it there. Stripping whitespace
         # this tree did not write turns that comparison red for a reason no
         # reader can see: the diff shows two identical-looking lines.
-        exclude: '(\.md$|^docs/site/src/theme/)'
+        exclude: '(\.md$|^docs/site/src/theme/|^third_party/tesseract-rs/)'
       - id: end-of-file-fixer
+        exclude: '^third_party/tesseract-rs/'
       - id: check-merge-conflict
       - id: check-yaml
       - id: check-toml
@@ -192,7 +199,8 @@ repos:
       # architectures, every one a model that would have been refused. This
       # entry fires when the pin moves or the tables are edited by hand. It is
       # a no-op when upstream is unreachable and uncached, so an offline commit
-      # is not blocked; CI runs it with the network.
+      # is not blocked; the deny job of ci.yml runs it on every change with
+      # --require-upstream, where that same case is a red.
       - id: check-llama-support
         name: the llama.cpp support tables match the pinned build
         entry: python3 scripts/gen_llama_support.py --check
@@ -509,16 +517,17 @@ repos:
         files: '^(clients/openapi\.json|clients/python/apollia_runtime_client/api/.*\.py|scripts/check_generated_clients\.py)$'
         pass_filenames: false
 
-      # The four roots the guard declares: the packaging scripts and their
-      # sums files, the desktop bundling scripts, and the workflow run blocks.
-      # A download without a pinned sum is born in a commit touching one of
-      # them. The upstream-digest comparison (--github) stays in CI: it needs
+      # The roots the guard declares: the packaging scripts and their sums
+      # files, the desktop bundling scripts, the workflow run blocks, and the
+      # root Cargo.toml, whose tesseract-rs pin the Tesseract sources table
+      # must serve. A download without a pinned sum is born in a commit
+      # touching one of them. The upstream-digest comparison (--github) stays in CI: it needs
       # the network and a token a commit cannot assume.
       - id: check-download-sums
         name: every download is verified against a pinned sha256 sum
         entry: python3 scripts/check_download_sums.py
         language: system
-        files: '^(packaging/.+|crates/apollia-desktop/scripts/.+|\.github/workflows/.+|scripts/check_download_sums\.py)$'
+        files: '^(Cargo\.toml|packaging/.+|crates/apollia-desktop/scripts/.+|\.github/workflows/.+|scripts/check_download_sums\.py)$'
         pass_filenames: false
 
       # Blocks a commit that breaks the documentation build. The second branch

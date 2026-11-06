@@ -122,6 +122,9 @@ fn every_section_carries_the_reload_class_of_the_measured_table() {
         ("hitl", ReloadClass::Reloadable),
         ("tools", ReloadClass::Reloadable),
         ("mcp", ReloadClass::Reloadable),
+        // Read once, when the MCP manager starts with its sessions.
+        ("mcp.tool_loading", ReloadClass::Restart),
+        ("mcp.idle_stop_secs", ReloadClass::Restart),
         ("hooks", ReloadClass::Reloadable),
         ("chat", ReloadClass::Reloadable),
         ("observability", ReloadClass::Reloadable),
@@ -135,8 +138,9 @@ fn every_section_carries_the_reload_class_of_the_measured_table() {
         ("server.separate_reasoning_content", ReloadClass::Reloadable),
         ("server.allow_request_mcp", ReloadClass::Reloadable),
         ("engines", ReloadClass::Reloadable),
-        // Read once, when each engine supervisor locates what it starts.
-        ("engines.gguf", ReloadClass::Restart),
+        // Read again at every launch of the GGUF engine.
+        ("engines.gguf", ReloadClass::Reloadable),
+        // Read once, when the MLX engine supervisor locates what it starts.
         ("engines.mlx", ReloadClass::Restart),
         ("author", ReloadClass::Reloadable),
         // Read again at every model launch, unlike the rest of `[llm]`.
@@ -245,8 +249,12 @@ fn the_named_settings_are_lockable() {
             "tools.new_agent.families",
             "tools.new_agent.access",
             "mcp.tool_loading",
+            "mcp.idle_stop_secs",
             "mcp.tool_search_limit",
             "mcp.server_enabled",
+            "mcp.catalogue_url",
+            "mcp.catalogue_mirror_url",
+            "mcp.catalogue_enabled",
             "chat.share_profile_default",
             "models.registry_url",
             "models.registry_mirror_url",

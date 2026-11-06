@@ -25,12 +25,12 @@ the same commit as the command.
 | Category | Verbs |
 |---|---|
 | entity | `show`, `create`, `delete`, `list`, `rename`, `edit` |
-| config | `get`, `set`, `raw-config`, `set-default` |
+| config | `get`, `set`, `raw-config`, `set-default`, `use`, `channel` |
 | relationship | `add`, `remove` |
 | lifecycle | `install`, `uninstall`, `enable`, `disable`, `start`, `stop`, `restart`, `reset`, `reload`, `update`, `revoke`, `login`, `logout`, `setup`, `init`, `resume`, `cancel`, `pause` |
 | maintenance | `clear`, `evict`, `purge`, `forget` |
 | report | `status`, `logs`, `stats`, `costs`, `report`, `journal`, `pending`, `approvals`, `messages`, `skills`, `accounts`, `accesses`, `capabilities`, `template`, `hardware`, `recommend`, `schema`, `keys`, `anchor`, `inspect`, `preview`, `trace`, `version`, `digest` |
-| action | `run`, `build`, `new`, `keygen`, `sign`, `test`, `fire`, `invoke`, `validate`, `verify`, `replay`, `retry`, `search`, `discover`, `download`, `transcribe`, `ping`, `chat`, `learn-procedure`, `decide`, `doctor`, `onboard`, `review`, `guide`, `explain`, `do`, `completions` |
+| action | `run`, `build`, `check`, `new`, `keygen`, `sign`, `test`, `fire`, `invoke`, `validate`, `verify`, `replay`, `retry`, `search`, `discover`, `download`, `transcribe`, `ping`, `chat`, `learn-procedure`, `decide`, `doctor`, `onboard`, `review`, `guide`, `explain`, `do`, `completions` |
 | interchange | `export`, `import` |
 
 **One verb per intent.** `show` is the only entity-detail read (it absorbed
@@ -117,7 +117,7 @@ keyring, the connections and the governance, adds the MCP servers a package
 brings and journals the installation. The archive is sent by its absolute
 path; a missing file is refused before the runtime is reached.
 
-**`source`** (`list`, `create`, `delete`, `inspect`, `report`) reads and writes the registry of
+**`source`** (`list`, `show`, `create`, `delete`, `inspect`, `report`) reads and writes the registry of
 sources an agent may consult once checked: a folder, a file or a mailbox,
 which name what they point at with `--reference`, the profile, the memory, a
 code folder. Every leaf goes through the runtime, whose actor owns the
@@ -128,6 +128,10 @@ a workbook or a CSV file as a batch would read it, through the runtime too:
 the sheet and header row proposed, the first twenty rows, the columns by
 letter and name, and whether results may be written into the original. A
 file that is not there is refused with exit 1 before the runtime is reached.
+`show <id>` reads one source and where its index stands: documents and
+passages, the files left out by reason, and the pages waiting for
+recognition or not read, from `GET /api/v1/sources/{id}/index`; an unknown
+identifier exits 1.
 `report` shows what the migration of the former projects carried over into
 sources at boot, and what it listed instead; exit 1 when no migration has run.
 
@@ -142,6 +146,25 @@ removed, exit 2; Apollia is refused before the runtime is reached, exit 1.
 `init`, `sign`, `verify`, `show`) and never reaches the runtime: the policy is
 read by the runtime at startup, not served by it. No leaf writes into the
 system policy folder; IT deploys the prepared folder with its own tools.
+
+**`engine`** (`list`, `check`, `use`, `channel`, `install`, `import`, `remove`) reads and sets the inference
+engines of the machine the runtime serves on, through the runtime. `list`
+shows the cards, the engines installed and the one in service, the variants
+the channel offers with their verdict (`--all` adds those that do not run
+here), and Node.js. `check` probes again and verifies the channel; a channel
+out of reach or a refused signature is exit 2. `use` writes `engines.gguf`
+through `PUT /api/v1/config`, refuses a variant not installed with exit 1 and
+warns about one rated incompatible. `channel` reads the followed channel, or
+follows `stable` or `preview`. `install` installs a variant of `llama-server`
+(the one rated recommended when none is named; one rated incompatible needs
+`--force`) or Node.js, and `import <dir>` the engines of a directory copied
+from a release; both follow the installation every 500 ms until it ends, exit
+3 on a failed download, exit 2 on a directory the runtime refuses, exit 5 on
+Ctrl-C after asking the runtime to cancel; `--detach` returns once the runtime
+accepted it. `remove <engine> <tag> <variant> --confirm` removes one installed
+build and says what `engines.gguf` comes down to; a build in service, the
+embedded engine or a build not installed is refused with exit 1. Daemon off,
+each exits 2 with the hint of `output::emit_runtime_not_started`.
 
 ---
 

@@ -52,6 +52,17 @@ Two cards open the step: **On this computer** and **Use a server**. Four possibl
 
 **Continue** becomes active as soon as a model is configured (green **Configured** badge), a model of a server is chosen, or a download is started. You do not have to wait for the download: go on with the next steps while the file arrives. Its progress stays shown at the top of the window on every step, and the model is set up by itself when the file lands.
 
+#### The reading language of scanned pages
+
+Your sources can hold scanned pages and pictures: Apollia reads their text on this computer, with a reading language (French or English). With a connection there is nothing to do: the language downloads by itself the first time a source contains a scanned page.
+
+On a machine without a connection, import it from a file brought on a disk or a key (`fra.traineddata` or `eng.traineddata`, the file of your version):
+
+- during this step, **Load a model** also accepts the file: choose **Language data for scanned documents** in the file type of the window. the window then says the file is in place and that scanned pages and pictures are read with it;
+- later, from the **AI** screen, with **Import a reading language**.
+
+A file Apollia does not know is refused, with the message **This file is not a reading language Apollia knows.**: only the language files of your version are accepted, recognised by their content and not by their name.
+
 #### Buttons available in the footer
 
 - **← Back** - returns to the Language step.
@@ -158,7 +169,7 @@ Once the flow is finished, open **Settings → Profile**: the default profile ho
 - **The window does not open on first launch:** check the startup logs. If the error mentions the onboarding agent, restart Apollia; it is provisioned automatically at every launch.
 - **The Continue button stays disabled on the AI step:** it opens once a model is configured (green **Configured** badge), a model is chosen under **Use a server**, or a download is started. A download that failed or was cancelled closes it again.
 - **A model download is stuck at 0 %:** check your internet connection, cancel with the **X** button, then start again. Expected throughput is 5 to 50 MB/s depending on your link.
-- **The model test does not answer:** go on with the flow; the model can be tried again from the AI screen. If the chat stays silent afterwards, see [The AI provider does not answer](../troubleshooting/the-ai-provider-does-not-answer.md).
+- **The model test does not answer:** go on with the flow; the model can be tried again from the AI screen. If the chat stays silent afterwards, see [The AI does not answer](../troubleshooting/the-ai-provider-does-not-answer.md).
 - **The form opens empty:** the agent proposed nothing, or you skipped the questions. Fill the fields by hand, or skip and come back from **Settings → Profile**.
 
 > **Technical reference:** [Apollia reference](/reference).

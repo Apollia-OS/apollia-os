@@ -18,15 +18,25 @@
 //!   the curated selection or from an official publisher. The hints a server
 //!   declares classify its tools, they never pre-authorise one.
 
+pub mod agents;
 mod assemble;
+pub mod check;
 pub mod folder_import;
 pub mod folders;
 mod packages;
+pub mod removal;
+mod schema;
+pub mod state;
 
-pub use assemble::{assemble, ConnectionSources, NativeAccounts};
+pub use assemble::{assemble, kept_tool_index, ConnectionSources, NativeAccounts};
 pub use folders::{folder_connection, folder_connection_id, folder_connections, folder_id_of};
-pub use packages::package_connection_names;
+pub use packages::package_connections;
+pub use state::{
+    lift_provider_block, native_provider_connection_id, record_admin_approval_required,
+    spawn_state_recorder,
+};
 
+use apollia_core::{ConnectionReason, ConnectionStatus};
 use apollia_mcp::Provenance;
 use apollia_tools::{ActionFamily, FamilySource};
 use serde::{Deserialize, Serialize};
@@ -45,7 +55,9 @@ pub enum ConnectionKind {
     Folder,
 }
 
-/// Whether a connection can be used right now.
+/// Whether a connection can be used right now, in the detail its kind gives.
+///
+/// What its user reads is [`Connection::status`], one of four states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionState {
@@ -104,8 +116,20 @@ pub struct Connection {
     pub remote: bool,
     /// Published by the service's own publisher.
     pub official: bool,
-    /// Whether it can be used right now.
+    /// Whether it can be used right now, in the detail its kind gives.
     pub state: ConnectionState,
+    /// What its user reads: working, needs repair, paused, or blocked by the
+    /// organisation, as last found (see [`state`]).
+    #[schema(schema_with = schema::status_schema)]
+    pub status: ConnectionStatus,
+    /// Why it is not working, absent when it works.
+    #[schema(schema_with = schema::reason_schema)]
+    pub reason: Option<ConnectionReason>,
+    /// When its state was last found, RFC 3339 in UTC; absent when it never
+    /// was.
+    pub checked_at: Option<String>,
+    /// Name of the installed package that brought it, when one did.
+    pub package: Option<String>,
     /// Tools the connection brings.
     pub tools: Vec<ConnectionTool>,
 }
@@ -134,10 +158,45 @@ pub fn is_prechecked(family: ActionFamily, provenance: Provenance, official: boo
     family == ActionFamily::Read && (provenance == Provenance::Selection || official)
 }
 
+/// Directory of the data directory holding the files installed for each
+/// connection, one directory per connection (a server's packages).
+pub const INSTALLED_FILES_DIR: &str = "connections";
+
 /// Identifier of the connection of the mailbox at `email`.
 #[must_use]
 pub fn imap_connection_id(email: &str) -> String {
-    format!("imap:{email}")
+    format!("{IMAP_CONNECTION_PREFIX}{email}")
+}
+
+/// Prefix of the identifier of the connection of a mailbox.
+const IMAP_CONNECTION_PREFIX: &str = "imap:";
+
+/// Whether the connection identifiers `a` and `b` name the same connection:
+/// equal, or two mailboxes at the same address in another case, matched as
+/// the store of the mailboxes finds one
+/// ([`apollia_connectors::imap::same_address`]).
+#[must_use]
+pub fn same_connection(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (
+        a.strip_prefix(IMAP_CONNECTION_PREFIX),
+        b.strip_prefix(IMAP_CONNECTION_PREFIX),
+    ) {
+        (Some(a), Some(b)) => apollia_connectors::imap::same_address(a, b),
+        _ => false,
+    }
+}
+
+/// The entry of `paused` that names the connection `id`, as it was paused
+/// (see [`same_connection`]).
+#[must_use]
+pub fn paused_entry(paused: &std::collections::HashSet<String>, id: &str) -> Option<String> {
+    if paused.contains(id) {
+        return Some(id.to_owned());
+    }
+    paused.iter().find(|p| same_connection(p, id)).cloned()
 }
 
 /// `true` unless `host` is a loopback address: a mailbox server on this

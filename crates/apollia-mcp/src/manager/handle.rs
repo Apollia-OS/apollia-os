@@ -3,20 +3,22 @@
 //! Split out of `manager.rs`: the actor stays in the parent, the cloneable
 //! sender every caller holds lives here.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use apollia_core::{EventBusSender, RuntimeEvent};
 use apollia_tools::registry::ToolRegistryHandle;
 
 use crate::config::{DefaultMcpSecretResolver, McpServerConfig};
+use crate::manager::kept::kept_snapshots;
+use crate::manager::on_demand::Dormant;
 use crate::manager::views::{
     log_session_start_error, register_session_tools_in_registry, ServerHints,
 };
 use crate::manager::{
     McpClientManager, McpClientManagerHandle, McpCommand, McpConnectionTestResult,
-    McpResourcePayload, McpResourceSummary, McpServerDetail, McpServerStatus, ProbeSpec,
+    McpResourcePayload, McpResourceSummary, McpServerDetail, McpServerStatus, OnDemand, ProbeSpec,
 };
 use crate::protocol::ToolCallResult;
 use crate::session::{LoadingMode, McpSession, McpSessionError};
@@ -34,8 +36,11 @@ impl McpClientManagerHandle {
     /// sessions are established.
     ///
     /// `event_bus` is optional: when `Some`, [`RuntimeEvent::McpServerReloaded`] is
-    /// published on every successful hot reload. When `None`, reloads still work but
-    /// no event is emitted.
+    /// published on every successful hot reload, and
+    /// [`RuntimeEvent::McpServerHealthChanged`] on every start, restart and
+    /// reload (with the health it left, failed or not), on every change a
+    /// call outcome brings, and when a session's transport closes on its own.
+    /// When `None`, everything still works but no event is emitted.
     ///
     /// `loading_mode` selects the schema loading strategy for every session: in
     /// [`LoadingMode::Eager`] all tool schemas are fetched at boot and registered;
@@ -47,7 +52,79 @@ impl McpClientManagerHandle {
         event_bus: Option<EventBusSender>,
         loading_mode: LoadingMode,
     ) -> Result<Self, McpSessionError> {
-        let (tx, rx) = mpsc::channel(32);
+        Self::start_inner(configs, tool_registry, event_bus, loading_mode).await
+    }
+
+    /// Start the MCP client manager without starting any server, keeping
+    /// the tools each server publishes in `tool_store`.
+    ///
+    /// Each server of `configs` waits, dormant, with the tools it last
+    /// published: in [`LoadingMode::Deferred`] they serve
+    /// [`McpClientManagerHandle::get_tool_index`], with their descriptions,
+    /// hints and family; in [`LoadingMode::Eager`] their descriptors are
+    /// registered. The first [`McpClientManagerHandle::call_tool`] of a
+    /// dormant server starts it in a task and waits for its handshake. A
+    /// server with nothing kept is started at once, in a task: this function
+    /// waits for no handshake.
+    ///
+    /// Every `tools/list` a session answers when it starts is kept in the
+    /// store of `on_demand`. A session that answered no call for its
+    /// `idle_stop` is stopped and its server goes back to dormant; `None`
+    /// never stops one.
+    pub async fn start_keeping_tools(
+        configs: Vec<McpServerConfig>,
+        tool_registry: &ToolRegistryHandle,
+        event_bus: Option<EventBusSender>,
+        loading_mode: LoadingMode,
+        on_demand: OnDemand,
+    ) -> Result<Self, McpSessionError> {
+        let mut stored = on_demand.tool_store.load().await;
+        let kept_resources = on_demand.tool_store.load_resources().await;
+        let paused = on_demand.tool_store.paused().await;
+        let (mut actor, handle) = McpClientManager::new(
+            tool_registry,
+            event_bus,
+            loading_mode,
+            Some(on_demand.tool_store),
+        );
+        actor.idle_stop = on_demand.idle_stop;
+        actor.kept_resources = kept_resources;
+        actor.paused = paused;
+        let mut unknown = Vec::new();
+        for config in configs {
+            let name = config.name.clone();
+            let tools = stored.remove(&name).unwrap_or_default();
+            if tools.is_empty() {
+                unknown.push(name.clone());
+            } else if loading_mode == LoadingMode::Deferred {
+                actor
+                    .kept_index
+                    .insert(name.clone(), kept_snapshots(&config, &tools));
+            }
+            let dormant = Dormant::new(config, tools);
+            actor.register_dormant(&name, &dormant).await;
+            actor.dormant.insert(name, dormant);
+        }
+        tracing::event!(
+            tracing::Level::INFO,
+            servers = actor.dormant.len(),
+            started = unknown.len(),
+            "mcp.manager.started_dormant"
+        );
+        for name in &unknown {
+            actor.begin_start(name);
+        }
+        actor.publish();
+        tokio::spawn(actor.run());
+        Ok(handle)
+    }
+
+    async fn start_inner(
+        configs: Vec<McpServerConfig>,
+        tool_registry: &ToolRegistryHandle,
+        event_bus: Option<EventBusSender>,
+        loading_mode: LoadingMode,
+    ) -> Result<Self, McpSessionError> {
         let mut sessions: HashMap<String, McpSession> = HashMap::new();
 
         for config in configs {
@@ -78,6 +155,12 @@ impl McpClientManagerHandle {
                         .await;
                     }
 
+                    if let Some(ref tx) = event_bus {
+                        let _ = tx.send(RuntimeEvent::McpServerHealthChanged {
+                            name: server_name.clone(),
+                            health: session.health().clone(),
+                        });
+                    }
                     sessions.insert(server_name, session);
                 }
                 Err(e) => {
@@ -95,19 +178,15 @@ impl McpClientManagerHandle {
             }
         }
 
-        let actor = McpClientManager {
-            sessions,
-            rx,
-            tool_registry: tool_registry.clone(),
-            reloading: HashSet::new(),
-            request_servers: HashSet::new(),
-            event_bus,
-            last_call_at: HashMap::new(),
-            loading_mode,
-        };
+        let (mut actor, handle) =
+            McpClientManager::new(tool_registry, event_bus, loading_mode, None);
+        actor.sessions = sessions;
+        for (name, session) in &actor.sessions {
+            actor.watch_session_end(name, session);
+        }
+        actor.publish();
         tokio::spawn(actor.run());
-
-        Ok(Self { tx })
+        Ok(handle)
     }
     /// Execute a tool on the named MCP server.
     ///
@@ -138,44 +217,33 @@ impl McpClientManagerHandle {
     }
     /// Return the status of every connected MCP server.
     ///
-    /// Returns an empty `Vec` when the actor has already shut down.
+    /// Read from the state the actor last published, without waiting for the
+    /// actor: a tool call in progress does not delay it. Returns an empty
+    /// `Vec` once the actor has shut down.
     pub async fn status(&self) -> Vec<McpServerStatus> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(McpCommand::GetStatus { reply: reply_tx })
-            .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        reply_rx.await.unwrap_or_default()
+        self.snapshot.borrow().statuses()
     }
     /// Collect the lightweight tool index across all deferred-mode sessions.
     ///
     /// Each entry carries the fully qualified `mcp:<server>/<tool>` identity
     /// material plus the owning server's tags, ready to feed the synthetic
-    /// `tool_search` tool. Returns an empty `Vec` when no session runs in
-    /// deferred mode, when no server is connected, or when the actor has already
-    /// shut down.
+    /// `tool_search` tool. Read from the state the actor last published,
+    /// without waiting for the actor. Returns an empty `Vec` when no session
+    /// runs in deferred mode, when no server is connected, or when the actor
+    /// has already shut down.
     pub async fn get_tool_index(&self) -> Vec<ToolIndexSnapshot> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(McpCommand::GetToolIndex { reply: reply_tx })
-            .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        reply_rx.await.unwrap_or_default()
+        self.snapshot.borrow().tool_index()
     }
-    /// Aggregate `resources/list` across every connected MCP server.
+    /// Aggregate the resources of every MCP server, running or dormant.
     ///
     /// Returns one [`McpResourceSummary`] per resource, tagged with its owning
-    /// server. Servers that do not advertise the `resources` capability are
-    /// skipped without a round-trip. Returns an empty `Vec` when no server is
-    /// connected or the actor has already shut down.
+    /// server. A running server is asked (`resources/list`) and its answer
+    /// kept; a dormant server answers the list it last gave, without
+    /// starting. A dormant server never asked is started in a task, without
+    /// delaying this answer; its list joins the next one. Servers that do not
+    /// advertise the `resources` capability are skipped without a
+    /// round-trip, a paused server offers nothing. Returns an empty `Vec`
+    /// once the actor has shut down.
     pub async fn list_resources(&self) -> Vec<McpResourceSummary> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -191,14 +259,16 @@ impl McpClientManagerHandle {
     /// Read a single resource (`resources/read`).
     ///
     /// When `server_name` is `Some`, the call is routed directly to that
-    /// session. When `None`, the manager resolves the owning server by matching
-    /// `uri` against the per-session resource list.
+    /// server. When `None`, the manager resolves the owning server by matching
+    /// `uri` against the running servers' lists, then the kept ones. A
+    /// dormant server is started first, as a tool call starts it.
     ///
     /// # Errors
     ///
-    /// Returns [`McpSessionError::ServerExited`] when the actor channel is
-    /// closed, when the named server is unknown, or when no connected server
-    /// exposes a resource with the given `uri`. Propagates any
+    /// Returns [`McpSessionError::ServerPaused`] for a server in pause, which
+    /// does not start. Returns [`McpSessionError::ServerExited`] when the
+    /// actor channel is closed, when the named server is unknown, or when no
+    /// server exposes a resource with the given `uri`. Propagates any
     /// [`McpSessionError`] raised by the underlying `resources/read` call.
     pub async fn read_resource(
         &self,
@@ -325,10 +395,24 @@ impl McpClientManagerHandle {
     ///
     /// Returns [`McpSessionError::ServerExited`] when no session with `name` exists.
     pub async fn remove_server(&self, name: &str) -> Result<(), McpSessionError> {
+        self.send_remove(name, false).await
+    }
+
+    /// Stop an MCP server without forgetting it: its session ends and its
+    /// descriptors leave the registry, but the tools it last published stay
+    /// kept in `mcp.db`, out of the tool index, until it starts again.
+    ///
+    /// Returns [`McpSessionError::ServerExited`] when no session with `name` exists.
+    pub async fn stop_server(&self, name: &str) -> Result<(), McpSessionError> {
+        self.send_remove(name, true).await
+    }
+
+    async fn send_remove(&self, name: &str, keep_tools: bool) -> Result<(), McpSessionError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(McpCommand::RemoveServer {
                 server_name: name.to_string(),
+                keep_tools,
                 reply: reply_tx,
             })
             .await

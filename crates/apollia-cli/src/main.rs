@@ -29,6 +29,7 @@ use commands::audit::AuditCommand;
 use commands::chat;
 use commands::config::ConfigCommand;
 use commands::connector::ConnectorCommand;
+use commands::engine::EngineCommand;
 use commands::hooks::HooksCommand;
 use commands::llm::LlmCommand;
 use commands::mcp::McpCommand;
@@ -225,6 +226,13 @@ enum Commands {
         command: LlmCommand,
     },
 
+    /// The inference engines: the cards detected, the variants installed and offered, the one in service (list, check, use, channel, install, import, remove).
+    Engine {
+        /// Engine subcommand.
+        #[command(subcommand)]
+        command: EngineCommand,
+    },
+
     /// Local model file management.
     Model {
         /// Model subcommand.
@@ -232,7 +240,7 @@ enum Commands {
         command: ModelCommand,
     },
 
-    /// The sources an agent may consult once checked: folders, files, mailboxes, the profile, memory (list, create, delete, inspect)
+    /// The sources an agent may consult once checked: folders, files, mailboxes, the profile, memory (list, show, create, delete, inspect)
     Source {
         #[command(subcommand)]
         command: SourceCommand,
@@ -367,7 +375,9 @@ enum Commands {
     /// Diagnose the local Apollia environment (no runtime required).
     ///
     /// Verifies the Apollia home directory, the config file, local SQLite
-    /// databases, the Python bridge, and the runtime socket. Prints a status
+    /// databases, the models directory, recognition (whether this build reads
+    /// scanned pages, and which reading languages are in place), the Python
+    /// bridge, the sandbox posture, and the runtime socket. Prints a status
     /// table and exits 0 when healthy, 1 when at least one check errors.
     Doctor,
 
@@ -670,6 +680,7 @@ fn main() {
             Commands::Hooks { command } => commands::hooks::run(&command, cli.socket, json).await,
             Commands::Memory { command } => commands::memory::run_and_print(&command, json),
             Commands::Llm { command } => commands::llm::run(&command, cli.socket, json).await,
+            Commands::Engine { command } => commands::engine::run(&command, cli.socket, json).await,
             Commands::Model { command } => commands::model::run(&command, cli.socket, json).await,
             Commands::Source { command } => commands::source::run(&command, cli.socket, json).await,
             Commands::Trigger { command } => {

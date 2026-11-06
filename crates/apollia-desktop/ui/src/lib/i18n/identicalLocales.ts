@@ -24,21 +24,14 @@ export const IDENTICAL_BY_NATURE: string[] = [
   "ai.panel.inference.structured.placeholder", // { "type": "object", "properties": {} }
   "authorizations.apollia_name", // Apollia
   "chat.generation.seconds", // {value} s
-  "connections.capabilities.group_gdocs", // Google Docs
-  "connections.capabilities.group_gdrive", // Google Drive
-  "connections.capabilities.group_gforms", // Google Forms
-  "connections.capabilities.group_gmail", // Gmail
-  "connections.capabilities.group_gsheets", // Google Sheets
   "dev.developer.examples.javascript", // JavaScript
   "dev.developer.examples.python", // Python
-  "connections.capabilities.group_gslides", // Google Slides
-  "connections.capabilities.group_gtasks", // Google Tasks
-  "connections.capabilities.group_onedrive", // OneDrive
-  "connections.capabilities.group_outlook_mail", // Outlook Mail
-  "connections.capabilities.group_youtube", // YouTube
   "connections.native_google_name", // Google Workspace
   "connections.native_microsoft_description", // Outlook Mail, Outlook Calendar, OneDrive
   "connections.native_microsoft_name", // Microsoft 365
+  "connections.onedrive_choices.root", // OneDrive
+  "connections.tile.brings.drive", // Drive
+  "connections.tile.brings.onedrive", // OneDrive
   "dev.connections.custom_transport_http", // Streamable HTTP (MCP 2025-11-25)
   "dev.connections.custom_transport_sse", // SSE (legacy 2024-11-05)
   "dev.workflows.depth", // depth
@@ -128,15 +121,18 @@ export const IDENTICAL_BY_DECISION: string[] = [
   "commandPalette.groups.actions", // Actions
   "commandPalette.groups.pages", // Pages
   "commandPalette.groups.sessions", // Sessions
-  "connections.badge_status_attention", // attention
   "connections.custom_test_ok", // Test OK - {result}
   "connections.mcp_settings.transport", // Transport
   "connections.mailbox.port_label", // Port
+  "connections.tile.brings.mail", // Mail
+  "connections.add_window.browse.usages_label", // Usages
+  "connections.add_window.browse.source_label", // Source
+  "connections.add_window.card.usage", // Usage
+  "connections.usage.communication", // Communication
   "detailSidebar.tab_guide", // Guide
   "dev.ai.panel.type.embeddings.label", // Embeddings
   "dev.connections.custom_transport_label", // Transport
-  "connections.settings_provider_title", // Provider
-  "connections.status_chip_attention", // Attention
+  "connections.list.kind_mcp", // Services
   "dev.developer.docs.admonition.danger", // Danger
   "dev.developer.docs.admonition.info", // Info
   "dev.developer.docs.admonition.note", // Note
@@ -152,7 +148,6 @@ export const IDENTICAL_BY_DECISION: string[] = [
   "journal.filter.agent", // Agent
   "journal.filter.nature", // Nature
   "journal.nature.action", // Actions
-  "journal.title", // Journal
   "library.detail.agents", // Agents
   "library.detail.workflows", // Workflows
   "library.kind.agent", // agent
@@ -187,7 +182,6 @@ export const IDENTICAL_BY_DECISION: string[] = [
   "plan_session.origin_initial", // Initial
   "plan_session.tab_plan", // Plan
   "policy.badge.active", // Active
-  "policy.section.journal.title", // Journal
   "policy.signature.title", // Signature
   "project_migration.row_documents_title", // Documents
   "project_migration.row_instructions_title", // Instructions
@@ -202,6 +196,8 @@ export const IDENTICAL_BY_DECISION: string[] = [
   "dev.developer.mcp.kind_agent", // Agent
   "dev.developer.mcp.kind_workflow", // Workflow
   "settings.engines.channel_stable", // Stable
+  "settings.engines.verdict_compatible", // Compatible
+  "settings.engines.verdict_incompatible", // Incompatible
   "settings.developer.on_demand.idle_unit", // minutes
   "settings.general.application_title", // Application
   "settings.general.channel_stable", // Stable

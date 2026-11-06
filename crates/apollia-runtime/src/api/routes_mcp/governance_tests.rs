@@ -30,7 +30,7 @@ use crate::registry::AgentRegistry;
 use crate::router::TaskRouterHandle;
 
 #[derive(Clone)]
-struct MockBackend;
+pub(crate) struct MockBackend;
 
 impl From<DynBackend> for MockBackend {
     fn from(_: DynBackend) -> Self {
@@ -83,7 +83,7 @@ impl ConnectionAdmission for Unreadable {
 }
 
 /// A server the mock MCP script answers for over stdio.
-fn mock_server(name: &str) -> McpServerConfig {
+pub(crate) fn mock_server(name: &str) -> McpServerConfig {
     McpServerConfig {
         format_version: 1,
         name: name.to_string(),
@@ -102,20 +102,21 @@ fn mock_server(name: &str) -> McpServerConfig {
         max_tools: 256,
         tags: vec![],
         tool_families: Default::default(),
+        operator_families: Default::default(),
         origin: None,
     }
 }
 
-struct Harness {
-    dir: TempDir,
-    state: AppState<MockBackend>,
-    manager: McpClientManagerHandle,
-    journal: AuditJournalHandle,
+pub(crate) struct Harness {
+    pub(crate) dir: TempDir,
+    pub(crate) state: AppState<MockBackend>,
+    pub(crate) manager: McpClientManagerHandle,
+    pub(crate) journal: AuditJournalHandle,
 }
 
 /// An app state with a live MCP manager, `mcp.db` in a temporary directory,
 /// and connection governance over `admission` and a journal.
-async fn harness(admission: Arc<dyn ConnectionAdmission>) -> Harness {
+pub(crate) async fn harness(admission: Arc<dyn ConnectionAdmission>) -> Harness {
     let dir = TempDir::new().unwrap();
     let repo = McpServerRepository::open(&dir.path().join("mcp.db")).unwrap();
     let journal = AuditJournalHandle::open(&dir.path().join("audit_journal.db"))
@@ -145,6 +146,7 @@ async fn harness(admission: Arc<dyn ConnectionAdmission>) -> Harness {
         tool_registry_handle: Some(tool_registry),
         audit_journal: Some(journal.clone()),
         connection_governance: ConnectionGovernance::new(admission, Some(journal.clone())),
+        mcp_registry: None,
         governance: None,
         inference_governance: Default::default(),
         obs_config: apollia_core::ObservabilityConfig::default(),
@@ -183,7 +185,7 @@ async fn harness(admission: Arc<dyn ConnectionAdmission>) -> Harness {
     }
 }
 
-fn persisted(h: &Harness) -> Vec<McpServerConfig> {
+pub(crate) fn persisted(h: &Harness) -> Vec<McpServerConfig> {
     h.state
         .mcp_server_repo
         .as_ref()
@@ -370,5 +372,38 @@ async fn test_add_modify_remove_are_journaled() {
         .await
         .expect("verify");
     assert!(report.ok);
+    h.manager.shutdown().await;
+}
+
+// A server in pause is not started on request, by a restart or by a change
+// of its configuration.
+#[tokio::test]
+async fn test_a_paused_server_is_not_started_on_request() {
+    // GIVEN a stored server the user put in pause
+    let h = harness(Arc::new(crate::governance::NoPolicyAdmission)).await;
+    {
+        let repo = h.state.mcp_server_repo.as_ref().unwrap().lock().unwrap();
+        repo.save(&mock_server("calc")).unwrap();
+        repo.set_enabled("calc", false).unwrap();
+    }
+
+    // WHEN it is restarted, then its configuration changed, through the routes
+    let (restart, Json(body)) = restart_server(State(h.state.clone()), Path("calc".to_string()))
+        .await
+        .unwrap_err();
+    let (update, _) = update_server_config(
+        State(h.state.clone()),
+        Path("calc".to_string()),
+        Json(serde_json::json!({"tags": ["x"]})),
+    )
+    .await
+    .unwrap_err();
+
+    // THEN both are refused as paused, no session starts, and it is kept
+    assert_eq!(restart, StatusCode::CONFLICT);
+    assert_eq!(body["error"], super::PAUSED_SERVER_REASON);
+    assert_eq!(update, StatusCode::CONFLICT);
+    assert!(h.manager.status().await.is_empty());
+    assert_eq!(persisted(&h).len(), 1);
     h.manager.shutdown().await;
 }

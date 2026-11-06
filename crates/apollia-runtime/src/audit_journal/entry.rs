@@ -102,6 +102,9 @@ pub enum JournalEntryKind {
     /// A folder of this machine was added as a connection. The payload is a
     /// [`crate::governance::ConnectionRecord`].
     FolderAdded,
+    /// The operator gave a tool of a connection another action family. The
+    /// payload is a [`crate::governance::ConnectionRecord`].
+    ToolReclassified,
     /// The user answered a consent prompt: once, always, or refuse. The payload is a
     /// [`crate::governance::GovernanceRecord`]; it never carries the call's argument.
     ConsentAnswered,
@@ -114,6 +117,10 @@ pub enum JournalEntryKind {
     /// A fine rule refused a call. The payload is a
     /// [`crate::governance::GovernanceRecord`]; it never carries the call's argument.
     RuleRefused,
+    /// A call was refused because its connection is in pause. The payload is
+    /// a [`crate::governance::GovernanceRecord`]; it never carries the call's
+    /// argument.
+    PausedRefused,
     /// A fine rule was added. The payload is a
     /// [`crate::governance::GovernanceRecord`].
     RuleAdded,
@@ -209,10 +216,12 @@ impl JournalEntryKind {
             JournalEntryKind::AccountConnected => "account_connected",
             JournalEntryKind::AccountDisconnected => "account_disconnected",
             JournalEntryKind::FolderAdded => "folder_added",
+            JournalEntryKind::ToolReclassified => "tool_reclassified",
             JournalEntryKind::ConsentAnswered => "consent_answered",
             JournalEntryKind::AlwaysWithdrawn => "always_withdrawn",
             JournalEntryKind::PolicyRefused => "policy_refused",
             JournalEntryKind::RuleRefused => "rule_refused",
+            JournalEntryKind::PausedRefused => "paused_refused",
             JournalEntryKind::RuleAdded => "rule_added",
             JournalEntryKind::RuleRemoved => "rule_removed",
             JournalEntryKind::BatchAccessGranted => "batch_access_granted",
@@ -267,10 +276,12 @@ impl JournalEntryKind {
             "account_connected" => JournalEntryKind::AccountConnected,
             "account_disconnected" => JournalEntryKind::AccountDisconnected,
             "folder_added" => JournalEntryKind::FolderAdded,
+            "tool_reclassified" => JournalEntryKind::ToolReclassified,
             "consent_answered" => JournalEntryKind::ConsentAnswered,
             "always_withdrawn" => JournalEntryKind::AlwaysWithdrawn,
             "policy_refused" => JournalEntryKind::PolicyRefused,
             "rule_refused" => JournalEntryKind::RuleRefused,
+            "paused_refused" => JournalEntryKind::PausedRefused,
             "rule_added" => JournalEntryKind::RuleAdded,
             "rule_removed" => JournalEntryKind::RuleRemoved,
             "batch_access_granted" => JournalEntryKind::BatchAccessGranted,
@@ -494,6 +505,7 @@ mod tests {
                 "account_disconnected",
             ),
             (JournalEntryKind::FolderAdded, "folder_added"),
+            (JournalEntryKind::ToolReclassified, "tool_reclassified"),
         ];
         for (kind, expected) in cases {
             // WHEN converting to its tag and back
@@ -515,6 +527,7 @@ mod tests {
             (JournalEntryKind::AlwaysWithdrawn, "always_withdrawn"),
             (JournalEntryKind::PolicyRefused, "policy_refused"),
             (JournalEntryKind::RuleRefused, "rule_refused"),
+            (JournalEntryKind::PausedRefused, "paused_refused"),
             (JournalEntryKind::RuleAdded, "rule_added"),
             (JournalEntryKind::RuleRemoved, "rule_removed"),
             (JournalEntryKind::BatchAccessGranted, "batch_access_granted"),

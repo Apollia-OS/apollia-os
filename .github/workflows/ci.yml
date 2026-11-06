@@ -182,6 +182,55 @@ jobs:
       # Its one frontier is the python-tests job of weekly.yml, which installs
       # the editable SDK first.
 
+  # ── Text recognition : the `ocr` feature, embedded engine included ────────
+  # No other job passes `--features ocr`, so the engine module of
+  # apollia-sources was neither compiled nor linted between two releases. The
+  # Windows build of the same feature runs in weekly.yml.
+  ocr:
+    name: Text recognition (ocr feature)
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+        with:
+          toolchain: "1.95.0"
+          components: clippy
+      - name: Install build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake build-essential
+      # Caches ~/.cargo and target/ only. The engine's source directory under
+      # HOME stays out of every cache on purpose: the script below clears it,
+      # and a library restored after it would be linked without recompiling
+      # the verified sources.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Stage the verified Tesseract and Leptonica sources
+        run: bash packaging/fetch-tesseract-sources.sh
+      # The address and the digest are read from the registry the product
+      # pins, so this step cannot drift from what the application downloads.
+      - name: Download the pinned French language data
+        run: |
+          set -euo pipefail
+          read -r commit sum < <(python3 -I -c '
+          import sys, tomllib
+          with open(sys.argv[1], "rb") as f:
+              entry = next(e for e in tomllib.load(f)["ocr"] if e["language"] == "fra")
+          print(entry["commit"], entry["sha256"])
+          ' crates/apollia-llm/src/recommend/pinned_models.toml)
+          dir="$RUNNER_TEMP/tessdata"
+          mkdir -p "$dir"
+          curl --http1.1 -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o "$dir/fra.traineddata" \
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${commit}/fra.traineddata"
+          echo "${sum}  ${dir}/fra.traineddata" | sha256sum -c -
+          echo "APOLLIA_TEST_TESSDATA=${dir}" >> "$GITHUB_ENV"
+      - name: cargo clippy (apollia-sources, ocr)
+        run: cargo clippy -p apollia-sources --features ocr --all-targets -- -D warnings
+      # Not under check_test_home_isolation.py --wrap: the engine build writes under HOME by construction.
+      - name: cargo test (apollia-sources, ocr, engine tests included)
+        run: cargo test -p apollia-sources --features ocr -- --include-ignored
+
   # ── MSRV : the 1.89 floor the manifests publish is compiled, never assumed ─
   msrv:
     name: MSRV 1.89
@@ -369,8 +418,10 @@ jobs:
         with:
           python-version: "3.13"
       # Pinned like the ruff of python-quality: an unpinned audit tool changes
-      # its verdict under the job without a commit.
-      - run: pip install pip-audit==2.10.0
+      # its verdict under the job without a commit. PyYAML is for
+      # check_download_sums.py below, which loads the workflows to read their
+      # env and matrix values; this interpreter does not ship it.
+      - run: pip install pip-audit==2.10.0 PyYAML==6.0.2
       - name: pip-audit (bundled Python supply chain)
         run: pip-audit -r packaging/requirements-bundled.txt --no-deps --progress-spinner off
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -378,11 +429,27 @@ jobs:
           node-version: "22"
       - name: npm audit (desktop UI runtime dependencies)
         working-directory: crates/apollia-desktop/ui
-        run: npm audit --omit=dev
+        # Any advisory fails, whatever its severity, unless audit-ignore.json
+        # accepts it with its reason and its lift condition.
+        run: |
+          npm audit --omit=dev --json > "$RUNNER_TEMP/npm-audit.json" || true
+          python3 ../../../scripts/check_npm_audit.py "$RUNNER_TEMP/npm-audit.json"
       - name: Download sums (pinned archives match the upstream digests)
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/check_download_sums.py --github
+      # The pre-commit hook fires only on a commit touching the pin, the tables
+      # or the generator, and it passes when upstream is unreachable and
+      # uncached, so a pin moved offline reached the tree with tables nobody
+      # compared. This runner starts with no cache: --require-upstream turns
+      # that same unreachable upstream into a red (exit 2, nothing measured),
+      # and every change runs the comparison, whatever files it touches.
+      - name: llama.cpp support tables match the pinned build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/gen_llama_support.py --selftest
+          python3 scripts/gen_llama_support.py --check --require-upstream
 
   # ── macOS Silicon : core test run backing the "Tested" platform claim ──────
   test-macos:
@@ -1022,11 +1089,19 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev \
             libssl-dev libxdo-dev \
             libasound2-dev libpulse-dev libjack-jackd2-dev \
-            cmake clang pkg-config
+            cmake clang pkg-config build-essential
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - uses: taiki-e/install-action@c7eb1735f09259a5035e8e5d44b1406b1cddc0fb # v2.83.0
         with:
           tool: cargo-llvm-cov
+      # The per-crate gate below builds apollia-runtime with --all-features,
+      # which turns on `ocr` and with it the tesseract-rs build script. That
+      # script downloads Leptonica and Tesseract unchecked whenever its source
+      # directory is missing, so the verified copies are staged first, as in
+      # the ocr job. Their directory under HOME is in no cache, for the same
+      # reason as there: this script clears it.
+      - name: Stage the verified Tesseract and Leptonica sources
+        run: bash packaging/fetch-tesseract-sources.sh
       # The floor is set just below the measured baseline so the gate is green
       # from day one, then ratcheted up. Full HTML report stays in weekly.yml.
       # apollia-desktop and apollia-e2e-tests are excluded because neither builds

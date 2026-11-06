@@ -560,6 +560,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/audit/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/audit/activity`: the last use of the tools of a connection
+         *     and the number of actions each agent took with them over a period.
+         * @description An action is a tool call of the connection that ended, successfully or
+         *     not. The journal is read whole for the period, without an index. 400 when
+         *     the prefix is missing or a bound cannot be read, 503 when the journal is
+         *     not configured.
+         */
+        get: operations["get_connection_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit/anchor": {
         parameters: {
             query?: never;
@@ -1127,10 +1151,134 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        put?: never;
+        /**
+         * `PUT /api/v1/connections/folders/{id}`: point a folder connection at
+         *     another folder, its identifier, label and accesses kept.
+         */
+        put: operations["repoint_folder_connection"];
         post?: never;
         /** `DELETE /api/v1/connections/folders/{id}`: remove a folder connection. */
         delete: operations["remove_folder_connection"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/{id}/agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/connections/{id}/agents`: the agents that hold at least one
+         *     tool of the connection.
+         */
+        get: operations["get_connection_agents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/{id}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/connections/{id}/check`: check one connection now, and
+         *     answer it with the state found, dated.
+         */
+        post: operations["check_connection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/{id}/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/connections/{id}/grants`: grant tools of the connection to
+         *     several agents at once. Every agent's list is written, or none is.
+         */
+        post: operations["grant_connection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/{id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/connections/{id}/pause`: none of the tools of the
+         *     connection runs until it is resumed; the accesses of the agents are kept.
+         */
+        post: operations["pause_connection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `POST /api/v1/connections/{id}/resume`: the tools of the connection run
+         *     again, with the accesses the agents held before its pause.
+         */
+        post: operations["resume_connection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connections/{id}/tools/{tool}/family": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /api/v1/connections/{id}/tools/{tool}/family`: give a tool of a
+         *     connection the selection does not classify another action family.
+         */
+        put: operations["set_tool_family"];
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1212,6 +1360,70 @@ export interface paths {
          *     folder of one Google account, so the default applies again.
          */
         delete: operations["reset_drive_folder"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connectors/onedrive/{account_id}/browse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/connectors/onedrive/{account_id}/browse`: the children of a
+         *     folder of the drive, each marked chosen or not, for the user to choose from.
+         */
+        get: operations["browse_onedrive"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connectors/onedrive/{account_id}/choices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * `GET /api/v1/connectors/onedrive/{account_id}/choices`: the folders and
+         *     files the account lets Apollia read.
+         */
+        get: operations["list_onedrive_choices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/connectors/onedrive/{account_id}/choices/{item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * `PUT /api/v1/connectors/onedrive/{account_id}/choices/{item_id}`: let
+         *     Apollia read the folder or file `item_id`, as OneDrive describes it.
+         */
+        put: operations["choose_onedrive_item"];
+        post?: never;
+        /**
+         * `DELETE /api/v1/connectors/onedrive/{account_id}/choices/{item_id}`: stop
+         *     letting Apollia read the folder or file `item_id`.
+         */
+        delete: operations["forget_onedrive_item"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1435,6 +1647,38 @@ export interface paths {
         put: operations["set_engine_settings"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/engines/{engine}/{tag}/{variant}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/engines/{engine}/{tag}/{variant}`: removes one installed
+         *     build of the engine store.
+         * @description The embedded engine has no tag of its own: `GET /api/v1/engines` lists it
+         *     with `tag` null, and this route addresses it by the reserved tag
+         *     `embedded`, always to refuse it (`embedded`), confirmation or not. An
+         *     engine or a variant this build does not know answers `not_found` first.
+         *
+         *     The build `engines.gguf` names, which no process runs, is refused without
+         *     `confirm=true` (`chosen`), and `after` says what the setting comes down to
+         *     once it is gone: `auto`, or the tag of the build of the chosen variant
+         *     that takes its place. With it the build goes; when no other build of the
+         *     chosen variant is left, `engines.gguf` is first written back to `auto`,
+         *     and the `engine.removed` event says so (`choice_reset`, `after`). A build
+         *     a process runs stays refused (`in_service`) whatever the confirmation.
+         */
+        delete: operations["remove_engine"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2805,8 +3049,11 @@ export interface paths {
         /**
          * `GET /api/v1/mcp/resources`, List MCP resources aggregated across servers.
          * @description Returns the same data as the agent-facing `mcp_resources_list` tool: one
-         *     entry per resource exposed by a connected MCP server, tagged with its owning
+         *     entry per resource exposed by an MCP server, tagged with its owning
          *     server. Feeds the desktop @-mention picker.
+         *     A server that runs no session answers the list it last gave, without
+         *     starting; one never listed starts in the background and joins a later
+         *     answer. A paused server offers nothing.
          *
          *     Returns an empty array (not an error) when no MCP configuration is active,
          *     so the picker degrades to "no resources" rather than a failure state.
@@ -2828,8 +3075,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * `GET /api/v1/mcp/servers`, List all connected MCP servers with their status.
-         * @description Returns an empty array when no MCP configuration is active.
+         * `GET /api/v1/mcp/servers`, List every MCP server the runtime runs or knows, with its status.
+         * @description A server that runs no session yet is listed with `connected: false` and
+         *     `dormant: true`: it starts at the next call of one of its tools, and its
+         *     tool count is what it last published.
+         *     Returns an empty array when no MCP configuration is active.
          */
         get: operations["list_servers"];
         put?: never;
@@ -2897,10 +3147,12 @@ export interface paths {
         post?: never;
         /**
          * `DELETE /api/v1/mcp/servers/:name`, Remove an MCP server and delete it from `mcp.db`.
-         * @description Shuts down the session, unregisters the server, removes its database entry,
-         *     then journals the removal.
+         * @description Shuts down the session when there is one, unregisters the server, removes
+         *     its database entry, then journals the removal. A server that never started
+         *     is removed all the same. `DELETE /api/v1/connections/{id}` removes what
+         *     else the server leaves behind.
          *     Returns `200 OK` with `{"removed": "<name>"}` on success.
-         *     Returns `404 Not Found` when no server with the given name is managed.
+         *     Returns `404 Not Found` when the server is neither running nor stored.
          *     Returns `503 Service Unavailable` when MCP is not configured.
          */
         delete: operations["remove_server"];
@@ -2947,7 +3199,10 @@ export interface paths {
          *     `mcp.db`.
          * @description The `env` map contains either literal values for non-secret variables or
          *     `${APOLLIA_SECRET:NAME}` placeholders for secret ones, actual secret
-         *     material is never returned. Used by the desktop "Modifier les arguments"
+         *     material is never returned: a secret still kept in clear (a header of a
+         *     remote server, a variable whose name marks it secret) is shown as the
+         *     placeholder of its variable, and a configuration sent back with that
+         *     placeholder keeps the stored value. Used by the desktop "Modifier les arguments"
          *     flow to fetch the current config, patch `args`, and PUT the result back
          *     without losing the rest of the configuration.
          *
@@ -6230,6 +6485,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/connections/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * `DELETE /api/v1/connections/{id}`: remove a connection of any kind, and
+         *     answer what was erased; with `?dry_run=1`, erase nothing and answer what
+         *     would be.
+         */
+        delete: operations["remove_connection"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -6400,6 +6676,18 @@ export interface components {
         AdvancePhaseBody: {
             /** @description The phase to move to, in its snake_case name (`ai_setup`...). */
             phase: string;
+        };
+        /** @description What one agent did with the tools of a connection over the period. */
+        AgentActivity: {
+            /**
+             * Format: int64
+             * @description Tool calls of the connection that ended over the period.
+             */
+            actions: number;
+            /** @description The agent, `None` for calls whose entry names none. */
+            agent?: string | null;
+            /** @description When the last of them ended, RFC 3339 UTC. */
+            lastUsedAt: string;
         };
         /** @description The draft of an agent, as the form opens it. Nothing of it is stored. */
         AgentDraft: {
@@ -6766,6 +7054,24 @@ export interface components {
             /** @description Name of the tool. */
             tool_name: string;
         };
+        /** @description One package the channel offers for this platform. */
+        AvailablePackage: {
+            /** @description Engine. */
+            engine: components["schemas"]["EngineName"];
+            /** @description Whether this exact build is installed here. */
+            installed: boolean;
+            /** @description Day the build was published, when the manifest states it. */
+            released?: string | null;
+            /**
+             * Format: int64
+             * @description Archive size in bytes.
+             */
+            size: number;
+            /** @description Upstream tag. */
+            tag: string;
+            /** @description Variant. */
+            variant: components["schemas"]["EngineVariant"];
+        };
         /** @description One sensitive access of the agent a batch runs. */
         BatchAccess: {
             /** @description The access, as the agent names it: a tool, or `mcp:<server>`. */
@@ -7058,6 +7364,14 @@ export interface components {
              */
             value?: Record<string, never> | null;
         };
+        /** @description Body of `POST /api/v1/connections/{id}/check`, which may be left out. */
+        CheckConnectionBody: {
+            /**
+             * @description Read-only tool call an MCP server is probed with after its handshake,
+             *     when its connector declares one; ignored for any other kind.
+             */
+            probe?: Record<string, never> | null;
+        };
         /** @description Body of `DELETE /api/v1/llm/agents/{agent}/model`. */
         ClearAgentModelResponse: {
             /** @description Agent name. */
@@ -7264,6 +7578,11 @@ export interface components {
             /** @description Account the connection acts as, when it has one. */
             account?: string | null;
             /**
+             * @description When its state was last found, RFC 3339 in UTC; absent when it never
+             *     was.
+             */
+            checkedAt?: string | null;
+            /**
              * @description Stable identifier: `mcp:<server>`, `native:<provider>:<account>`,
              *     `imap:<address>`, `folder:<id>`.
              */
@@ -7274,16 +7593,81 @@ export interface components {
             label: string;
             /** @description Published by the service's own publisher. */
             official: boolean;
+            /** @description Name of the installed package that brought it, when one did. */
+            package?: string | null;
             /** @description Folder of this machine the connection opens, for a folder. */
             path?: string | null;
             /** @description Where the connection was found before it was added. */
             provenance: string;
+            /** @description Why it is not working, absent when it works: a key the interface translates, the technical detail, and the address the repairing action opens when it has one. */
+            reason?: {
+                /** @description The address the repairing action opens, to be copied: for an administrator approval, the approval page. */
+                address?: string;
+                detail?: string | null;
+                /** @enum {string} */
+                key: "not_checked" | "sign_in_again" | "password_refused" | "folder_not_found" | "unreachable" | "failing" | "forbidden_by_policy" | "admin_approval_required";
+            } | null;
             /** @description Sends data off this machine. Computed, see [`is_remote`]. */
             remote: boolean;
-            /** @description Whether it can be used right now. */
+            /** @description Whether it can be used right now, in the detail its kind gives. */
             state: components["schemas"]["ConnectionState"];
+            /**
+             * @description What its user reads: working, needs repair, paused, blocked by the organisation, or not checked yet (nothing has found it in any state).
+             * @enum {string}
+             */
+            status: "working" | "needs_repair" | "paused" | "blocked" | "not_checked";
             /** @description Tools the connection brings. */
             tools: components["schemas"]["ConnectionTool"][];
+        };
+        /** @description One agent that holds at least one tool of a connection. */
+        ConnectionAgent: {
+            /**
+             * @description Whether the agent holds these tools through the default access, nobody
+             *     having chosen its access.
+             */
+            byDefault: boolean;
+            /** @description Whether the agent is active. */
+            enabled: boolean;
+            /** @description Identifier of the agent. */
+            id: string;
+            /** @description Display name of the agent. */
+            name: string;
+            /**
+             * @description The tools of the connection the agent holds, in the order of its
+             *     access.
+             */
+            tools: string[];
+        };
+        /** @description The agents that hold the tools of one connection. */
+        ConnectionAgents: {
+            /** @description Every agent holding at least one of its tools, by identifier. */
+            agents: components["schemas"]["ConnectionAgent"][];
+            /** @description Identifier of the connection. */
+            connection: string;
+            /**
+             * @description Other connections its tools reach as well, by identifier: the other
+             *     mailboxes, for a mailbox, since the mailbox tools are common to all of
+             *     them. Empty for every other kind.
+             */
+            sharedWith: string[];
+        };
+        /** @description Response body of `GET /api/v1/audit/activity`. */
+        ConnectionActivityResponse: {
+            /**
+             * Format: int64
+             * @description Tool calls of the connection that ended over the period.
+             */
+            actions: number;
+            /** @description One line per agent, the most active first. */
+            agents: components["schemas"]["AgentActivity"][];
+            /** @description When the last of them ended, RFC 3339 UTC; `None` when none did. */
+            lastUsedAt?: string | null;
+            /** @description Start of the period read, RFC 3339 UTC. */
+            since: string;
+            /** @description The prefix the activity was read for. */
+            toolPrefix: string;
+            /** @description End of the period read, RFC 3339 UTC; `None` when it has no end. */
+            until?: string | null;
         };
         /**
          * @description The kind of thing a connection plugs in.
@@ -7291,7 +7675,9 @@ export interface components {
          */
         ConnectionKind: "native" | "imap" | "mcp" | "folder";
         /**
-         * @description Whether a connection can be used right now.
+         * @description Whether a connection can be used right now, in the detail its kind gives.
+         *
+         *     What its user reads is [`Connection::status`], one of four states.
          * @enum {string}
          */
         ConnectionState: "connected" | "degraded" | "needs_reauth" | "unavailable" | "stopped" | "forbidden_by_policy";
@@ -7843,6 +8229,28 @@ export interface components {
              */
             folder_path?: string | null;
         };
+        /** @description One chosen folder or file, as a client reads it. */
+        OneDriveChoiceView: {
+            /** @description Graph item id. */
+            id: string;
+            /** @description `true` for a folder, which admits everything under it. */
+            is_folder: boolean;
+            /** @description Name at the time of the choice. */
+            name: string;
+            /** @description Path of the item in the drive, `/drive/root:/Documents/Clients`. */
+            path: string;
+        };
+        /** @description One item of a folder being browsed. */
+        OneDriveEntry: {
+            /** @description `true` when the item itself is chosen. */
+            chosen: boolean;
+            /** @description Graph item id. */
+            id: string;
+            /** @description `true` for a folder, which can be opened or chosen whole. */
+            is_folder: boolean;
+            /** @description Display name. */
+            name: string;
+        };
         /** @description Request body for `PUT /api/v1/sessions/{id}/messages/{message_id}`. */
         EditAnswerRequest: {
             /** @description The new text of the answer. */
@@ -8006,15 +8414,80 @@ export interface components {
          * @enum {string}
          */
         EngineName: "llama-server" | "vllm-mlx" | "nodejs";
+        /** @description The verdict on one variant. */
+        EngineRating: {
+            reason?: null | components["schemas"]["EngineRatingReason"];
+            /** @description Variant rated. */
+            variant: components["schemas"]["EngineVariant"];
+            /** @description How well it suits this machine. */
+            verdict: components["schemas"]["EngineVerdict"];
+        };
+        /** @description Why a variant is not recommended, as a code the interface translates. */
+        EngineRatingReason: {
+            /** @enum {string} */
+            code: "driver_too_old";
+            /** @description The driver of the machine, as `nvidia-smi` prints it. */
+            have: string;
+            /** @description The driver the build needs. */
+            need: string;
+        } | {
+            /** @description The compute capability of the card, `6.1`. */
+            cc: string;
+            /** @enum {string} */
+            code: "arch_dropped_in_cuda13";
+        } | {
+            /** @enum {string} */
+            code: "gfx_not_in_build";
+            /** @description The gfx target, `gfx906`. */
+            gfx: string;
+        } | {
+            /** @enum {string} */
+            code: "no_vulkan_loader";
+        } | {
+            /** @enum {string} */
+            code: "no_nvidia_driver";
+        } | {
+            /** @enum {string} */
+            code: "not_built_for_platform";
+        } | {
+            /** @enum {string} */
+            code: "no_gpu";
+        } | {
+            /** @enum {string} */
+            code: "engine_sees_no_device";
+        } | {
+            /** @enum {string} */
+            code: "no_rocm_runtime";
+        };
         /**
          * @description Why the store refused, as a stable word an interface can branch on. The
          *     sentence of the error says the same to a reader.
          * @enum {string}
          */
         EngineRefusalCode: "no_trusted_key" | "signature_invalid" | "signature_unknown_key" | "signature_missing" | "manifest_invalid" | "rollback" | "package_not_found" | "digest_mismatch" | "archive_invalid" | "network" | "storage";
+        /** @description A refused removal: the message and its stable code. */
+        EngineRemovalErrorBody: {
+            /**
+             * @description With `chosen`, what `engines.gguf` comes down to once the build is
+             *     gone: `auto`, or the tag of the build of the chosen variant that
+             *     takes its place.
+             */
+            after?: string | null;
+            /**
+             * @description Stable code: `not_found`, `in_service`, `embedded`, `chosen`,
+             *     `locked`, `config`, `store`.
+             */
+            code: string;
+            /** @description What went wrong, for a person. */
+            error: string;
+        };
         /** @description Body of the settings routes. */
         EngineSettingsBody: {
-            /** @description Base address manifests and archives are fetched from. */
+            /**
+             * @description The mirror manifests and archives are fetched from, the only one read
+             *     when set. Empty when none is set: the registry of Apollia is read
+             *     first, then its GitHub mirror.
+             */
             base_url: string;
             /** @description The followed channel. */
             channel: components["schemas"]["EngineChannel"];
@@ -8028,23 +8501,35 @@ export interface components {
          * @description A build of an engine for one kind of hardware.
          * @enum {string}
          */
-        EngineVariant: "cuda" | "vulkan" | "cpu" | "metal";
+        EngineVariant: "cuda-12" | "cuda-13" | "rocm" | "vulkan" | "cpu" | "metal";
+        /**
+         * @description How well a variant suits this machine.
+         * @enum {string}
+         */
+        EngineVerdict: "recommended" | "compatible" | "incompatible";
         /** @description Body of `GET /api/v1/engines`. */
         EnginesResponse: {
+            /**
+             * @description The packages the verified manifest offers for this platform, installed
+             *     or not. Empty until a manifest verified.
+             */
+            available: components["schemas"]["AvailablePackage"][];
             /** @description The followed channel. */
             channel: components["schemas"]["EngineChannel"];
-            /** @description True when an NVIDIA card is detected and no CUDA engine is installed. */
-            cuda_proposable: boolean;
             dictation?: null | components["schemas"]["DictationEngine"];
             /** @description Engines embedded in the bundle, then installed ones. */
             engines: components["schemas"]["EngineEntry"][];
+            hardware?: null | components["schemas"]["HardwareView"];
             /**
              * Format: int64
              * @description Sequence of the last verified manifest of that channel, if any.
              */
             manifest_sequence?: number | null;
-            /** @description Name of the NVIDIA card detected, when there is one. */
-            nvidia_card?: string | null;
+            /**
+             * @description Per `llama-server` variant, whether it suits this machine and why.
+             *     Empty until a manifest verified, or when the hardware is not known.
+             */
+            ratings: components["schemas"]["EngineRating"][];
             /**
              * @description Per variant offered by that manifest for this platform, whether a newer
              *     build than the installed one exists. Empty until a manifest verified.
@@ -8215,6 +8700,21 @@ export interface components {
              */
             journal_notices?: components["schemas"]["JournalNotice"][];
         };
+        /**
+         * @description The maker of a card.
+         * @enum {string}
+         */
+        GpuCardVendor: "nvidia" | "amd" | "intel" | "other";
+        /** @description Body of `POST /api/v1/connections/{id}/grants`. */
+        GrantConnectionBody: {
+            /** @description Identifiers of the agents to grant the tools to. */
+            agents: string[];
+            /**
+             * @description Tools of the connection to grant, as `GET /api/v1/connections` lists
+             *     them.
+             */
+            tools: string[];
+        };
         /** @description The load guardrail's view of a load. */
         GuardrailCheckDto: {
             /**
@@ -8264,6 +8764,28 @@ export interface components {
          * @enum {string}
          */
         GuardrailVerdictDto: "allowed" | "warned" | "refused";
+        /** @description One graphics card of the machine. */
+        HardwareCard: {
+            /** @description The NVIDIA compute capability, `8.9`. */
+            compute_capability?: string | null;
+            /** @description The NVIDIA driver version, `580.65.06`. */
+            driver_version?: string | null;
+            /** @description The gfx target of an AMD card, `gfx1100`. */
+            gfx_target?: string | null;
+            /** @description Whether `/dev/kfd` opens. AMD under Linux only. */
+            kfd_accessible?: boolean | null;
+            /** @description Its name. */
+            name: string;
+            /** @description True when the driver did not answer within the probe limit. */
+            timed_out: boolean;
+            /** @description Its maker. */
+            vendor: components["schemas"]["GpuCardVendor"];
+            /**
+             * Format: double
+             * @description Its dedicated memory in GiB, when known.
+             */
+            vram_gb?: number | null;
+        };
         HardwareResponse: {
             accelerator: Record<string, never>;
             /** Format: double */
@@ -8291,6 +8813,15 @@ export interface components {
             total_capacity_gb: number;
             /** Format: double */
             total_ram_gb: number;
+        };
+        /** @description The cards of the machine and what is installed around them. */
+        HardwareView: {
+            /** @description Every card, NVIDIA ones first. */
+            cards: components["schemas"]["HardwareCard"][];
+            /** @description Whether the host's ROCm runtime is installed. Linux only. */
+            rocm_runtime: boolean;
+            /** @description Whether a Vulkan loader is installed. */
+            vulkan_loader: boolean;
         };
         /** @description Response body for the health endpoint. */
         HealthResponse: {
@@ -10268,6 +10799,11 @@ export interface components {
             /** @description The title, trimmed and capped at 100 characters. */
             title: string;
         };
+        /** @description Body of `PUT /api/v1/connections/folders/{id}`. */
+        RepointFolderBody: {
+            /** @description Absolute path of the folder, as the system picker answered it. */
+            path: string;
+        };
         /** @description A connection the package requires. */
         RequiredConnectionPreview: {
             /** @description The package itself brings an MCP server of that name. */
@@ -10299,6 +10835,16 @@ export interface components {
             /** @description Tools granted. */
             access: string[];
             /**
+             * @description The tools of `access` given on top of the default access; empty for
+             *     an agent that does not hold it.
+             */
+            access_added: string[];
+            /**
+             * @description Whether the agent holds the default access, read again at every run,
+             *     rather than a list chosen for it.
+             */
+            access_by_default: boolean;
+            /**
              * @description Autonomy tier the agent runs at: `assisted`, `supervised`,
              *     `bounded_autonomous` or `long_autonomous`. The user's, else the
              *     package's, else the global default.
@@ -10321,8 +10867,9 @@ export interface components {
             origin: components["schemas"]["AgentOriginDto"];
             /**
              * @description Fields whose value is the user's rather than the package's:
-             *     `name`, `mission`, `examples`, `access`, `sources`, `autonomy`,
-             *     `planning`, `profile`.
+             *     `name`, `mission`, `examples`, `access`, `access_added`, `sources`,
+             *     `autonomy`, `planning`, `profile`. `access_added` names the tools
+             *     given on top of the default access, which `access` lists after it.
              */
             overridden: string[];
             /** @description Package the agent came with. */
@@ -11558,6 +12105,14 @@ export interface components {
             /** @description `true` to enable the tool, `false` to disable it. */
             enabled: boolean;
         };
+        /** @description Body of `PUT /api/v1/connections/{id}/tools/{tool}/family`. */
+        ToolFamilyBody: {
+            /**
+             * @description The family the tool takes: `read`, `read_personal`,
+             *     `write_or_delete`, `send_external`, `execute_code` or `unclassified`.
+             */
+            family: string;
+        };
         /** @description Response body for `GET /api/v1/tools`. */
         ToolListResponse: {
             /** @description All descriptors currently registered in the tool catalogue. */
@@ -12223,6 +12778,34 @@ export interface components {
             /** @description The file it was written to, when the source is a file or a folder. */
             path?: string | null;
         };
+        /** @description What a removal erased, or would erase. */
+        ConnectionRemoval: {
+            /** @description Identifier of the connection. */
+            connection: string;
+            /** @description Whether nothing was erased, the list saying what would be. */
+            dryRun: boolean;
+            /** @description What could not be erased; empty on a dry run. */
+            left: components["schemas"]["RemovedItem"][];
+            /** @description What was erased, or would be. */
+            removed: components["schemas"]["RemovedItem"][];
+        };
+        /** @description One thing a removal erases. */
+        RemovedItem: {
+            /** @description The agent the tool is taken from, for an agent access. */
+            agent?: string | null;
+            /** @description What it is. */
+            kind: components["schemas"]["RemovedKind"];
+            /**
+             * @description Its name: the server, the folder of installed files, the secret key,
+             *     the tool taken away, the source, the path of a OneDrive choice.
+             */
+            name: string;
+        };
+        /**
+         * @description The kinds of things a removal erases.
+         * @enum {string}
+         */
+        RemovedKind: "configuration" | "installed_files" | "token" | "secret" | "agent_access" | "source" | "state" | "onedrive_choice";
     };
     responses: never;
     parameters: never;
@@ -13576,6 +14159,57 @@ export interface operations {
             };
         };
     };
+    get_connection_activity: {
+        parameters: {
+            query?: {
+                /** @description The prefix the tools of the connection share, such as `mcp:notion/`. */
+                tool_prefix?: string;
+                /**
+                 * @description Start of the period, included: a day (`YYYY-MM-DD`, UTC) or an RFC 3339
+                 *     instant. Defaults to seven days before the request.
+                 */
+                since?: string;
+                /**
+                 * @description End of the period, excluded: a day or an RFC 3339 instant. Defaults to
+                 *     no end.
+                 */
+                until?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The last use and the actions per agent of the connection over the period */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionActivityResponse"];
+                };
+            };
+            /** @description No tool prefix, or a bound of the period that cannot be read */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Audit journal not configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
     get_audit_anchor: {
         parameters: {
             query?: never;
@@ -13645,6 +14279,11 @@ export interface operations {
                 /** @description Comma-separated results: `success`, `failure`, `refused`. */
                 result?: string;
                 /**
+                 * @description Comma-separated prefixes of tool names, such as `mcp:notion/`. When
+                 *     set, the export holds the entries whose tool starts with one of them.
+                 */
+                tool_prefix?: string;
+                /**
                  * @description Start of the period, included: a day (`YYYY-MM-DD`, UTC) or an RFC 3339
                  *     instant.
                  */
@@ -13712,6 +14351,8 @@ export interface operations {
                 nature?: string;
                 /** @description Comma-separated results: `success`, `failure`, `refused`. */
                 result?: string;
+                /** @description Comma-separated prefixes of tool names, such as `mcp:notion/` for the tools of one connection. When set, only the entries whose tool starts with one of them are paged. */
+                tool_prefix?: string;
                 /** @description Start of the period, included: a day `YYYY-MM-DD` read in UTC, or an RFC 3339 instant. */
                 since?: string;
                 /** @description End of the period, excluded: a day `YYYY-MM-DD` read in UTC, or an RFC 3339 instant. */
@@ -15004,6 +15645,78 @@ export interface operations {
             };
         };
     };
+    repoint_folder_connection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Identifier of the stored folder, the part of the connection identifier after `folder:` */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RepointFolderBody"];
+            };
+        };
+        responses: {
+            /** @description The connection now points at the folder; the connection it is */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            /** @description The path is not a folder of this machine */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderErrorBody"];
+                };
+            };
+            /** @description Refused by the connection admission */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderErrorBody"];
+                };
+            };
+            /** @description No folder connection has this identifier */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderErrorBody"];
+                };
+            };
+            /** @description Another connection already holds the folder */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderErrorBody"];
+                };
+            };
+            /** @description system.db could not be written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FolderErrorBody"];
+                };
+            };
+        };
+    };
     remove_folder_connection: {
         parameters: {
             query?: {
@@ -15056,6 +15769,330 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FolderErrorBody"];
+                };
+            };
+        };
+    };
+    get_connection_agents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection identifier, as `GET /api/v1/connections` lists it */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The agents holding tools of the connection */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionAgents"];
+                };
+            };
+            /** @description Connection not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description A store could not be read */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    check_connection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection identifier, as `GET /api/v1/connections` lists it */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** @description Optional; the read-only probe of an MCP server */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["CheckConnectionBody"];
+            };
+        };
+        responses: {
+            /** @description Checked; the connection with the state found, kept and announced */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            /** @description Connection not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description A store could not be read or written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description MCP not configured, for an MCP server */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    grant_connection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection identifier, as `GET /api/v1/connections` lists it */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GrantConnectionBody"];
+            };
+        };
+        responses: {
+            /** @description Granted; the agents holding tools of the connection */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionAgents"];
+                };
+            };
+            /** @description Connection or agent not found; nothing written */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description No agent or no tool named, or a tool the connection does not bring; nothing written */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Audit journal not available; nothing written */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    pause_connection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection identifier, as `GET /api/v1/connections` lists it */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description In pause; the connection as the list now shows it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            /** @description Connection not found; nothing written */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description A store could not be read or written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Governance not available; nothing written */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    resume_connection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection identifier, as `GET /api/v1/connections` lists it */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Resumed; the connection as the list now shows it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            /** @description Connection not found; nothing written */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description A store could not be read or written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Governance not available; nothing written */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    set_tool_family: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection identifier, as `GET /api/v1/connections` lists it */
+                id: string;
+                /** @description Name of the tool on its server */
+                tool: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ToolFamilyBody"];
+            };
+        };
+        responses: {
+            /** @description Reclassified and journaled; the connection as the list now shows it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            /** @description A family the operator cannot give; nothing written */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Connection or tool not found; nothing written */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The selection, or Apollia's code, classifies this tool; nothing written */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description A store could not be read or written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The MCP repository is not available; nothing written */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
                 };
             };
         };
@@ -15235,6 +16272,213 @@ export interface operations {
                 };
             };
             /** @description The preferences could not be written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    browse_onedrive: {
+        parameters: {
+            query?: {
+                /** @description Folder to list; the root of the drive when absent. */
+                folder_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Microsoft account identifier */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The children of the folder */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OneDriveEntry"][];
+                };
+            };
+            /** @description Empty or oversized account or folder */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The account is not connected */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The choices could not be read */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description OneDrive answered with an error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    list_onedrive_choices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Microsoft account identifier */
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The chosen folders and files */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OneDriveChoiceView"][];
+                };
+            };
+            /** @description Empty or oversized account */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The choices could not be read */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    choose_onedrive_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Microsoft account identifier */
+                account_id: string;
+                /** @description OneDrive item id */
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The choices as recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OneDriveChoiceView"][];
+                };
+            };
+            /** @description Empty or oversized input, or the root of the drive */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The account is not connected */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The choices could not be written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description OneDrive answered with an error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    forget_onedrive_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Microsoft account identifier */
+                account_id: string;
+                /** @description OneDrive item id */
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The choices as recorded */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OneDriveChoiceView"][];
+                };
+            };
+            /** @description Empty or oversized input */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The choices could not be written */
             500: {
                 headers: {
                     [name: string]: unknown;
@@ -15896,6 +17140,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    remove_engine: {
+        parameters: {
+            query?: {
+                /** @description Remove the build `engines.gguf` names; `false` when absent */
+                confirm?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Engine, as the list names it: `llama-server`, `vllm-mlx`, `nodejs` */
+                engine: string;
+                /** @description Upstream tag of the build; the reserved tag `embedded` names the engine shipped with the application, which is never removed */
+                tag: string;
+                /** @description Variant, as the list names it: `cuda-12`, `vulkan`, `cpu`... */
+                variant: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The build and its directory are gone */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The organisation policy fixes `engines.gguf` to this build (`locked`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EngineRemovalErrorBody"];
+                };
+            };
+            /** @description No such build installed (`not_found`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EngineRemovalErrorBody"];
+                };
+            };
+            /** @description The build in service (`in_service`), the embedded engine (`embedded`), or the build `engines.gguf` names without `confirm=true` (`chosen`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EngineRemovalErrorBody"];
+                };
+            };
+            /** @description The build could not be deleted (`store`) or the setting written back (`config`) */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EngineRemovalErrorBody"];
                 };
             };
         };
@@ -19180,8 +20488,9 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Keyword forwarded to the registry. A search always asks the network;
-                 *     without one, a fresh cache answers.
+                 * @description Keyword forwarded to the registry's own search. A search always asks
+                 *     the network and falls back to the cache; without one, the cache answers
+                 *     even when stale, and the whole registry is read again behind it.
                  */
                 search?: string;
             };
@@ -19279,7 +20588,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description MCP resources aggregated across connected servers */
+            /** @description MCP resources aggregated across servers, running or not */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -19297,7 +20606,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Connected MCP servers with their status */
+            /** @description MCP servers with their status, dormant ones included */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -19454,7 +20763,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Server not found */
+            /** @description Server neither running nor stored */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -19522,6 +20831,15 @@ export interface operations {
             };
             /** @description Server not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The connection is paused */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19636,6 +20954,15 @@ export interface operations {
             };
             /** @description Server not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description The connection is paused */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27484,6 +28811,62 @@ export interface operations {
                 };
             };
             /** @description Chat subsystem unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+        };
+    };
+    remove_connection: {
+        parameters: {
+            query?: {
+                /**
+                 * @description `1` (or `true`) to erase nothing and answer what the removal would
+                 *     erase.
+                 */
+                dry_run?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Connection identifier, as `GET /api/v1/connections` lists it */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed, or on a dry run what would be; what was erased, and what could not be */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionRemoval"];
+                };
+            };
+            /** @description Connection not found; nothing erased */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description A store could not be read or written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorBody"];
+                };
+            };
+            /** @description Secret store or audit journal not available; nothing erased */
             503: {
                 headers: {
                     [name: string]: unknown;

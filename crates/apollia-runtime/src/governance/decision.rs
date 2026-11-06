@@ -6,6 +6,7 @@
 //! it, in a fixed order, the first line that applies deciding:
 //!
 //! 1. the policy refuses the tool, its connection or its family: refused;
+//!    then the connection that brings the tool is in pause: refused;
 //! 2. a fine rule `deny` matches: refused;
 //! 3. the family reads only, or acts on the conversation alone: allowed;
 //! 4. the family executes code: allowed by a fine rule `allow` on a single
@@ -25,8 +26,16 @@
 //! A run may also hold a grant for one call only ([`once_grant`]): the answer
 //! "once" given to a batch item that stopped on executing code. The next call
 //! of that access that would ask goes through ([`answered_once`]), the one
-//! after asks again; a refusal of lines 1, 2 or of fail-closed governance
-//! stays a refusal.
+//! after asks again; a refusal of lines 1, 2 or of fail-closed
+//! governance stays a refusal.
+//!
+//! `connections.deny` names connections in the vocabulary of the admission
+//! (`native:google`, `selection:<entry>`, `package:npm:<name>`), not in the
+//! one of a call (`conn:google:<account>/<operation>`, `mcp:<server>/<tool>`).
+//! A call is therefore read in both: the kind of connection Apollia brings
+//! itself is named from the call ([`policy_names`]), and an MCP server the
+//! policy names by its entry or its package was found at boot and is held in
+//! [`PolicyRefusals::forbidden_connections`].
 
 use std::collections::HashSet;
 
@@ -89,6 +98,85 @@ pub struct PolicyRefusals {
     pub forbidden_connections: HashSet<String>,
 }
 
+/// Prefix of the tools of a folder connection.
+const FOLDER_TOOL_PREFIX: &str = "conn:folder:";
+
+/// Prefix of the tools shared by every mailbox connected over IMAP.
+const IMAP_TOOL_PREFIX: &str = "imap.";
+
+/// The names `connections.deny` may give the connection of `access_id`, in
+/// the admission vocabulary: `native:<provider>` for a tool of a connected
+/// account, `native:folder` for a tool of a folder, `native:imap` for a
+/// mailbox tool. An MCP server is named by its entry or its package, which
+/// the call does not carry.
+fn policy_names(access_id: &str) -> Vec<String> {
+    if access_id.starts_with(IMAP_TOOL_PREFIX) {
+        return vec!["native:imap".to_owned()];
+    }
+    if access_id.starts_with(FOLDER_TOOL_PREFIX) {
+        return vec!["native:folder".to_owned()];
+    }
+    access_id
+        .strip_prefix("conn:")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(provider, _)| vec![format!("native:{provider}")])
+        .unwrap_or_default()
+}
+
+/// The connection that brings the tool `access_id`, as the connection list
+/// names it: `mcp:<server>`, `native:<provider>:<account>`, `folder:<id>`;
+/// `None` for a tool Apollia ships, and for a mailbox tool, shared by every
+/// mailbox: the mailbox a call reads is its argument, see [`call_argument`].
+#[must_use]
+pub fn listed_connection_of(access_id: &str) -> Option<String> {
+    let connection = connection_of(access_id)?;
+    if let Some(folder) = connection.strip_prefix(FOLDER_TOOL_PREFIX) {
+        return Some(format!("folder:{folder}"));
+    }
+    if let Some(account) = connection.strip_prefix("conn:") {
+        return Some(format!("native:{account}"));
+    }
+    Some(connection.to_owned())
+}
+
+/// The connection in pause that `call` reads, as the connection list names
+/// it and as it was paused: one of the connections the call reaches (a
+/// folder a file tool or `code_context` reads, see [`super::call_reaches`]),
+/// else the connection of its tool. A mailbox tool is shared by every
+/// mailbox: the one it reads is the argument of the call, see
+/// [`call_argument`], matched whatever the case of its address.
+fn paused_connection_of(state: &GovernanceState, call: &AccessCall<'_>) -> Option<String> {
+    if let Some(paused) = call
+        .reaches
+        .iter()
+        .find_map(|id| crate::connections::paused_entry(&state.paused, id))
+    {
+        return Some(paused);
+    }
+    let connection = if call.access_id.starts_with(IMAP_TOOL_PREFIX) {
+        call.argument.map(crate::connections::imap_connection_id)
+    } else {
+        listed_connection_of(call.access_id)
+    };
+    connection.and_then(|id| crate::connections::paused_entry(&state.paused, &id))
+}
+
+/// The argument a call of `access_id` with `input` is decided on: for a
+/// mailbox tool, the mailbox it reads (the one `account` names, else the only
+/// one connected in `data_dir`), so that the pause of that mailbox refuses it;
+/// for any other tool, the first argument a rule matches.
+#[must_use]
+pub fn call_argument(
+    access_id: &str,
+    input: &serde_json::Value,
+    data_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    if access_id.starts_with(IMAP_TOOL_PREFIX) {
+        return crate::connectors_bridge::mailbox_of_call(input, data_dir);
+    }
+    apollia_permissions::extract_first_arg(input)
+}
+
 /// Everything a decision reads.
 #[derive(Debug, Clone, Default)]
 pub struct GovernanceState {
@@ -104,6 +192,9 @@ pub struct GovernanceState {
     pub developer_mode: bool,
     /// The tools disabled in `governance.db`, left out of every dispatcher.
     pub disabled_tools: Vec<String>,
+    /// The connections in pause in `governance.db`, as the connection list
+    /// names them: every tool of one is refused.
+    pub paused: HashSet<String>,
     /// Set while governance cannot read what it decides from: every sensitive
     /// call is refused.
     pub fail_closed: Option<FailClosed>,
@@ -121,6 +212,11 @@ pub fn decide(state: &GovernanceState, call: &AccessCall<'_>, now: i64) -> Acces
     if let Some(detail) = policy_refusal(&state.policy, call.access_id, family) {
         return AccessDecision::Denied {
             reason: DecisionReason::Policy { detail },
+        };
+    }
+    if let Some(connection_id) = paused_connection_of(state, call) {
+        return AccessDecision::Denied {
+            reason: DecisionReason::Paused { connection_id },
         };
     }
     let matching: Vec<&PrefixRule> = state
@@ -234,6 +330,14 @@ fn policy_refusal(
     }
     if policy.denied.contains(access_id) {
         return Some("refused by the organisation policy: this tool is not allowed".to_owned());
+    }
+    if policy_names(access_id)
+        .iter()
+        .any(|name| policy.denied.contains(name))
+    {
+        return Some(
+            "refused by the organisation policy: this connection is not allowed".to_owned(),
+        );
     }
     let connection = connection_of(access_id)?;
     if policy.denied.contains(connection) || policy.forbidden_connections.contains(connection) {

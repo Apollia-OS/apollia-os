@@ -22,6 +22,7 @@ publisher = "test"
 released = "2017-09-14"
 license = "apache-2.0"
 repo = "owner/tessdata"
+commit = "0123456789abcdef0123456789abcdef01234567"
 file = "fra.traineddata"
 size_bytes = {}
 sha256 = "{:x}"
@@ -37,7 +38,9 @@ source = "https://example.invalid"
 async fn registry_serving(bytes: &[u8]) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(url_path("/owner/tessdata/resolve/main/fra.traineddata"))
+        .and(url_path(
+            "/owner/tessdata/0123456789abcdef0123456789abcdef01234567/fra.traineddata",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
         .mount(&server)
         .await;
@@ -151,7 +154,7 @@ async fn test_a_page_left_waiting_has_the_indexer_fetch_the_pinned_language_data
     world
         .start_fetching(&Stub::new("e5-small"), fetch_from(&server, &catalogue))
         .await;
-    let tessdata = tessdata_dir(world.data.path());
+    let tessdata = tessdata_dir(&world.models());
 
     // WHEN the folder becomes a source and is indexed, then indexed again
     world.folder_source().await;
@@ -181,7 +184,7 @@ async fn test_language_data_of_another_digest_is_left_off_the_disk_and_the_page_
     world
         .start_fetching(&Stub::new("e5-small"), fetch_from(&server, &catalogue))
         .await;
-    let tessdata = tessdata_dir(world.data.path());
+    let tessdata = tessdata_dir(&world.models());
 
     // WHEN the folder becomes a source and is indexed, the download answered
     let id = world.folder_source().await;

@@ -25,16 +25,13 @@ import fr from "$lib/i18n/fr.json";
 import { developerMode } from "$lib/stores/developerMode";
 import { connectionRows } from "$lib/connections/connectionRows";
 import Connections from "../../routes/Connections.svelte";
-import ConnectorSidebar from "./sidebar/ConnectorSidebar.svelte";
-import NativeConnectorDetail from "./detail/NativeConnectorDetail.svelte";
-import McpDetailHeader from "./detail/McpDetailHeader.svelte";
+import ConnectionList from "./list/ConnectionList.svelte";
+import ConnectionCard from "./detail/ConnectionCard.svelte";
+import NativeProviderCard from "./detail/NativeProviderCard.svelte";
 import McpToolsTab from "./detail/McpToolsTab.svelte";
-import McpOverviewTab from "./detail/McpOverviewTab.svelte";
-import McpSettingsTab from "./detail/McpSettingsTab.svelte";
-import ConnectionSummaryDetail from "./detail/ConnectionSummaryDetail.svelte";
 import BuiltinToolsDetail from "./detail/BuiltinToolsDetail.svelte";
-import CatalogueSheet from "./catalogue/CatalogueSheet.svelte";
-import CustomMcpForm from "./catalogue/CustomMcpForm.svelte";
+import AddConnectionWindow from "./catalogue/AddConnectionWindow.svelte";
+import AddressForm from "./add/AddressForm.svelte";
 import { settingsGroups } from "../integrations/McpServerSettingsEditor.svelte";
 import type { Connection } from "$lib/types";
 
@@ -55,6 +52,10 @@ function connection(over: Partial<Connection> = {}): Connection {
     remote: true,
     official: true,
     state: "connected",
+    status: "working",
+    reason: null,
+    checkedAt: null,
+    package: null,
     tools: [{ id: "mcp:linear/list_issues", family: "read", familySource: "server", prechecked: true }],
     ...over,
   };
@@ -91,6 +92,21 @@ const CLIENT = {
 
 type Rendered = { component: unknown; props?: Record<string, unknown> };
 
+/** What the card of `connection` is given by the route. */
+function cardProps(connection: Connection, label: string): Record<string, unknown> {
+  const noop = () => {};
+  return {
+    connection,
+    label,
+    clientStatus: connection.kind === "native" ? CLIENT : undefined,
+    onupdated: noop,
+    onremoved: noop,
+    onreload: noop,
+    onrepair: noop,
+    ontry: noop,
+  };
+}
+
 /** Every screen of Connections, with what it needs to show its technical parts. */
 function screens(): Record<string, Rendered> {
   const rows = connectionRows(CONNECTIONS);
@@ -98,46 +114,35 @@ function screens(): Record<string, Rendered> {
   return {
     route: { component: Connections },
     list: {
-      component: ConnectorSidebar,
-      props: { rows, selection: rows[1].selection, loading: false, loadError: null, onselect: noop, onopencatalogue: noop, oncontext: noop, builtinTools: { active: 2, total: 3 } },
+      component: ConnectionList,
+      props: { rows, query: "", kind: "all", selection: { kind: "connection", id: rows[1].key }, loading: false, onselect: noop, onadd: noop, builtinTools: { active: 2, total: 3 } },
     },
-    native: {
-      component: NativeConnectorDetail,
+    nativeProvider: {
+      component: NativeProviderCard,
       props: {
         connector: { id: "google", name: "Google Workspace", description: "Gmail, Calendar, Drive" },
-        remote: true,
-        accounts: [{ provider: "google", account_id: "ada@example.com" }],
-        loading: false,
-        error: null,
-        tab: "accounts",
+        needsSetup: false,
         clientStatus: CLIENT,
         clientError: null,
+        loading: false,
         onclientretry: noop,
         onconnect: noop,
-        ondisconnect: noop,
-        ontabchange: noop,
       },
     },
-    serverHeader: {
-      component: McpDetailHeader,
-      props: { label: "Linear", meta: "Project management", remote: true, status: "active", sync: null, testing: false, reconnecting: false, ontest: noop, onreconnect: noop },
-    },
-    serverOverview: {
-      component: McpOverviewTab,
-      props: { health: { state: "healthy", verified: true }, toolsCount: 1, statusError: null, lastActivityLabel: null, testState: "idle", testToolCount: 0, testDetail: null, testError: null, reconnectError: null },
-    },
+    nativeCard: { component: ConnectionCard, props: cardProps(CONNECTIONS[0], "Google") },
+    serverCard: { component: ConnectionCard, props: cardProps(CONNECTIONS[1], "Linear") },
     serverTools: { component: McpToolsTab, props: { tools: TOOLS, serverName: "linear" } },
-    serverSettings: {
-      component: McpSettingsTab,
-      props: { serverName: "linear", confirmDisconnect: false, disconnecting: false, disconnectError: null, onsaved: noop, onrequestdisconnect: noop, oncanceldisconnect: noop, onconfirmdisconnect: noop },
-    },
     builtinTools: { component: BuiltinToolsDetail },
-    otherConnection: { component: ConnectionSummaryDetail, props: { connection: CONNECTIONS[3], label: "Invoices" } },
+    folderCard: { component: ConnectionCard, props: cardProps(CONNECTIONS[3], "Invoices") },
     addSheet: {
-      component: CatalogueSheet,
-      props: { open: true, registry: [], agents: [], installedNames: new Set(), installedByPackage: new Map(), registryLoading: true, catalogueTier: "none", onclose: noop, onconnect: noop, onmanage: noop, oninstalled: noop, onaddnative: noop, onaddfolder: noop },
+      component: AddConnectionWindow,
+      props: { open: true, query: "", chosen: null, selection: [], publicEntries: [], failures: [], catalogueTier: "none", loading: true, agents: [], installedNames: new Set(), installedByPackage: new Map(), onclose: noop, onchoose: noop, onback: noop, onexploreall: noop, onadd: noop, onmanage: noop, adding: false, resume: null, onadded: noop, ondone: noop, onsignin: noop, ontry: noop, ontryprompt: noop, onopenrule: noop },
     },
-    customConnection: { component: CustomMcpForm, props: { oninstalled: noop } },
+    addAddressCard: {
+      component: AddConnectionWindow,
+      props: { open: true, query: "", chosen: "address", selection: [], publicEntries: [], failures: [], catalogueTier: "curated", loading: false, agents: [], installedNames: new Set(), installedByPackage: new Map(), onclose: noop, onchoose: noop, onback: noop, onexploreall: noop, onadd: noop, onmanage: noop, adding: false, resume: null, onadded: noop, ondone: noop, onsignin: noop, ontry: noop, ontryprompt: noop, onopenrule: noop },
+    },
+    customConnection: { component: AddressForm, props: { oncancel: noop, onsubmit: noop } },
   };
 }
 
@@ -200,40 +205,39 @@ describe("Connections, developer mode on", () => {
     expect(visibleText(html)).toContain("Schema");
   });
 
-  test("the custom connection offers the transport and the command line", async () => {
+  test("the custom connection offers the transport and the headers", async () => {
     // GIVEN the developer mode on
     // WHEN the custom connection form is rendered
     const html = await render("customConnection", true);
 
-    // THEN the transport selector and the command field are there
+    // THEN the transport selector and the headers field are there
     expect(html).toContain('data-testid="custom-mcp-transport-select"');
-    expect(html).toContain('data-testid="custom-mcp-command-input"');
+    expect(html).toContain('data-testid="custom-mcp-env-input"');
     expect(visibleText(html)).toMatch(/\bMCP\b/);
   });
 
-  test("the add sheet names the catalogue by its technical name", async () => {
+  test("the add window names the catalogue by its technical name", async () => {
     // GIVEN the developer mode on
-    // WHEN the add sheet is rendered
+    // WHEN the add window is rendered
     const text = visibleText(await render("addSheet", true));
 
     // THEN the catalogue and the custom form keep their technical names
-    expect(text).toContain("MCP catalogue");
+    expect(text).toContain("public MCP catalogue");
     expect(text).toContain("Custom MCP");
   });
 
-  test("a mailbox or folder page gives the provenance of the connection and of each tool", async () => {
-    // GIVEN the developer mode on and a connection with a tool
+  test("a card gives the provenance of the connection and of each tool", async () => {
+    // GIVEN the developer mode on and a folder with a tool
     const withTool = { ...CONNECTIONS[3], tools: CONNECTIONS[1].tools };
     locale.set("en");
     await waitLocale("en");
     developerMode.set(true);
 
-    // WHEN its page is rendered
-    const html = renderToString(ConnectionSummaryDetail, {
-      props: { connection: withTool, label: "Invoices" },
-    }).body;
+    // WHEN its card is rendered
+    const html = renderToString(ConnectionCard, { props: cardProps(withTool, "Invoices") as never }).body;
 
-    // THEN the connection and its tool carry their provenance
+    // THEN the technical section carries the provenance of the connection and of its tool
+    expect(html).toContain('data-testid="connection-technical"');
     expect(html).toContain('data-testid="connection-detail-provenance"');
     expect(html).toContain('data-testid="connection-tool-provenance"');
   });
@@ -258,32 +262,38 @@ describe("Connections, developer mode on", () => {
 describe("Connections, one list and one word", () => {
   test("the list has no native or MCP section, and the route keeps no hard-coded connector list", async () => {
     // GIVEN the list rendered with an account, two servers and a folder
-    const text = visibleText(await render("list", false));
+    const html = await render("list", false);
+    const text = visibleText(html);
     const route = readFileSync(
       fileURLToPath(new URL("../../routes/Connections.svelte", import.meta.url)),
       "utf8",
     );
+    const header = readFileSync(
+      fileURLToPath(new URL("./list/ConnectionListHeader.svelte", import.meta.url)),
+      "utf8",
+    );
 
     // WHEN its words and the route source are read
-    // THEN the four connections sit under one title, with no section between them
-    expect(text).toContain("Connections · 4");
+    // THEN the four connections sit in one list, with no section between them
+    for (const c of CONNECTIONS) expect(html).toContain(`connection-state-${c.id}`);
     expect(text).not.toContain("Apollia native");
     expect(text).not.toContain("MCP servers");
     // AND adding one is the action of the page header, not a line of the list
-    expect(route).toContain('data-testid="connections-open-catalogue"');
+    expect(header).toContain('data-testid="connections-open-catalogue"');
+    expect(html).not.toContain('data-testid="connections-open-catalogue"');
     expect(route).not.toContain("NATIVE_CONNECTORS");
-    expect(route).toContain("loadConnections");
+    expect(route).toContain("listConnections");
   });
 
-  test("the add sheet offers the custom connection under its plain name", async () => {
+  test("the add window offers a service by its address under its plain name", async () => {
     // GIVEN the developer mode off
-    // WHEN the add sheet is rendered
+    // WHEN the add window is rendered
     const html = await render("addSheet", false);
     const text = visibleText(html);
 
-    // THEN it is titled with the official word, offers the native accounts and a custom connection
+    // THEN it is titled with the official word, offers the native accounts and a service by its address
     expect(text).toContain("Add a connection");
-    expect(text).toContain("Custom connection");
+    expect(text).toContain("Connect a service by its address");
     expect(html).toContain('data-testid="catalogue-native-google"');
     expect(html).toContain('data-testid="catalogue-native-microsoft"');
   });
@@ -294,38 +304,41 @@ describe("Connections, one list and one word", () => {
     await waitLocale("fr");
     developerMode.set(false);
 
-    // WHEN the add sheet is rendered
+    // WHEN the add window is rendered
     const { component, props } = screens().addSheet;
     const text = visibleText(renderToString(component as never, { props: (props ?? {}) as never }).body);
 
     // THEN it uses the French words of the catalogue, and still never says MCP
     expect(text).toContain(fr.connections.add_connection);
-    expect(text).toContain(fr.connections.catalogue_tab_custom);
+    expect(text).toContain(fr.connections.add_window.groups.address);
     expect(text).not.toMatch(/\bMCP\b/);
   });
 });
 
 describe("Connections, the remote badge", () => {
-  test("a remote connection carries the badge in the list, a local one does not", async () => {
+  test("a remote connection says so in the list, a local one says it runs on this computer", async () => {
     // GIVEN a remote server and a local one in the list
     // WHEN the list is rendered
     const html = await render("list", false);
 
-    // THEN only the remote one carries the badge
+    // THEN the remote one says remote, the local ones this computer
     expect(html).toContain('data-testid="connection-remote-mcp:linear"');
     expect(html).not.toContain('data-testid="connection-remote-mcp:files"');
     expect(html).not.toContain('data-testid="connection-remote-folder:invoices"');
+    expect(html).toContain('data-testid="connection-machine-mcp:files"');
+    expect(html).toContain('data-testid="connection-machine-folder:invoices"');
+    expect(html).not.toContain('data-testid="connection-machine-mcp:linear"');
   });
 
-  test("the page of a remote connection carries the badge", async () => {
-    // GIVEN a remote server and a remote native account
-    // WHEN their pages are rendered
-    const server = await render("serverHeader", false);
-    const native = await render("native", false);
+  test("the card of a remote connection carries the badge, a local one does not", async () => {
+    // GIVEN a remote server and a local folder
+    // WHEN their cards are rendered
+    const server = await render("serverCard", false);
+    const folder = await render("folderCard", false);
 
-    // THEN both pages carry it, worded for the user
-    expect(server).toContain('data-testid="mcp-detail-remote"');
-    expect(native).toContain('data-testid="native-detail-remote"');
+    // THEN only the server's card carries it, worded for the user
+    expect(server).toContain('data-testid="connection-detail-remote"');
+    expect(folder).not.toContain('data-testid="connection-detail-remote"');
     expect(visibleText(server)).toContain("Remote");
   });
 });

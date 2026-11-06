@@ -81,16 +81,23 @@
     "automations-filter-paused",
     "catalogue-entry-@modelcontextprotocol/server-brave-search",
     "catalogue-entry-com.notion/mcp",
+    "catalogue-entry-com.paypal.mcp/mcp",
     "catalogue-entry-io.apollia/seed-failing",
     "catalogue-entry-io.apollia/seed-stub",
-    "catalogue-filter-all",
-    "catalogue-filter-community",
-    "catalogue-filter-installed",
-    "catalogue-filter-official",
+    "catalogue-logo-com.notion/mcp",
+    "catalogue-logo-com.paypal.mcp/mcp",
+    "catalogue-logo-native-google",
     "catalogue-native-google",
     "catalogue-native-microsoft",
-    "catalogue-tab-custom",
-    "catalogue-tab-discover",
+    "catalogue-source-all",
+    "catalogue-source-public",
+    "catalogue-source-verified",
+    "catalogue-usage-chip-all",
+    "catalogue-usage-chip-payments",
+    "catalogue-usage-count-documents",
+    "catalogue-usage-documents",
+    "catalogue-usage-payments",
+    "catalogue-usage-toggle-documents",
     "channel-card-det-auto-channel",
     "channel-card-seed-channel-desktop",
     "channel-card-seed-channel-webhook",
@@ -104,11 +111,20 @@
     "command-item-agents.create",
     "command-item-companion.toggle",
     "config-editor-gutter-1",
-    "connections-sidebar-filter-active",
-    "connections-sidebar-filter-all",
-    "connections-sidebar-filter-attention",
-    "connections-sidebar-filter-error",
-    "connections-sidebar-filter-idle",
+    "connection-agent-apollia:chat",
+    "connection-agent-automation-agent",
+    "connection-give-agent-automation-agent",
+    "connection-logo-mcp:com-paypal-mcp-mcp",
+    "connection-tile-brings-folder:seed-checkout",
+    "connection-tile-name-folder:seed-checkout",
+    "connections-kind-filter-all",
+    "connections-kind-filter-folder",
+    "connections-kind-filter-imap",
+    "connections-kind-filter-mcp",
+    "connections-kind-filter-native",
+    "connections-summary-action",
+    "connections-summary-all",
+    "connections-summary-working",
     "credential-row-web_search-brave.api_key",
     "danger-card-clear-logs",
     "danger-card-clear-memories",
@@ -117,6 +133,14 @@
     "engine-format-gguf",
     "engine-format-gguf-fell-back",
     "engine-format-gguf-select",
+    "engine-hardware-card-0",
+    "engine-variant-install-progress-vulkan",
+    "engine-variant-install-rocm",
+    "engine-variant-install-vulkan",
+    "engine-variant-remove-llama-server-b7100-cuda-12",
+    "engine-variant-row-cuda-12-reason",
+    "engine-variant-row-cuda-12-verdict",
+    "engine-variant-row-rocm",
     "env-input-BRAVE_API_KEY",
     "env-toggle-BRAVE_API_KEY",
     "global-event-agent.degraded",
@@ -126,9 +150,6 @@
     "help-link-docs",
     "help-link-report",
     "help-link-shortcuts",
-    "mcp-detail-tab-overview",
-    "mcp-detail-tab-settings",
-    "mcp-detail-tab-tools",
     "memory-type-tab-all",
     "memory-type-tab-episodic",
     "memory-type-tab-procedural",
@@ -142,9 +163,6 @@
     "namespace-sidebar-item-onboarding-agent",
     "native-client-google",
     "native-client-microsoft",
-    "native-detail-tab-accounts",
-    "native-detail-tab-capabilities",
-    "native-detail-tab-settings",
     "native-needs-config-google",
     "nav-agents",
     "nav-authorizations",
@@ -160,9 +178,8 @@
     "nav-observability",
     "nav-settings",
     "nav-transcriptions",
-    "oauth-add-account-google",
     "oauth-add-account-microsoft",
-    "oauth-configure-google",
+    "oauth-connect-microsoft",
     "observability-tab-capture",
     "observability-tab-delegation",
     "observability-tab-hooks",
@@ -170,6 +187,17 @@
     "observability-tab-plan-cache",
     "observability-tab-timeline",
     "observability-toggle-debug_log_prompt",
+    "onedrive-browse-ada@example.com",
+    "onedrive-browse-close-ada@example.com",
+    "onedrive-choice-automation-file",
+    "onedrive-choices-ada@example.com",
+    "onedrive-choose-automation-file",
+    "onedrive-entry-automation-file",
+    "onedrive-entry-automation-folder",
+    "onedrive-entry-automation-inner",
+    "onedrive-forget-automation-file",
+    "onedrive-open-automation-folder",
+    "onedrive-up-ada@example.com",
     "operator-approval-accept-bash_executor",
     "operator-approval-accept-file_write",
     "operator-approval-always-bash_executor",
@@ -210,8 +238,13 @@
     "settings-nav-profile",
     "settings-nav-stt",
     "sidebar-connection-folder:automation",
+    "sidebar-connection-folder:automation-broken",
+    "sidebar-connection-folder:automation-quiet",
+    "sidebar-connection-imap:ada@example.com",
+    "sidebar-connection-native:microsoft:ada@example.com",
     "sidebar-mcp-automation-stub-mcp",
-    "sidebar-mcp-seed-stub",
+    "sidebar-mcp-com-paypal-mcp-mcp",
+    "sidebar-mcp-io-apollia-seed-stub",
     "theme-dark",
     "theme-light",
     "theme-system",
@@ -327,6 +360,26 @@
       "kind": "waitFor",
       "testid": "chat-page",
       "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "topbar-sidebar-fold"
+    },
+    {
+      "kind": "sleep",
+      "ms": 300
+    },
+    {
+      "kind": "screenshot",
+      "label": "01b-chat-menu-folded"
+    },
+    {
+      "kind": "click",
+      "testid": "topbar-sidebar-fold"
+    },
+    {
+      "kind": "expect",
+      "testid": "sidebar-primary-rank"
     },
     {
       "kind": "click",
@@ -5328,6 +5381,23 @@
             "sizeBytes": 60000000,
             "reason": "too_large"
           }
+        ],
+        "unreadPages": [
+          {
+            "path": "/automation/scanned-fr.pdf",
+            "page": 1,
+            "reason": "ocr_unavailable"
+          },
+          {
+            "path": "/automation/scanned-fr.pdf",
+            "page": 2,
+            "reason": "ocr_unavailable"
+          },
+          {
+            "path": "/automation/plan.pdf",
+            "page": 3,
+            "reason": "not_read"
+          }
         ]
       }
     },
@@ -5403,6 +5473,18 @@
       "testid": "agent-sheet-source-open-ai"
     },
     {
+      "kind": "expect",
+      "testid": "agent-sheet-source-awaiting-ocr"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-sheet-source-import-language"
+    },
+    {
+      "kind": "expect",
+      "testid": "agent-sheet-source-not-read"
+    },
+    {
       "kind": "screenshot",
       "label": "03a-apollia-adjust-sources (stubbed registry: one folder searched by keywords only, one file left out)"
     },
@@ -5460,6 +5542,42 @@
     {
       "kind": "expect",
       "testid": "agent-source-pick-local-folder"
+    },
+    {
+      "kind": "click",
+      "testid": "agent-source-pick-cancel",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitGone",
+      "testid": "agent-source-pick-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sources-add",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-sources-add-menu",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "click",
+      "testid": "agent-sources-add-choice",
+      "nth": 2,
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-source-pick-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "agent-source-pick-connections",
+      "timeoutMs": 4000
     },
     {
       "kind": "click",
@@ -9551,37 +9669,153 @@
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-all",
+      "testid": "connections-kind-filter-all",
       "timeoutMs": 3000
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-active",
+      "testid": "connections-kind-filter-native",
       "timeoutMs": 2500
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-attention",
+      "testid": "connections-kind-filter-imap",
       "timeoutMs": 2500
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-error",
+      "testid": "connections-kind-filter-mcp",
       "timeoutMs": 2500
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-idle",
+      "testid": "connections-kind-filter-folder",
       "timeoutMs": 2500
     },
     {
       "kind": "screenshot",
-      "label": "02-sidebar-status-filters"
+      "label": "02-list-kind-filters"
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-all",
+      "testid": "connections-kind-filter-all",
       "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-summary",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-summary-agents",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-tile-name-folder:seed-checkout",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-tile-brings-folder:seed-checkout",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "connections-summary-action",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "02b-dashboard-needs-attention"
+    },
+    {
+      "kind": "click",
+      "testid": "connections-summary-working",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "screenshot",
+      "label": "02c-dashboard-working"
+    },
+    {
+      "kind": "click",
+      "testid": "connections-summary-all",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "fill",
+      "testid": "connections-search",
+      "text": "automation-no-such-connection"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-grid-empty",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "connections-search",
+      "text": ""
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connections-grid-empty",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": []
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-empty-add",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "connections-sidebar-empty"
+    },
+    {
+      "kind": "screenshot",
+      "label": "02d-dashboard-empty"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_connections"
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-summary",
+      "timeoutMs": 8000
     },
     {
       "kind": "click",
@@ -9600,12 +9834,90 @@
     },
     {
       "kind": "waitFor",
-      "testid": "native-detail-tabbar",
+      "testid": "catalogue-card",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-needs",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-cancel",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-card",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-native-google",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_start_flow",
+      "reject": {
+        "kind": "oauth_client_not_configured",
+        "detail": "automation: forced by stubInvoke"
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-signin",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-open-settings-btn",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-open-settings-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "oauth-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "oauth_start_flow"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
       "timeoutMs": 6000
     },
     {
       "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "testid": "connection-detail-title",
       "timeoutMs": 4000
     },
     {
@@ -9615,7 +9927,7 @@
     },
     {
       "kind": "waitFor",
-      "testid": "oauth-configure-google",
+      "testid": "native-needs-config-google",
       "timeoutMs": 3000
     },
     {
@@ -9623,23 +9935,8 @@
       "label": "03-native-google-needs-config (no embedded Google client on a fresh install)"
     },
     {
-      "kind": "click",
-      "testid": "native-detail-tab-capabilities",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "native-capabilities",
-      "timeoutMs": 6000
-    },
-    {
       "kind": "screenshot",
       "label": "04-native-google-capabilities"
-    },
-    {
-      "kind": "click",
-      "testid": "native-detail-tab-settings",
-      "timeoutMs": 3000
     },
     {
       "kind": "sleep",
@@ -9675,13 +9972,65 @@
       "timeoutMs": 3000
     },
     {
-      "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "kind": "click",
+      "testid": "catalogue-card-add",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "oauth-add-account-microsoft",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "06a-native-microsoft-sign-in-step"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_start_flow",
+      "reject": {
+        "kind": "oauth_client_not_configured",
+        "detail": "automation: forced by stubInvoke"
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-signin",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-open-settings-btn",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-open-settings-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "oauth-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "oauth_start_flow"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-connect-microsoft",
       "timeoutMs": 3000
     },
     {
@@ -9715,17 +10064,60 @@
     },
     {
       "kind": "click",
-      "testid": "native-detail-tab-accounts",
-      "timeoutMs": 3000
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_start_flow",
+      "reject": {
+        "kind": "oauth_client_not_configured",
+        "detail": "automation: forced by stubInvoke"
+      },
+      "once": true
     },
     {
       "kind": "click",
-      "testid": "oauth-configure-google",
+      "testid": "add-flow-signin",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "native-client-google",
+      "testid": "oauth-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-open-settings-btn",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-open-settings-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "oauth-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "oauth_start_flow"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "native-needs-config-google",
       "timeoutMs": 8000
     },
     {
@@ -9758,7 +10150,7 @@
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-all",
+      "testid": "connections-kind-filter-all",
       "timeoutMs": 2500
     },
     {
@@ -9769,32 +10161,32 @@
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-detail-tabbar",
+      "testid": "connection-card-state",
       "timeoutMs": 8000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-detail-tab-overview",
+      "testid": "connection-card-state",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-tools-count",
+      "testid": "connection-detail-tools",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-test-btn",
+      "testid": "connection-check-btn",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-reconnect-btn",
+      "testid": "connection-check-btn",
       "timeoutMs": 2000
     },
     {
       "kind": "click",
-      "testid": "mcp-reconnect-btn",
+      "testid": "connection-check-btn",
       "timeoutMs": 3000
     },
     {
@@ -9807,7 +10199,7 @@
     },
     {
       "kind": "click",
-      "testid": "mcp-test-btn",
+      "testid": "connection-check-btn",
       "timeoutMs": 3000
     },
     {
@@ -9817,11 +10209,6 @@
     {
       "kind": "screenshot",
       "label": "09-mcp-test-ext-boundary-operator"
-    },
-    {
-      "kind": "click",
-      "testid": "mcp-detail-tab-tools",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -9847,11 +10234,6 @@
     {
       "kind": "screenshot",
       "label": "10-mcp-tools-schema"
-    },
-    {
-      "kind": "click",
-      "testid": "mcp-detail-tab-settings",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitGone",
@@ -10101,17 +10483,17 @@
     },
     {
       "kind": "click",
-      "testid": "mcp-disconnect-btn",
+      "testid": "connection-remove-btn",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-disconnect-confirm",
+      "testid": "connection-remove-confirm",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-disconnect-confirm-btn",
+      "testid": "connection-remove-confirm-btn",
       "timeoutMs": 3000
     },
     {
@@ -10144,17 +10526,37 @@
       "timeoutMs": 3000
     },
     {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "testid": "add-flow-signin",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "connections-back",
+      "testid": "wizard-cancel-btn",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
       "testid": "connections-open-catalogue",
       "timeoutMs": 4000
     },
@@ -10165,70 +10567,25 @@
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tab-discover",
+      "testid": "catalogue-address",
       "timeoutMs": 4000
     },
     {
-      "kind": "waitFor",
-      "testid": "catalogue-tab-custom",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "catalogue-filter-all",
-      "timeoutMs": 5000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "catalogue-filter-installed",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "catalogue-filter-official",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "catalogue-filter-community",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-official",
-      "timeoutMs": 3000
+      "kind": "sleep",
+      "ms": 250
     },
     {
       "kind": "sleep",
       "ms": 250
     },
     {
-      "kind": "click",
-      "testid": "catalogue-filter-community",
-      "timeoutMs": 3000
-    },
-    {
       "kind": "sleep",
       "ms": 250
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-installed",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "sleep",
-      "ms": 250
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-all",
-      "timeoutMs": 3000
     },
     {
       "kind": "fill",
@@ -10239,6 +10596,51 @@
     {
       "kind": "waitFor",
       "testid": "catalogue-entry-com.notion/mcp",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-logo-com.notion/mcp",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "catalogue-search",
+      "text": "payments",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-entry-com.paypal.mcp/mcp",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-logo-com.paypal.mcp/mcp",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-entry-com.paypal.mcp/mcp",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-logo",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13a-catalogue-brand-logos"
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-cancel",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-card",
       "timeoutMs": 4000
     },
     {
@@ -10258,9 +10660,284 @@
       "timeoutMs": 10000
     },
     {
-      "kind": "click",
-      "testid": "catalogue-back-to-selection",
+      "kind": "waitFor",
+      "testid": "catalogue-source-all",
       "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-public-note",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-badge-community",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13b-catalogue-usage-everything"
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-source-public",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-sort",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-entry-io.apollia/seed-stub",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-source-verified",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-group-public",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-explore-all",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-usages",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-badge-verified",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-group-address",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-logo-native-google",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-usage-count-documents",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "catalogue-sort",
+      "value": "name",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "selectOption",
+      "testid": "catalogue-sort",
+      "value": "recommended",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-usage-toggle-documents",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-native-google",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-usage-toggle-documents",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-native-google",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-usage-chip-payments",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-usage-payments",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-usage-documents",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-entry-com.paypal.mcp/mcp",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-keyless",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-entry-com.paypal.mcp/mcp",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13c-catalogue-usage-payments-keyless"
+    },
+    {
+      "kind": "fill",
+      "testid": "catalogue-search",
+      "text": "zzqq",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-empty",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-empty-address",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-group-address",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13d-catalogue-usage-empty"
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-empty-public",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-source-all",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "fill",
+      "testid": "catalogue-search",
+      "text": "",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-keyless",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-usage-chip-all",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-source-verified",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-explore-all",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-entry-com.notion/mcp",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-verified",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-facts",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-usage",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-auth",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-abilities",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-examples",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "13e-catalogue-card-usage-abilities"
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-cancel",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-card",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-source-all",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-entry-io.apollia/seed-stub",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-community",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-cancel",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-card",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-source-verified",
+      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -10278,7 +10955,7 @@
     },
     {
       "kind": "click",
-      "testid": "catalogue-tab-custom",
+      "testid": "catalogue-address",
       "timeoutMs": 3000
     },
     {
@@ -10294,6 +10971,32 @@
     {
       "kind": "waitFor",
       "testid": "custom-mcp-url-input",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-address",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-key-toggle",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-key-input",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "add-flow-key-input",
+      "text": "automation-not-a-key",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "add-flow-key-toggle",
       "timeoutMs": 3000
     },
     {
@@ -10358,12 +11061,12 @@
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
     },
     {
       "kind": "click",
-      "testid": "catalogue-tab-custom",
+      "testid": "catalogue-address",
       "timeoutMs": 3000
     },
     {
@@ -10496,6 +11199,36 @@
     },
     {
       "kind": "waitFor",
+      "testid": "add-flow-who",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who-agent",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-who-continue",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "test-result-success",
+      "timeoutMs": 20000
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-done-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
       "testid": "sidebar-mcp-automation-stub-mcp",
       "timeoutMs": 15000
     },
@@ -10534,13 +11267,8 @@
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-detail-tabbar",
+      "testid": "connection-card-state",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "mcp-detail-tab-settings",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -10549,17 +11277,17 @@
     },
     {
       "kind": "click",
-      "testid": "mcp-disconnect-btn",
+      "testid": "connection-remove-btn",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-disconnect-confirm-btn",
+      "testid": "connection-remove-confirm-btn",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "mcp-disconnect-confirm-btn",
+      "testid": "connection-remove-confirm-btn",
       "timeoutMs": 3000
     },
     {
@@ -10648,11 +11376,6 @@
       "timeoutMs": 4000
     },
     {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
-    },
-    {
       "kind": "waitFor",
       "testid": "catalogue-native-google",
       "timeoutMs": 8000
@@ -10663,28 +11386,66 @@
       "timeoutMs": 3000
     },
     {
-      "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "kind": "click",
+      "testid": "catalogue-card-add",
       "timeoutMs": 4000
     },
     {
+      "kind": "waitFor",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_start_flow",
+      "reject": {
+        "kind": "oauth_client_not_configured",
+        "detail": "automation: forced by stubInvoke"
+      },
+      "once": true
+    },
+    {
       "kind": "click",
-      "testid": "native-detail-tab-capabilities",
+      "testid": "add-flow-signin",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "native-capabilities",
+      "testid": "oauth-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-open-settings-btn",
       "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-open-settings-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "oauth-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "oauth_start_flow"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "native-client-google",
+      "timeoutMs": 4000
     },
     {
       "kind": "screenshot",
       "label": "20-native-capabilities-builder"
-    },
-    {
-      "kind": "click",
-      "testid": "native-detail-tab-settings",
-      "timeoutMs": 3000
     },
     {
       "kind": "sleep",
@@ -10712,17 +11473,12 @@
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-detail-tab-overview",
+      "testid": "connection-card-state",
       "timeoutMs": 6000
     },
     {
-      "kind": "click",
-      "testid": "mcp-detail-tab-overview",
-      "timeoutMs": 4000
-    },
-    {
       "kind": "waitFor",
-      "testid": "mcp-tools-count",
+      "testid": "connection-detail-tools",
       "timeoutMs": 4000
     },
     {
@@ -10731,7 +11487,7 @@
     },
     {
       "kind": "click",
-      "testid": "mcp-test-btn",
+      "testid": "connection-check-btn",
       "timeoutMs": 3000
     },
     {
@@ -10743,11 +11499,6 @@
       "label": "23-mcp-test-builder-technical-detail"
     },
     {
-      "kind": "click",
-      "testid": "mcp-detail-tab-tools",
-      "timeoutMs": 3000
-    },
-    {
       "kind": "waitFor",
       "testid": "mcp-tools-list",
       "timeoutMs": 5000
@@ -10755,11 +11506,6 @@
     {
       "kind": "screenshot",
       "label": "24-mcp-tools-builder"
-    },
-    {
-      "kind": "click",
-      "testid": "mcp-detail-tab-settings",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -10797,13 +11543,8 @@
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
@@ -10816,7 +11557,7 @@
     },
     {
       "kind": "click",
-      "testid": "catalogue-tab-custom",
+      "testid": "catalogue-address",
       "timeoutMs": 3000
     },
     {
@@ -10885,11 +11626,6 @@
       "timeoutMs": 4000
     },
     {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
-    },
-    {
       "kind": "waitFor",
       "testid": "catalogue-native-microsoft",
       "timeoutMs": 8000
@@ -10900,8 +11636,23 @@
       "timeoutMs": 3000
     },
     {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
       "timeoutMs": 4000
     },
     {
@@ -10911,8 +11662,13 @@
     },
     {
       "kind": "click",
-      "testid": "connections-back",
+      "testid": "catalogue-close",
       "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
     },
     {
       "kind": "waitFor",
@@ -10926,18 +11682,8 @@
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-community",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -10951,18 +11697,23 @@
     },
     {
       "kind": "waitFor",
-      "testid": "connector-wizard",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "waitFor",
       "testid": "wizard-step-disclaimer",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "wizard-warning-accept",
-      "timeoutMs": 3000
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connector-wizard",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
@@ -11009,29 +11760,39 @@
       "timeoutMs": 6000
     },
     {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "click",
       "testid": "connections-open-catalogue",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
     },
     {
       "kind": "click",
       "testid": "catalogue-explore-all",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-community",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -11045,18 +11806,23 @@
     },
     {
       "kind": "waitFor",
-      "testid": "connector-wizard",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "waitFor",
       "testid": "wizard-step-disclaimer",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "wizard-warning-accept",
-      "timeoutMs": 3000
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connector-wizard",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
@@ -11092,6 +11858,26 @@
       "timeoutMs": 6000
     },
     {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "click",
       "testid": "connections-open-catalogue",
       "timeoutMs": 4000
@@ -11107,8 +11893,23 @@
       "timeoutMs": 3000
     },
     {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
       "timeoutMs": 4000
     },
     {
@@ -11119,10 +11920,15 @@
     },
     {
       "kind": "click",
-      "testid": "connections-back",
+      "testid": "catalogue-close",
       "timeoutMs": 3000
     },
     {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
       "kind": "waitFor",
       "testid": "connections-open-catalogue",
       "timeoutMs": 4000
@@ -11134,23 +11940,13 @@
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
     },
     {
       "kind": "click",
       "testid": "catalogue-explore-all",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-community",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -11164,18 +11960,23 @@
     },
     {
       "kind": "waitFor",
-      "testid": "connector-wizard",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "waitFor",
       "testid": "wizard-step-disclaimer",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "wizard-warning-accept",
-      "timeoutMs": 3000
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connector-wizard",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
@@ -11220,40 +12021,10 @@
       "timeoutMs": 8000
     },
     {
-      "kind": "click",
-      "testid": "connections-open-catalogue",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "catalogue-native-microsoft",
-      "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-native-microsoft",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
-      "timeoutMs": 4000
-    },
-    {
       "kind": "stubInvoke",
-      "command": "test_mcp_live_server",
+      "command": "add_mcp_server",
       "once": true,
-      "reject": "automation: transport closed by stubInvoke"
-    },
-    {
-      "kind": "click",
-      "testid": "connections-back",
-      "timeoutMs": 3000
-    },
-    {
-      "kind": "waitFor",
-      "testid": "connections-open-catalogue",
-      "timeoutMs": 4000
+      "reject": "node_unavailable: This service needs Node.js. Apollia could not provide its own (automation: forced by stubInvoke), and no Node.js was found on this machine."
     },
     {
       "kind": "click",
@@ -11262,23 +12033,13 @@
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
     },
     {
       "kind": "click",
       "testid": "catalogue-explore-all",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-community",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -11292,8 +12053,138 @@
     },
     {
       "kind": "waitFor",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
       "testid": "connector-wizard",
       "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "wizard-node-unavailable",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "wizard-node-help",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "37c-add-without-any-node"
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-native-microsoft",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-native-microsoft",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "test_mcp_live_server",
+      "once": true,
+      "reject": "automation: transport closed by stubInvoke"
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-explore-all",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-entry-io.apollia/seed-stub",
+      "timeoutMs": 10000
     },
     {
       "kind": "waitFor",
@@ -11302,7 +12193,32 @@
     },
     {
       "kind": "click",
-      "testid": "wizard-warning-accept",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connector-wizard",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who",
+      "timeoutMs": 30000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who-agent",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-who-continue",
       "timeoutMs": 3000
     },
     {
@@ -11320,6 +12236,14 @@
       "label": "38-add-trial-failed-retry-remove"
     },
     {
+      "kind": "stubInvoke",
+      "command": "test_mcp_live_server",
+      "once": true,
+      "patch": {
+        "node_source": "machine"
+      }
+    },
+    {
       "kind": "click",
       "testid": "test-retry-btn",
       "timeoutMs": 3000
@@ -11328,6 +12252,11 @@
       "kind": "waitFor",
       "testid": "test-result-success",
       "timeoutMs": 30000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-machine-node",
+      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -11350,7 +12279,7 @@
     },
     {
       "kind": "waitFor",
-      "testid": "sidebar-mcp-seed-stub",
+      "testid": "sidebar-mcp-io-apollia-seed-stub",
       "timeoutMs": 15000
     },
     {
@@ -11359,18 +12288,13 @@
     },
     {
       "kind": "click",
-      "testid": "sidebar-mcp-seed-stub",
+      "testid": "sidebar-mcp-io-apollia-seed-stub",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-detail-tabbar",
+      "testid": "connection-card-state",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "mcp-detail-tab-settings",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitGone",
@@ -11384,23 +12308,23 @@
     },
     {
       "kind": "click",
-      "testid": "mcp-disconnect-btn",
+      "testid": "connection-remove-btn",
       "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-disconnect-confirm-btn",
+      "testid": "connection-remove-confirm-btn",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "mcp-disconnect-confirm-btn",
+      "testid": "connection-remove-confirm-btn",
       "timeoutMs": 3000
     },
     {
-      "kind": "click",
-      "testid": "connections-back",
-      "timeoutMs": 3000
+      "kind": "waitGone",
+      "testid": "connector-detail",
+      "timeoutMs": 15000
     },
     {
       "kind": "waitFor",
@@ -11409,7 +12333,7 @@
     },
     {
       "kind": "waitGone",
-      "testid": "sidebar-mcp-seed-stub",
+      "testid": "sidebar-mcp-io-apollia-seed-stub",
       "timeoutMs": 15000
     },
     {
@@ -11437,8 +12361,23 @@
       "timeoutMs": 3000
     },
     {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
       "timeoutMs": 4000
     },
     {
@@ -11449,10 +12388,15 @@
     },
     {
       "kind": "click",
-      "testid": "connections-back",
+      "testid": "catalogue-close",
       "timeoutMs": 3000
     },
     {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
       "kind": "waitFor",
       "testid": "connections-open-catalogue",
       "timeoutMs": 4000
@@ -11464,23 +12408,13 @@
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
     },
     {
       "kind": "click",
       "testid": "catalogue-explore-all",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-community",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -11494,17 +12428,37 @@
     },
     {
       "kind": "waitFor",
-      "testid": "connector-wizard",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "waitFor",
       "testid": "wizard-step-disclaimer",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "wizard-warning-accept",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connector-wizard",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who",
+      "timeoutMs": 30000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who-agent",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-who-continue",
       "timeoutMs": 3000
     },
     {
@@ -11524,7 +12478,7 @@
     },
     {
       "kind": "waitGone",
-      "testid": "sidebar-mcp-seed-stub",
+      "testid": "sidebar-mcp-io-apollia-seed-stub",
       "timeoutMs": 15000
     },
     {
@@ -11551,8 +12505,23 @@
       "timeoutMs": 3000
     },
     {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
       "timeoutMs": 4000
     },
     {
@@ -11582,8 +12551,13 @@
     },
     {
       "kind": "click",
-      "testid": "connections-back",
+      "testid": "catalogue-close",
       "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
     },
     {
       "kind": "waitFor",
@@ -11597,18 +12571,8 @@
     },
     {
       "kind": "waitFor",
-      "testid": "catalogue-tabbar",
+      "testid": "catalogue-search",
       "timeoutMs": 8000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-tab-discover",
-      "timeoutMs": 4000
-    },
-    {
-      "kind": "click",
-      "testid": "catalogue-filter-official",
-      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -11622,18 +12586,23 @@
     },
     {
       "kind": "waitFor",
-      "testid": "connector-wizard",
-      "timeoutMs": 6000
-    },
-    {
-      "kind": "waitFor",
       "testid": "wizard-step-disclaimer",
       "timeoutMs": 4000
     },
     {
       "kind": "click",
-      "testid": "wizard-warning-accept",
-      "timeoutMs": 3000
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connector-wizard",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
@@ -11647,8 +12616,13 @@
     },
     {
       "kind": "waitFor",
-      "testid": "auth-oauth-scopes",
+      "testid": "auth-oauth-permissions",
       "timeoutMs": 4000
+    },
+    {
+      "kind": "expect",
+      "testid": "auth-oauth-permissions",
+      "contains": "Read pages and databases"
     },
     {
       "kind": "screenshot",
@@ -11767,6 +12741,26 @@
       "timeoutMs": 6000
     },
     {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "clearStubs",
       "command": "test_mcp_connection"
     },
@@ -11794,14 +12788,14 @@
       "timeoutMs": 3000
     },
     {
-      "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "kind": "click",
+      "testid": "catalogue-card-add",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "oauth-add-account-microsoft",
-      "timeoutMs": 6000
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
     },
     {
       "kind": "stubInvoke",
@@ -11814,7 +12808,7 @@
     },
     {
       "kind": "click",
-      "testid": "oauth-add-account-microsoft",
+      "testid": "add-flow-signin",
       "timeoutMs": 3000
     },
     {
@@ -11838,7 +12832,12 @@
     },
     {
       "kind": "waitFor",
-      "testid": "native-client-microsoft",
+      "testid": "connection-detail-title",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-connect-microsoft",
       "timeoutMs": 8000
     },
     {
@@ -11884,14 +12883,14 @@
       "timeoutMs": 3000
     },
     {
-      "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "kind": "click",
+      "testid": "catalogue-card-add",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "oauth-add-account-microsoft",
-      "timeoutMs": 6000
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
     },
     {
       "kind": "stubInvoke",
@@ -11904,7 +12903,7 @@
     },
     {
       "kind": "click",
-      "testid": "oauth-add-account-microsoft",
+      "testid": "add-flow-signin",
       "timeoutMs": 3000
     },
     {
@@ -12093,14 +13092,14 @@
       "timeoutMs": 3000
     },
     {
-      "kind": "waitFor",
-      "testid": "native-detail-tab-accounts",
+      "kind": "click",
+      "testid": "catalogue-card-add",
       "timeoutMs": 4000
     },
     {
       "kind": "waitFor",
-      "testid": "oauth-add-account-google",
-      "timeoutMs": 6000
+      "testid": "add-flow-signin",
+      "timeoutMs": 4000
     },
     {
       "kind": "stubInvoke",
@@ -12126,7 +13125,7 @@
     },
     {
       "kind": "click",
-      "testid": "oauth-add-account-google",
+      "testid": "add-flow-signin",
       "timeoutMs": 3000
     },
     {
@@ -12236,18 +13235,38 @@
       "timeoutMs": 3000
     },
     {
-      "kind": "waitFor",
-      "testid": "oauth-done",
+      "kind": "waitGone",
+      "testid": "oauth-dialog",
       "timeoutMs": 6000
     },
     {
+      "kind": "waitFor",
+      "testid": "add-flow-who",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who-agent",
+      "timeoutMs": 4000
+    },
+    {
       "kind": "click",
-      "testid": "oauth-done-close",
+      "testid": "add-flow-who-continue",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "test-result-success",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-done-btn",
       "timeoutMs": 3000
     },
     {
       "kind": "waitGone",
-      "testid": "oauth-dialog",
+      "testid": "connector-wizard",
       "timeoutMs": 6000
     },
     {
@@ -12304,7 +13323,7 @@
     },
     {
       "kind": "click",
-      "testid": "connections-sidebar-filter-all",
+      "testid": "connections-kind-filter-all",
       "timeoutMs": 2500
     },
     {
@@ -12319,32 +13338,52 @@
     },
     {
       "kind": "stubInvoke",
-      "command": "list_sources",
-      "resolve": [
-        {
-          "id": "src-automation",
-          "kind": "folder",
-          "label": "Automation documents",
-          "group": null,
-          "reference": "folder:automation",
-          "indexState": "ready",
-          "addedAt": "2026-10-01T08:00:00.000Z"
-        }
-      ]
+      "command": "remove_connection",
+      "argsMatch": {
+        "connectionId": "folder:automation",
+        "dryRun": true
+      },
+      "resolve": {
+        "connection": "folder:automation",
+        "dryRun": true,
+        "removed": [
+          {
+            "kind": "source",
+            "name": "Automation documents"
+          },
+          {
+            "kind": "agent_access",
+            "name": "read_file",
+            "agent": "Automation agent"
+          }
+        ],
+        "left": []
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "remove_connection",
+      "reject": "automation: remove_connection was not called with the dry run first, then the confirmation"
     },
     {
       "kind": "click",
-      "testid": "connection-folder-remove",
+      "testid": "connection-remove-btn",
       "timeoutMs": 2500
     },
     {
       "kind": "waitFor",
-      "testid": "connection-folder-remove-dialog",
+      "testid": "connection-remove-confirm",
       "timeoutMs": 4000
     },
     {
       "kind": "expect",
-      "testid": "connection-folder-remove-source"
+      "testid": "connection-remove-items",
+      "contains": "Automation documents"
+    },
+    {
+      "kind": "expect",
+      "testid": "connection-remove-items",
+      "contains": "Automation agent"
     },
     {
       "kind": "screenshot",
@@ -12352,66 +13391,108 @@
     },
     {
       "kind": "click",
-      "testid": "connection-folder-remove-cancel",
+      "testid": "connection-remove-confirm-cancel",
       "timeoutMs": 2500
     },
     {
       "kind": "waitGone",
-      "testid": "connection-folder-remove-dialog",
+      "testid": "connection-remove-confirm",
       "timeoutMs": 4000
     },
     {
-      "kind": "click",
-      "testid": "connection-folder-remove",
-      "timeoutMs": 2500
-    },
-    {
-      "kind": "waitFor",
-      "testid": "connection-folder-remove-dialog",
-      "timeoutMs": 4000
+      "kind": "clearStubs",
+      "command": "remove_connection"
     },
     {
       "kind": "stubInvoke",
-      "command": "remove_folder_connection",
-      "resolve": {
-        "id": "folder:automation",
-        "kind": "folder",
-        "label": "Automation folder",
-        "account": null,
-        "path": "/automation/folder",
-        "provenance": "custom",
-        "remote": false,
-        "official": false,
-        "state": "connected",
-        "tools": []
-      },
+      "command": "remove_connection",
       "argsMatch": {
         "connectionId": "folder:automation",
-        "confirm": true
+        "dryRun": true
+      },
+      "resolve": {
+        "connection": "folder:automation",
+        "dryRun": true,
+        "removed": [
+          {
+            "kind": "source",
+            "name": "Automation documents"
+          },
+          {
+            "kind": "agent_access",
+            "name": "read_file",
+            "agent": "Automation agent"
+          }
+        ],
+        "left": []
       }
     },
     {
       "kind": "stubInvoke",
-      "command": "remove_folder_connection",
-      "reject": "automation: remove_folder_connection was not called with the confirmation the dialog gave"
+      "command": "remove_connection",
+      "argsMatch": {
+        "connectionId": "folder:automation",
+        "dryRun": false
+      },
+      "resolve": {
+        "connection": "folder:automation",
+        "dryRun": false,
+        "removed": [
+          {
+            "kind": "source",
+            "name": "Automation documents"
+          }
+        ],
+        "left": [
+          {
+            "kind": "source",
+            "name": "Automation leftover"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "remove_connection",
+      "reject": "automation: remove_connection was not called with the dry run first, then the confirmation"
     },
     {
       "kind": "click",
-      "testid": "connection-folder-remove-confirm",
+      "testid": "connection-remove-btn",
+      "timeoutMs": 2500
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-remove-confirm",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "expect",
+      "testid": "connection-remove-items",
+      "contains": "Automation documents"
+    },
+    {
+      "kind": "click",
+      "testid": "connection-remove-confirm-btn",
       "timeoutMs": 2500
     },
     {
       "kind": "waitGone",
-      "testid": "connection-folder-remove-dialog",
+      "testid": "connection-remove-confirm",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-remove-left",
+      "contains": "Automation leftover",
       "timeoutMs": 4000
     },
     {
       "kind": "clearStubs",
-      "command": "remove_folder_connection"
+      "command": "remove_connection"
     },
     {
-      "kind": "clearStubs",
-      "command": "list_sources"
+      "kind": "clearToasts"
     },
     {
       "kind": "clearStubs",
@@ -12439,6 +13520,2463 @@
       "kind": "waitFor",
       "testid": "connections-sidebar-list",
       "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "48-section-new-page-start"
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-route",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "fill",
+      "testid": "connections-search",
+      "text": "zzz-automation-no-match",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-grid-empty",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "fill",
+      "testid": "connections-search",
+      "text": "",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connections-grid-empty",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": [
+        {
+          "id": "folder:automation-card",
+          "kind": "folder",
+          "label": "Automation card folder",
+          "account": null,
+          "provenance": "selection",
+          "remote": false,
+          "official": false,
+          "state": "connected",
+          "status": "needs_repair",
+          "reason": {
+            "key": "folder_not_found",
+            "detail": "automation: /automation/card is gone"
+          },
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "conn:folder:automation-card/file_edit",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:folder:automation-card/file_glob",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-card/file_grep",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-card/file_list",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-card/file_read",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-card/file_write",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            }
+          ],
+          "path": "/automation/card"
+        }
+      ]
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_agents",
+      "argsMatch": {
+        "connectionId": "folder:automation-card"
+      },
+      "resolve": {
+        "connection": "folder:automation-card",
+        "agents": [
+          {
+            "id": "apollia:chat",
+            "name": "apollia:chat",
+            "enabled": true,
+            "byDefault": false,
+            "tools": [
+              "conn:folder:automation-card/file_read"
+            ]
+          }
+        ],
+        "sharedWith": []
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_activity",
+      "argsMatch": {
+        "toolPrefix": "conn:folder:automation-card/"
+      },
+      "resolve": {
+        "toolPrefix": "conn:folder:automation-card/",
+        "since": "2026-01-01T00:00:00Z",
+        "until": null,
+        "actions": 3,
+        "lastUsedAt": "2026-01-02T00:00:00Z",
+        "agents": [
+          {
+            "agent": "apollia:chat",
+            "actions": 3,
+            "lastUsedAt": "2026-01-02T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-folder",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-folder",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card-needs",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-folder-pick",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:dialog|open",
+      "once": true,
+      "resolve": "${HOME}/automation-card"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "add_folder_connection",
+      "once": true,
+      "resolve": {
+        "id": "folder:automation-card",
+        "kind": "folder",
+        "label": "Automation card folder",
+        "account": null,
+        "provenance": "selection",
+        "remote": false,
+        "official": false,
+        "state": "connected",
+        "status": "needs_repair",
+        "reason": {
+          "key": "folder_not_found",
+          "detail": "automation: /automation/card is gone"
+        },
+        "checkedAt": "2026-01-01T00:00:00Z",
+        "package": null,
+        "tools": [
+          {
+            "id": "conn:folder:automation-card/file_edit",
+            "family": "write_or_delete",
+            "familySource": "builtin",
+            "prechecked": false
+          },
+          {
+            "id": "conn:folder:automation-card/file_glob",
+            "family": "read",
+            "familySource": "builtin",
+            "prechecked": true
+          },
+          {
+            "id": "conn:folder:automation-card/file_grep",
+            "family": "read",
+            "familySource": "builtin",
+            "prechecked": true
+          },
+          {
+            "id": "conn:folder:automation-card/file_list",
+            "family": "read",
+            "familySource": "builtin",
+            "prechecked": true
+          },
+          {
+            "id": "conn:folder:automation-card/file_read",
+            "family": "read",
+            "familySource": "builtin",
+            "prechecked": true
+          },
+          {
+            "id": "conn:folder:automation-card/file_write",
+            "family": "write_or_delete",
+            "familySource": "builtin",
+            "prechecked": false
+          }
+        ],
+        "path": "/automation/card"
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "grant_connection",
+      "once": true,
+      "reject": "automation: grant refused by stubInvoke"
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-folder-pick",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who-agent",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-who-continue",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "wizard-grant-error",
+      "timeoutMs": 15000,
+      "contains": "grant refused"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "test-result-success",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "folder-connection-path",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-try",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "49-add-folder-grant-refused"
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-done-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
+      "timeoutMs": 8000,
+      "contains": "Automation card folder"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-state",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-repair-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-agents",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-agent-apollia:chat",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connection-agents-shared",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-activity",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-activity-last",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-activity-agent",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "50-folder-card-sections"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:dialog|open",
+      "once": true,
+      "resolve": null
+    },
+    {
+      "kind": "click",
+      "testid": "connection-repair-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-repair-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "check_connection",
+      "once": true,
+      "reject": "automation: check refused by stubInvoke"
+    },
+    {
+      "kind": "click",
+      "testid": "connection-check-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-card-error",
+      "timeoutMs": 4000,
+      "contains": "check refused"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_agents",
+      "once": true,
+      "resolve": [
+        {
+          "id": null,
+          "name": "automation-agent",
+          "version": "1.0.0",
+          "enabled": true,
+          "runtime_status": null,
+          "installed_at": null,
+          "description": null,
+          "tags": [],
+          "execution_mode": null,
+          "supports_a2a": false,
+          "skills": [],
+          "agent_type": "worker",
+          "examples": [],
+          "limitations": [],
+          "setup_notes": null,
+          "agent_class": null,
+          "memory_namespace": null,
+          "shared_memory_namespaces": []
+        }
+      ]
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-give-agent-automation-agent",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-agent-automation-agent",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "grant_connection",
+      "once": true,
+      "reject": "automation: give refused by stubInvoke"
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-confirm",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-give-error",
+      "timeoutMs": 4000,
+      "contains": "give refused"
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-cancel",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connection-give-confirm",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_agents",
+      "once": true,
+      "resolve": []
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-give-none",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-cancel",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connection-give-none",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_agents",
+      "once": true,
+      "resolve": [
+        {
+          "id": null,
+          "name": "automation-agent",
+          "version": "1.0.0",
+          "enabled": true,
+          "runtime_status": null,
+          "installed_at": null,
+          "description": null,
+          "tags": [],
+          "execution_mode": null,
+          "supports_a2a": false,
+          "skills": [],
+          "agent_type": "worker",
+          "examples": [],
+          "limitations": [],
+          "setup_notes": null,
+          "agent_class": null,
+          "memory_namespace": null,
+          "shared_memory_namespaces": []
+        }
+      ]
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-give-agent-automation-agent",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-agent-automation-agent",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "grant_connection",
+      "once": true,
+      "argsMatch": {
+        "connectionId": "folder:automation-card",
+        "agents": [
+          "automation-agent"
+        ]
+      },
+      "resolve": {
+        "connection": "folder:automation-card",
+        "agents": [
+          {
+            "id": "apollia:chat",
+            "name": "apollia:chat",
+            "enabled": true,
+            "byDefault": false,
+            "tools": [
+              "conn:folder:automation-card/file_read"
+            ]
+          },
+          {
+            "id": "automation-agent",
+            "name": "automation-agent",
+            "enabled": true,
+            "byDefault": false,
+            "tools": [
+              "conn:folder:automation-card/file_read"
+            ]
+          }
+        ],
+        "sharedWith": []
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "connection-give-confirm",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connection-give-confirm",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-agent-automation-agent",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "51-folder-card-given"
+    },
+    {
+      "kind": "click",
+      "testid": "connection-activity-journal",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "journal-page",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "journal-filter-connection",
+      "timeoutMs": 4000,
+      "contains": "Automation card folder"
+    },
+    {
+      "kind": "screenshot",
+      "label": "52-journal-narrowed-to-connection"
+    },
+    {
+      "kind": "click",
+      "testid": "journal-filter-connection-remove",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "journal-filter-connection",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_connections"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_connection_agents"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_connection_activity"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "grant_connection"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "check_connection"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": [
+        {
+          "id": "folder:automation-quiet",
+          "kind": "folder",
+          "label": "Automation quiet folder",
+          "account": null,
+          "provenance": "selection",
+          "remote": false,
+          "official": false,
+          "state": "connected",
+          "status": "working",
+          "reason": null,
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "conn:folder:automation-quiet/file_edit",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:folder:automation-quiet/file_glob",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-quiet/file_grep",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-quiet/file_list",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-quiet/file_read",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-quiet/file_write",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            }
+          ],
+          "path": "/automation/quiet"
+        },
+        {
+          "id": "folder:automation-broken",
+          "kind": "folder",
+          "label": "Automation broken folder",
+          "account": null,
+          "provenance": "selection",
+          "remote": false,
+          "official": false,
+          "state": "connected",
+          "status": "needs_repair",
+          "reason": {
+            "key": "folder_not_found",
+            "detail": "automation: /automation/broken is gone"
+          },
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "conn:folder:automation-broken/file_edit",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:folder:automation-broken/file_glob",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-broken/file_grep",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-broken/file_list",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-broken/file_read",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-broken/file_write",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            }
+          ],
+          "path": "/automation/broken"
+        },
+        {
+          "id": "imap:ada@example.com",
+          "kind": "imap",
+          "label": "imap.example.com",
+          "account": "ada@example.com",
+          "provenance": "selection",
+          "remote": true,
+          "official": false,
+          "state": "connected",
+          "status": "working",
+          "reason": null,
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "imap.list_folders",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "imap.search",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "imap.read",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            }
+          ]
+        },
+        {
+          "id": "imap:ada.work@example.com",
+          "kind": "imap",
+          "label": "imap.example.com",
+          "account": "ada.work@example.com",
+          "provenance": "selection",
+          "remote": true,
+          "official": false,
+          "state": "connected",
+          "status": "working",
+          "reason": null,
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "imap.list_folders",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "imap.search",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "imap.read",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            }
+          ]
+        },
+        {
+          "id": "native:microsoft:ada@example.com",
+          "kind": "native",
+          "label": "Microsoft",
+          "account": "ada@example.com",
+          "provenance": "selection",
+          "remote": true,
+          "official": false,
+          "state": "connected",
+          "status": "working",
+          "reason": null,
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.search",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.get",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.send",
+              "family": "send_external",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.reply",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.list_folders",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.move",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.list_events",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.get_event",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.create_event",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.update_event",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.delete_event",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/onedrive.search",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/onedrive.get_metadata",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/onedrive.download",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/onedrive.list_recent",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_agents",
+      "argsMatch": {
+        "connectionId": "folder:automation-broken"
+      },
+      "reject": "automation: agents unreadable by stubInvoke"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_activity",
+      "argsMatch": {
+        "toolPrefix": "conn:folder:automation-broken/"
+      },
+      "reject": "automation: journal unreadable by stubInvoke"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_agents",
+      "argsMatch": {
+        "connectionId": "imap:ada@example.com"
+      },
+      "resolve": {
+        "connection": "imap:ada@example.com",
+        "agents": [],
+        "sharedWith": [
+          "imap:ada.work@example.com"
+        ]
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_agents",
+      "resolve": {
+        "connection": "automation",
+        "agents": [],
+        "sharedWith": []
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_activity",
+      "resolve": {
+        "toolPrefix": "automation",
+        "since": "2026-01-01T00:00:00Z",
+        "until": null,
+        "actions": 0,
+        "lastUsedAt": null,
+        "agents": []
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "onedrive_list_choices",
+      "argsMatch": {
+        "accountId": "ada@example.com"
+      },
+      "resolve": []
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-route",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-connection-folder:automation-quiet",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
+      "timeoutMs": 6000,
+      "contains": "Automation quiet folder"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-agents-empty",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-activity-none",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-connection-folder:automation-broken",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
+      "timeoutMs": 6000,
+      "contains": "Automation broken folder"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-agents-error",
+      "timeoutMs": 4000,
+      "contains": "agents unreadable"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-activity-error",
+      "timeoutMs": 4000,
+      "contains": "journal unreadable"
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-connection-imap:ada@example.com",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
+      "timeoutMs": 6000,
+      "contains": "imap.example.com"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-activity-shared",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-agents-shared",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "53-mailbox-card-shared-activity"
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-connection-native:microsoft:ada@example.com",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-title",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "onedrive-choices-ada@example.com",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "onedrive_browse",
+      "argsMatch": {
+        "accountId": "ada@example.com",
+        "folderId": null
+      },
+      "resolve": [
+        {
+          "id": "automation-folder",
+          "name": "Automation",
+          "is_folder": true,
+          "chosen": false
+        },
+        {
+          "id": "automation-file",
+          "name": "notes.txt",
+          "is_folder": false,
+          "chosen": false
+        }
+      ]
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "onedrive_browse",
+      "argsMatch": {
+        "accountId": "ada@example.com",
+        "folderId": "automation-folder"
+      },
+      "resolve": [
+        {
+          "id": "automation-inner",
+          "name": "plan.txt",
+          "is_folder": false,
+          "chosen": false
+        }
+      ]
+    },
+    {
+      "kind": "click",
+      "testid": "onedrive-browse-ada@example.com",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "onedrive-entry-automation-folder",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "onedrive-open-automation-folder",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "onedrive-entry-automation-inner",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "onedrive-up-ada@example.com",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "onedrive-entry-automation-file",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "onedrive_choose",
+      "once": true,
+      "argsMatch": {
+        "accountId": "ada@example.com",
+        "itemId": "automation-file"
+      },
+      "resolve": [
+        {
+          "id": "automation-file",
+          "name": "notes.txt",
+          "is_folder": false,
+          "path": "/drive/root:/notes.txt"
+        }
+      ]
+    },
+    {
+      "kind": "click",
+      "testid": "onedrive-choose-automation-file",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "onedrive-choice-automation-file",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "onedrive_forget",
+      "once": true,
+      "argsMatch": {
+        "accountId": "ada@example.com",
+        "itemId": "automation-file"
+      },
+      "resolve": []
+    },
+    {
+      "kind": "click",
+      "testid": "onedrive-forget-automation-file",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "onedrive-choice-automation-file",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "onedrive-browse-close-ada@example.com",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "onedrive-browse-ada@example.com",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "onedrive_browse"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_start_flow",
+      "once": true,
+      "resolve": {
+        "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=automation&state=automation-ms-state",
+        "state": "automation-ms-state",
+        "callback_port": 0
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_complete_flow",
+      "once": true,
+      "resolve": {
+        "provider": "microsoft",
+        "account_id": "ada@example.com",
+        "granted_scopes": [
+          "Mail.Read"
+        ]
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-add-account-microsoft",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-open-url-link",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-paste-code-toggle",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-paste-code-input",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "fill",
+      "testid": "oauth-paste-code-input",
+      "text": "automation-ms-code",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-finalize-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-done",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "54-oauth-account-added-from-card"
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-done-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "oauth-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_start_flow",
+      "once": true,
+      "resolve": {
+        "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=automation&state=automation-ms-state",
+        "state": "automation-ms-state",
+        "callback_port": 0
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_complete_flow",
+      "once": true,
+      "reject": {
+        "kind": "admin_approval_required",
+        "detail": "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=automation"
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-add-account-microsoft",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-open-url-link",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-paste-code-toggle",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-paste-code-input",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "fill",
+      "testid": "oauth-paste-code-input",
+      "text": "automation-ms-code",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-finalize-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-admin-approval",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-admin-approval-address",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-admin-approval-copy",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-admin-approval-copy",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-admin-approval-request",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-admin-approval-request-copy",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-admin-approval-request-copy",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "55-oauth-admin-approval-required"
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-admin-approval-close-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "oauth-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_start_flow",
+      "once": true,
+      "resolve": {
+        "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=automation&state=automation-ms-state",
+        "state": "automation-ms-state",
+        "callback_port": 0
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "oauth_start_flow",
+      "once": true,
+      "resolve": {
+        "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=automation&state=automation-ms-state",
+        "state": "automation-ms-state",
+        "callback_port": 0
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-add-account-microsoft",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-dialog",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-open-url-link",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "sleep",
+      "ms": 400
+    },
+    {
+      "kind": "emitEvent",
+      "event": "oauth://error",
+      "payload": {
+        "state": "automation-ms-state",
+        "error": "automation: consent declined by emitEvent",
+        "admin_consent_url": "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=automation",
+        "admin_approval": "possible"
+      }
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-admin-approval-possible",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56-oauth-admin-approval-possible"
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-admin-approval-retry-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "oauth-admin-approval-possible",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "oauth-open-url-link",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "oauth-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "oauth-dialog",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "oauth_start_flow"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "oauth_complete_flow"
+    },
+    {
+      "kind": "click",
+      "testid": "connections-back",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connector-detail",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_connections"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_connection_agents"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_connection_activity"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "onedrive_list_choices"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "onedrive_choose"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "onedrive_forget"
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-route",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_imap_providers",
+      "resolve": {
+        "providers": [
+          {
+            "name": "Automation mail",
+            "domains": [
+              "example.com"
+            ],
+            "host": "imap.example.com",
+            "port": 993
+          }
+        ],
+        "defaultPort": 993
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-native-mailbox",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-native-mailbox",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "mailbox-body",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "fill",
+      "testid": "mailbox-email",
+      "text": "ada@example.com",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "fill",
+      "testid": "mailbox-password",
+      "text": "automation-not-a-password",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "add_imap_mailbox",
+      "once": true,
+      "resolve": {
+        "connectionId": "imap:ada@example.com",
+        "email": "ada@example.com",
+        "host": "imap.example.com",
+        "port": 993,
+        "username": "ada@example.com"
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "mailbox-add",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-who",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": []
+    },
+    {
+      "kind": "click",
+      "testid": "add-flow-who-continue",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "test-result-success",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "add-flow-mailbox-read-only",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "screenshot",
+      "label": "57-add-mailbox-read-only"
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-done-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_imap_providers"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "add_imap_mailbox"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_connections"
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-route",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_chat_session",
+      "argsMatch": {
+        "sessionId": "seed-session-1"
+      },
+      "patch": {
+        "status": "processing",
+        "messages": [
+          {
+            "id": "automation-offer-ask",
+            "role": "user",
+            "content": "Read my Notion pages.",
+            "tool_calls": null,
+            "tool_name": null,
+            "seq": 1,
+            "created_at": "2026-01-01T00:00:00Z"
+          },
+          {
+            "id": "automation-offer-answer",
+            "role": "assistant",
+            "content": "Apollia has no connection to Notion yet.",
+            "tool_calls": [
+              {
+                "tool_name": "connection_lookup",
+                "input": {
+                  "query": "notion"
+                },
+                "output": "{\"matches\": [{\"entry\": \"com.notion/mcp\", \"label\": \"Notion\", \"status\": \"not_connected\"}, {\"entry\": \"io.example/automation-absent\", \"label\": \"Absent service\", \"status\": \"not_connected\"}, {\"entry\": \"io.apollia/seed-stub\", \"label\": \"Seed stub\", \"status\": \"connected_not_granted\", \"connection\": \"mcp:io-apollia-seed-stub\"}]}",
+                "status": "executed",
+                "duration_ms": 12
+              }
+            ],
+            "tool_name": null,
+            "seq": 2,
+            "created_at": "2026-01-01T00:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "goto",
+      "route": "chat",
+      "sessionId": "seed-session-1"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "chat-conversation-header",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-offers",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-offer",
+      "timeoutMs": 3000,
+      "nth": 2
+    },
+    {
+      "kind": "screenshot",
+      "label": "58-chat-connection-offers"
+    },
+    {
+      "kind": "click",
+      "testid": "connection-offer-add",
+      "timeoutMs": 3000,
+      "nth": 1
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-offer-error",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "connection-offer-add",
+      "timeoutMs": 3000,
+      "nth": 0
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connector-wizard",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connector-wizard",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": [
+        {
+          "id": "mcp:io-apollia-seed-stub",
+          "kind": "mcp",
+          "label": "io-apollia-seed-stub",
+          "account": null,
+          "provenance": "custom",
+          "remote": false,
+          "official": false,
+          "state": "connected",
+          "status": "working",
+          "reason": null,
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "mcp:io-apollia-seed-stub/echo",
+              "family": "read",
+              "familySource": "server",
+              "prechecked": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "grant_connection",
+      "once": true,
+      "argsMatch": {
+        "connectionId": "mcp:io-apollia-seed-stub",
+        "agents": [
+          "apollia:chat"
+        ]
+      },
+      "resolve": {
+        "connection": "mcp:io-apollia-seed-stub",
+        "agents": [
+          {
+            "id": "apollia:chat",
+            "name": "apollia:chat",
+            "enabled": true,
+            "byDefault": false,
+            "tools": [
+              "mcp:io-apollia-seed-stub/echo"
+            ]
+          }
+        ],
+        "sharedWith": []
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "connection-offer-grant",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-offer-done",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "screenshot",
+      "label": "59-chat-connection-offer-granted"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_chat_session"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_connections"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "grant_connection"
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-route",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "goto",
+      "route": "settings"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-page",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-on"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-route",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "test_mcp_connection",
+      "once": true,
+      "resolve": {
+        "kind": "oauth_required",
+        "www_authenticate": "Bearer resource_metadata=\"https://mcp.notion.com/.well-known/oauth-protected-resource\""
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "mcp_oauth_discover",
+      "once": true,
+      "resolve": {
+        "as_url": "https://mcp.notion.com",
+        "scopes_supported": [
+          "read_content",
+          "update_content"
+        ],
+        "scope_descriptions": {
+          "read_content": "Read pages and databases"
+        },
+        "registration_supported": true
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "connections-open-catalogue",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-entry-com.notion/mcp",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-card",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "wizard-step-disclaimer",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-card-add",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connector-wizard",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "wizard-step-auth",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "auth-oauth-scopes",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "60-add-auth-oauth-scopes-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "wizard-cancel-btn",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "catalogue-search",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "catalogue-close",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "catalogue-window",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "test_mcp_connection"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "mcp_oauth_discover"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": [
+        {
+          "id": "folder:automation-broken",
+          "kind": "folder",
+          "label": "Automation broken folder",
+          "account": null,
+          "provenance": "selection",
+          "remote": false,
+          "official": false,
+          "state": "connected",
+          "status": "needs_repair",
+          "reason": {
+            "key": "folder_not_found",
+            "detail": "automation: /automation/broken is gone"
+          },
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "conn:folder:automation-broken/file_edit",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:folder:automation-broken/file_glob",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-broken/file_grep",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-broken/file_list",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-broken/file_read",
+              "family": "read",
+              "familySource": "builtin",
+              "prechecked": true
+            },
+            {
+              "id": "conn:folder:automation-broken/file_write",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            }
+          ],
+          "path": "/automation/broken"
+        },
+        {
+          "id": "native:microsoft:ada@example.com",
+          "kind": "native",
+          "label": "Microsoft",
+          "account": "ada@example.com",
+          "provenance": "selection",
+          "remote": true,
+          "official": false,
+          "state": "connected",
+          "status": "working",
+          "reason": null,
+          "checkedAt": "2026-01-01T00:00:00Z",
+          "package": null,
+          "tools": [
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.search",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.get",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.send",
+              "family": "send_external",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.reply",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.list_folders",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook.move",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.list_events",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.get_event",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.create_event",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.update_event",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/outlook_cal.delete_event",
+              "family": "write_or_delete",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/onedrive.search",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/onedrive.get_metadata",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/onedrive.download",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            },
+            {
+              "id": "conn:microsoft:ada@example.com/onedrive.list_recent",
+              "family": "read_personal",
+              "familySource": "builtin",
+              "prechecked": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_agents",
+      "resolve": {
+        "connection": "automation",
+        "agents": [],
+        "sharedWith": []
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_connection_activity",
+      "resolve": {
+        "toolPrefix": "automation",
+        "since": "2026-01-01T00:00:00Z",
+        "until": null,
+        "actions": 0,
+        "lastUsedAt": null,
+        "agents": []
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "onedrive_list_choices",
+      "argsMatch": {
+        "accountId": "ada@example.com"
+      },
+      "resolve": []
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-route",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-connection-folder:automation-broken",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-technical",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-reason",
+      "timeoutMs": 3000,
+      "contains": "/automation/broken is gone"
+    },
+    {
+      "kind": "screenshot",
+      "label": "61-card-technical-detail-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-connection-native:microsoft:ada@example.com",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "native-client-microsoft",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "62-microsoft-account-client-builder"
+    },
+    {
+      "kind": "click",
+      "testid": "connections-back",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connector-detail",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "clearStubs"
+    },
+    {
+      "kind": "clearToasts"
+    },
+    {
+      "kind": "goto",
+      "route": "settings"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "settings-page",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "settings-nav-developer"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "developer-mode-toggle",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "developer-mode-off"
+    },
+    {
+      "kind": "sleep",
+      "ms": 800
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-route",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_connections",
+      "resolve": [
+        {
+          "id": "mcp:com-paypal-mcp-mcp",
+          "kind": "mcp",
+          "label": "com-paypal-mcp-mcp",
+          "account": null,
+          "provenance": "selection",
+          "remote": true,
+          "official": true,
+          "state": "connected",
+          "status": "working",
+          "reason": null,
+          "checkedAt": null,
+          "package": null,
+          "tools": []
+        }
+      ]
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 10000
+    },
+    {
+      "kind": "goto",
+      "route": "integrations"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connections-sidebar-list",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-logo-mcp:com-paypal-mcp-mcp",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "sidebar-mcp-com-paypal-mcp-mcp",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "connection-detail-logo",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "45a-connection-brand-logo"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_connections"
+    },
+    {
+      "kind": "click",
+      "testid": "connections-back",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "connector-detail",
+      "timeoutMs": 4000
     },
     {
       "kind": "goto",
@@ -15848,7 +19386,7 @@
           },
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "source": "downloaded",
             "tag": "b7001",
             "version": "7001 (0ff1ce0)",
@@ -15868,7 +19406,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7100",
             "update_available": true
@@ -15881,7 +19419,6 @@
             "update_available": false
           }
         ],
-        "cuda_proposable": false,
         "verifiable": true,
         "dictation": null
       }
@@ -15904,7 +19441,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7100",
             "update_available": true
@@ -16014,7 +19551,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7100",
             "update_available": true
@@ -16136,7 +19673,7 @@
           },
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "source": "downloaded",
             "tag": "b7001",
             "version": "7001 (0ff1ce0)",
@@ -16148,13 +19685,12 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7100",
             "update_available": true
           }
         ],
-        "cuda_proposable": false,
         "verifiable": true,
         "dictation": null
       }
@@ -16168,7 +19704,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7100",
             "update_available": true
@@ -16232,7 +19768,7 @@
           },
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "source": "downloaded",
             "tag": "b7001",
             "version": "7001 (0ff1ce0)",
@@ -16252,7 +19788,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7100",
             "update_available": true
@@ -16265,7 +19801,6 @@
             "update_available": false
           }
         ],
-        "cuda_proposable": false,
         "verifiable": true,
         "dictation": null
       }
@@ -16279,7 +19814,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7100",
             "update_available": true
@@ -16529,7 +20064,7 @@
           },
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "source": "downloaded",
             "tag": "b7001",
             "version": "7001 (0ff1ce0)",
@@ -16549,7 +20084,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7200",
             "update_available": true
@@ -16562,7 +20097,6 @@
             "update_available": false
           }
         ],
-        "cuda_proposable": false,
         "verifiable": true,
         "dictation": null
       }
@@ -16585,7 +20119,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7200",
             "update_available": true
@@ -16633,7 +20167,7 @@
         "updates": [
           {
             "engine": "llama-server",
-            "variant": "cuda",
+            "variant": "cuda-12",
             "installed_tag": "b7001",
             "latest_tag": "b7100",
             "update_available": true
@@ -16678,6 +20212,653 @@
     {
       "kind": "sleep",
       "ms": 800
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_engines",
+      "resolve": {
+        "engines": [
+          {
+            "engine": "llama-server",
+            "variant": "cpu",
+            "source": "embedded",
+            "tag": null,
+            "version": "7100 (c0ffee0)",
+            "in_service": true
+          },
+          {
+            "engine": "llama-server",
+            "variant": "cuda-12",
+            "source": "downloaded",
+            "tag": "b7100",
+            "version": "7100 (c0ffee0)",
+            "in_service": false
+          }
+        ],
+        "channel": "stable",
+        "manifest_sequence": 7,
+        "updates": [],
+        "verifiable": true,
+        "dictation": null,
+        "hardware": {
+          "cards": [
+            {
+              "vendor": "nvidia",
+              "name": "NVIDIA GeForce RTX 4090",
+              "vram_gb": 24,
+              "driver_version": "560.35.03",
+              "compute_capability": "8.9",
+              "gfx_target": null,
+              "kfd_accessible": null,
+              "timed_out": false
+            }
+          ],
+          "vulkan_loader": true,
+          "rocm_runtime": false
+        },
+        "available": [
+          {
+            "engine": "llama-server",
+            "tag": "b7100",
+            "variant": "cuda-13",
+            "size": 1,
+            "released": null,
+            "installed": false
+          },
+          {
+            "engine": "llama-server",
+            "tag": "b7100",
+            "variant": "cuda-12",
+            "size": 1,
+            "released": null,
+            "installed": true
+          },
+          {
+            "engine": "llama-server",
+            "tag": "b7100",
+            "variant": "rocm",
+            "size": 1,
+            "released": null,
+            "installed": false
+          },
+          {
+            "engine": "llama-server",
+            "tag": "b7100",
+            "variant": "vulkan",
+            "size": 1,
+            "released": null,
+            "installed": false
+          },
+          {
+            "engine": "llama-server",
+            "tag": "b7100",
+            "variant": "cpu",
+            "size": 1,
+            "released": null,
+            "installed": false
+          }
+        ],
+        "ratings": [
+          {
+            "variant": "cuda-12",
+            "verdict": "recommended",
+            "reason": {
+              "code": "driver_too_old",
+              "have": "560.35.03",
+              "need": "570.26"
+            }
+          },
+          {
+            "variant": "cuda-13",
+            "verdict": "incompatible",
+            "reason": {
+              "code": "driver_too_old",
+              "have": "560.35.03",
+              "need": "580"
+            }
+          },
+          {
+            "variant": "rocm",
+            "verdict": "incompatible",
+            "reason": {
+              "code": "no_gpu"
+            }
+          },
+          {
+            "variant": "vulkan",
+            "verdict": "compatible",
+            "reason": null
+          },
+          {
+            "variant": "cpu",
+            "verdict": "compatible",
+            "reason": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "check_engine_updates",
+      "resolve": {
+        "channel": "stable",
+        "manifest_sequence": 7,
+        "updates": []
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "settings-nav-engines"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engines-section",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "engines-check-updates"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-hardware-card-0",
+      "contains": "RTX 4090",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "engine-hardware"
+    },
+    {
+      "kind": "expect",
+      "testid": "engine-hardware-vulkan"
+    },
+    {
+      "kind": "expect",
+      "testid": "engine-variant-list"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-row-cuda-12-reason",
+      "contains": "570.26",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "expect",
+      "testid": "engine-variant-row-cuda-12-verdict"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "engine-variant-row-rocm",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56k-engines-hardware-and-variants"
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-toggle-incompatible"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-row-rocm",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56l-engines-variants-incompatible-shown"
+    },
+    {
+      "kind": "expect",
+      "testid": "engine-variant-install-vulkan"
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-install-rocm"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-install-dialog",
+      "contains": "No card of the kind",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56o-engines-install-incompatible-confirm"
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-install-dialog-cancel"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "engine-variant-install-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "start_engine_installation",
+      "resolve": {
+        "state": "downloading",
+        "kind": "install",
+        "received": 40,
+        "total": 100
+      },
+      "once": true
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_engine_installation",
+      "resolve": {
+        "state": "downloading",
+        "kind": "install",
+        "received": 40,
+        "total": 100
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-install-vulkan"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-install-progress-vulkan",
+      "contains": "40 %",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56p-engines-install-progress-on-row"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_engine_installation"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "engine-variant-install-progress-vulkan",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "engine-import"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:dialog|open",
+      "resolve": null,
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "engine-import-folder"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:dialog|open",
+      "resolve": "${HOME}/engines-folder",
+      "once": true
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "import_engine_folder",
+      "resolve": {
+        "state": "failed",
+        "kind": "import",
+        "code": "signature_missing",
+        "error": "no signature beside the engine list",
+        "archive_requested": false
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "engine-import-folder"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-import-folder-progress-error",
+      "contains": "signature",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56q-engines-import-refused"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "plugin:dialog|open",
+      "resolve": "${HOME}/engines-folder",
+      "once": true
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "import_engine_folder",
+      "resolve": {
+        "state": "installing",
+        "kind": "import"
+      },
+      "once": true
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "get_engine_installation",
+      "resolve": {
+        "state": "installing",
+        "kind": "import"
+      }
+    },
+    {
+      "kind": "click",
+      "testid": "engine-import-folder"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-import-folder-progress",
+      "contains": "Installing",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "get_engine_installation"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "engine-import-folder-progress",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-llama-server-b7100-cuda-12"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-remove-dialog-message",
+      "contains": "deleted from this computer",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56r-engines-remove-confirm"
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-dialog-cancel"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "engine-variant-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "remove_engine_variant",
+      "resolve": {
+        "outcome": "refused",
+        "status": 409,
+        "code": "chosen",
+        "error": "remove it with confirm=true and the choice goes back to auto",
+        "after": "auto"
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-llama-server-b7100-cuda-12"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-dialog-confirm"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-remove-dialog-message",
+      "contains": "goes back to automatic",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56s-engines-remove-chosen-back-to-auto"
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-dialog-cancel"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "engine-variant-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "remove_engine_variant",
+      "resolve": {
+        "outcome": "refused",
+        "status": 409,
+        "code": "in_service",
+        "error": "the build is in service",
+        "after": null
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-llama-server-b7100-cuda-12"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-dialog-confirm"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-remove-dialog-error",
+      "contains": "Apollia is using this build",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "screenshot",
+      "label": "56t-engines-remove-in-service-refused"
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-dialog-cancel"
+    },
+    {
+      "kind": "waitGone",
+      "testid": "engine-variant-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "remove_engine_variant",
+      "resolve": {
+        "outcome": "removed"
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-llama-server-b7100-cuda-12"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-remove-dialog-confirm"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-removed",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "engine-variant-remove-dialog",
+      "timeoutMs": 4000
+    },
+    {
+      "kind": "clearToasts"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_engines"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_engines",
+      "resolve": {
+        "engines": [
+          {
+            "engine": "llama-server",
+            "variant": "cpu",
+            "source": "embedded",
+            "tag": null,
+            "version": "7100 (c0ffee0)",
+            "in_service": true
+          }
+        ],
+        "channel": "stable",
+        "manifest_sequence": null,
+        "updates": [],
+        "verifiable": true,
+        "dictation": null,
+        "hardware": {
+          "cards": [],
+          "vulkan_loader": false,
+          "rocm_runtime": false
+        },
+        "available": [],
+        "ratings": []
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "check_engine_updates",
+      "resolve": {
+        "channel": "stable",
+        "manifest_sequence": 7,
+        "updates": []
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "engines-check-updates"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-unread",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "engine-hardware-no-card"
+    },
+    {
+      "kind": "screenshot",
+      "label": "56m-engines-catalogue-unread"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_engines"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_engines",
+      "resolve": {
+        "engines": [
+          {
+            "engine": "llama-server",
+            "variant": "cpu",
+            "source": "embedded",
+            "tag": null,
+            "version": "7100 (c0ffee0)",
+            "in_service": true
+          }
+        ],
+        "channel": "stable",
+        "manifest_sequence": 7,
+        "updates": [],
+        "verifiable": true,
+        "dictation": null,
+        "hardware": null,
+        "available": [],
+        "ratings": []
+      }
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "check_engine_updates",
+      "resolve": {
+        "channel": "stable",
+        "manifest_sequence": 7,
+        "updates": []
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "engine-variant-check"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engine-variant-none",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "engine-hardware-unknown"
+    },
+    {
+      "kind": "screenshot",
+      "label": "56n-engines-no-variant-hardware-late"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_engines"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "check_engine_updates",
+      "resolve": {
+        "channel": "stable",
+        "manifest_sequence": 7,
+        "updates": []
+      },
+      "once": true
+    },
+    {
+      "kind": "click",
+      "testid": "engines-check-updates"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "engines-list",
+      "timeoutMs": 20000
+    },
+    {
+      "kind": "clearStubs",
+      "command": "check_engine_updates"
     },
     {
       "kind": "click",
@@ -17363,6 +21544,10 @@
     {
       "kind": "expect",
       "testid": "ai-import-btn"
+    },
+    {
+      "kind": "expect",
+      "testid": "ai-import-language-data"
     },
     {
       "kind": "expect",
@@ -19501,6 +23686,177 @@
       "kind": "waitGone",
       "testid": "ai-server-form",
       "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "17-accelerated-engine-card (the variant the runtime recommends)"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_engines",
+      "patch": {
+        "updates": [],
+        "hardware": {
+          "cards": [
+            {
+              "vendor": "amd",
+              "name": "AMD Radeon RX 7900 XTX",
+              "vram_gb": 24,
+              "driver_version": null,
+              "compute_capability": null,
+              "gfx_target": "gfx1100",
+              "kfd_accessible": true,
+              "timed_out": false
+            }
+          ],
+          "vulkan_loader": true,
+          "rocm_runtime": true
+        },
+        "available": [
+          {
+            "engine": "llama-server",
+            "tag": "b12064",
+            "variant": "rocm",
+            "size": 640000000,
+            "released": "2026-10-30",
+            "installed": false
+          }
+        ],
+        "ratings": [
+          {
+            "variant": "rocm",
+            "verdict": "recommended",
+            "reason": null
+          },
+          {
+            "variant": "vulkan",
+            "verdict": "compatible",
+            "reason": null
+          },
+          {
+            "variant": "cpu",
+            "verdict": "compatible",
+            "reason": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "goto",
+      "route": "llm"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "llm-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "ai-engine-card",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "expect",
+      "testid": "ai-engine-title",
+      "contains": "ROCm"
+    },
+    {
+      "kind": "expect",
+      "testid": "ai-engine-body",
+      "contains": "AMD Radeon RX 7900 XTX"
+    },
+    {
+      "kind": "expect",
+      "testid": "ai-engine-start"
+    },
+    {
+      "kind": "screenshot",
+      "label": "17a-accelerated-engine-proposes-rocm"
+    },
+    {
+      "kind": "clearStubs",
+      "command": "list_engines"
+    },
+    {
+      "kind": "stubInvoke",
+      "command": "list_engines",
+      "patch": {
+        "engines": [
+          {
+            "engine": "llama-server",
+            "tag": null,
+            "variant": "metal",
+            "path": "/Applications/Apollia.app/Contents/MacOS/llama-server",
+            "source": "embedded",
+            "version": null,
+            "in_service": true
+          }
+        ],
+        "updates": [],
+        "hardware": {
+          "cards": [],
+          "vulkan_loader": false,
+          "rocm_runtime": false
+        },
+        "available": [],
+        "ratings": [
+          {
+            "variant": "metal",
+            "verdict": "recommended",
+            "reason": null
+          },
+          {
+            "variant": "cpu",
+            "verdict": "compatible",
+            "reason": null
+          }
+        ]
+      }
+    },
+    {
+      "kind": "goto",
+      "route": "chat"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "app-main",
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "goto",
+      "route": "llm"
+    },
+    {
+      "kind": "waitFor",
+      "testid": "llm-page",
+      "timeoutMs": 15000
+    },
+    {
+      "kind": "waitFor",
+      "testid": "ai-model-row",
+      "nth": 0,
+      "timeoutMs": 8000
+    },
+    {
+      "kind": "waitGone",
+      "testid": "ai-engine-card",
+      "timeoutMs": 6000
+    },
+    {
+      "kind": "screenshot",
+      "label": "17b-accelerated-engine-nothing-when-the-shipped-build-is-recommended"
+    },
+    {
+      "kind": "clearStubs"
     },
     {
       "kind": "screenshot",
@@ -24093,7 +28449,12 @@
     },
     {
       "kind": "click",
-      "testid": "web-search-backend-group",
+      "testid": "web-search-backend-duckduckgo",
+      "timeoutMs": 3000
+    },
+    {
+      "kind": "click",
+      "testid": "web-search-backend-brave",
       "timeoutMs": 3000
     },
     {
@@ -24103,6 +28464,11 @@
     {
       "kind": "screenshot",
       "label": "10-tool-config-edited-unsaved"
+    },
+    {
+      "kind": "click",
+      "testid": "web-search-backend-auto",
+      "timeoutMs": 3000
     },
     {
       "kind": "waitFor",
@@ -24367,27 +28733,17 @@
     },
     {
       "kind": "waitFor",
-      "testid": "mcp-detail-tab-overview",
+      "testid": "connection-card-state",
       "timeoutMs": 6000
     },
     {
-      "kind": "click",
-      "testid": "mcp-detail-tab-overview",
-      "timeoutMs": 4000
-    },
-    {
       "kind": "waitFor",
-      "testid": "mcp-tools-count",
+      "testid": "connection-detail-tools",
       "timeoutMs": 4000
     },
     {
       "kind": "screenshot",
       "label": "16-mcp-tools-count"
-    },
-    {
-      "kind": "click",
-      "testid": "mcp-detail-tab-tools",
-      "timeoutMs": 4000
     },
     {
       "kind": "waitFor",

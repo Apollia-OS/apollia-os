@@ -5,10 +5,12 @@
 //! fetches whatever the registry publishes at every start. Apollia does not
 //! launch it that way. When such a connection is added, the package is
 //! installed once into a directory of its own, `<data>/connections/<name>/`,
-//! by the npm of the Node.js the engine store holds, and the launch command is
-//! rewritten to `node <absolute path of the package's entry point>`. A later
-//! start runs that file on the store's Node.js and never runs npm nor touches
-//! the network.
+//! by the npm of the Node.js the engine store holds (or, when it holds none,
+//! of the Node.js installed on the machine, see
+//! [`apollia_mcp::transport::node::MachineNodeSearch`]), and the launch command
+//! is rewritten to `node <absolute path of the package's entry point>`. A later
+//! start runs that file on the same choice of Node.js and never runs npm nor
+//! touches the network.
 //!
 //! What gets installed is fixed at that moment and recorded beside it:
 //!
@@ -70,7 +72,21 @@ const EMBEDDED_LOCKS: &[(&str, &str)] = &[
         "@modelcontextprotocol/server-postgres",
         include_str!("locks/server-postgres/package-lock.json"),
     ),
+    (
+        "@playwright/mcp",
+        include_str!("locks/playwright-mcp/package-lock.json"),
+    ),
 ];
+
+/// The npm lock a pinned curated package is installed from: the one the
+/// online catalogue this machine accepted gives for it, else the one compiled
+/// into the application.
+pub fn pinned_lock(package: &str) -> Option<std::borrow::Cow<'static, str>> {
+    crate::mcp::remote_catalogue::kept_on_this_machine()
+        .and_then(|remote| remote.npm_lock(package))
+        .map(std::borrow::Cow::Owned)
+        .or_else(|| embedded_lock(package).map(std::borrow::Cow::Borrowed))
+}
 
 /// The embedded npm lock of a curated package, if it has one.
 pub fn embedded_lock(package: &str) -> Option<&'static str> {
@@ -97,7 +113,8 @@ pub enum NpmServerError {
         /// What is wrong with it.
         reason: String,
     },
-    /// The engine store holds no Node.js, or one without npm.
+    /// Neither the engine store nor the machine holds a Node.js Apollia
+    /// accepts, with its npm.
     #[error("installing '{0}' requires Node.js, which is not installed")]
     NodeRequired(String),
     /// npm refused or failed the installation (a digest mismatch lands here).
@@ -362,7 +379,7 @@ pub fn plan(
             lock: None,
         }));
     };
-    let raw = embedded_lock(&invocation.package).ok_or_else(|| NpmServerError::InvalidLock {
+    let raw = pinned_lock(&invocation.package).ok_or_else(|| NpmServerError::InvalidLock {
         package: invocation.package.clone(),
         reason: "the entry is pinned but carries no lock".into(),
     })?;
@@ -373,7 +390,7 @@ pub fn plan(
             )));
         }
     }
-    let lock = NpmLock::check(&invocation.package, &pinned, raw)?;
+    let lock = NpmLock::check(&invocation.package, &pinned, &raw)?;
     Ok(Some(NpmServerPlan {
         invocation,
         version: Some(pinned),

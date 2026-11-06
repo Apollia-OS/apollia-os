@@ -59,6 +59,16 @@ check_exit    "source create mail without reference → 1" 1 "${Q[@]}" source cr
 SRCID=$("${Q[@]}" -q source create --kind folder --label E2E-Contracts --reference conn-e2e 2>/dev/null)
 check_content "source list shows the folder" "E2E-Contracts" "${Q[@]}" source list
 check_json    "source list --json"                 "${Q[@]}" source list --json
+# `show` reads a source the seed carries (the instructions file the migration
+# of the former projects turns into a file source) and where its index stands.
+# An unknown identifier is refused with 1.
+SEEDSRC=$("${Q[@]}" --json source list 2>/dev/null | "${E2E_PYTHON:-python3}" -c \
+  'import sys,json; print(next((s["id"] for s in json.load(sys.stdin) if s["label"] == "instructions.md"), "src-missing"))' 2>/dev/null)
+check_content "source show names the seeded file" "instructions.md" "${Q[@]}" source show "$SEEDSRC"
+check_content "source show reads its index" "Documents:" "${Q[@]}" source show "$SEEDSRC"
+check_json    "source show --json"                 "${Q[@]}" --json source show "$SEEDSRC"
+check_content "source show --json carries unreadPages" "unreadPages" "${Q[@]}" --json source show "$SEEDSRC"
+check_exit    "source show unknown → 1"      1     "${Q[@]}" source show src-absent
 check_exit    "source delete the folder → 0" 0     "${Q[@]}" source delete "$SRCID" --confirm
 check_exit    "source delete again → 1"      1     "${Q[@]}" source delete "$SRCID" --confirm
 check         "digest --since 24h"                 "${Q[@]}" digest --since 24h
@@ -167,6 +177,35 @@ check         "llm status"                          "${Q[@]}" llm status
 check_json    "llm status --json"                  "${Q[@]}" llm status --json
 check         "llm costs"                           "${Q[@]}" llm costs
 check         "llm reload"                          "${Q[@]}" llm reload
+
+# ── engines ─────────────────────────────────────────────────────────────
+section "engines"
+# The seed installs no engine in the store and sets no channel, so the store
+# follows stable and only `auto` and `embedded` can be chosen. Whether a
+# manifest is cached depends on the build's distribution key and the network,
+# so the catalogue lines are not asserted; the sections are.
+check_content "engine list: hardware section"   "^Hardware$"   "${Q[@]}" engine list
+check         "engine list --all"                "${Q[@]}" engine list --all
+check_json_field "engine list --json: stable channel" "d['channel']" "stable" "${Q[@]}" engine list --json
+check_content "engine channel: stable"          "^stable$"     "${Q[@]}" engine channel
+check_content "engine channel preview"          "^preview$"    "${Q[@]}" engine channel preview
+check_content "engine channel stable (restore)" "^stable$"     "${Q[@]}" engine channel stable
+check_content "engine use auto: applies at the next load" "applies the next time a model is loaded" "${Q[@]}" engine use auto
+check_exit    "engine use vulkan (not installed) → 1" 1 "${Q[@]}" engine use vulkan
+# `engine import` hands the runtime a directory: one signed by a throwaway
+# key (tests/cli/fixtures/engine-import-unknown-key) and an empty one are both
+# refused by the runtime, exit 2 with its message; `--detach` returns once the
+# import is accepted, before the refusal. Nothing is downloaded.
+ENGINE_FIXTURE="$REPO_ROOT/tests/cli/fixtures/engine-import-unknown-key"
+mkdir -p "$RUN_TMP/engine-import-empty"
+check_exit    "engine import (signed by another key) → 2" 2 "${Q[@]}" engine import "$ENGINE_FIXTURE"
+check_content "engine import: the refusal of the runtime" "key" bash -c "'$BIN' --socket '$SOCK' engine import '$ENGINE_FIXTURE' 2>&1; true"
+check_exit    "engine import (no manifest) → 2" 2 "${Q[@]}" engine import "$RUN_TMP/engine-import-empty"
+check_content "engine import --detach: accepted, follow with engine list" "engine list" "${Q[@]}" engine import "$ENGINE_FIXTURE" --detach
+# `engine remove` goes through the removal route: a build the store does not
+# hold and the embedded engine are refused by the runtime, exit 1.
+check_exit    "engine remove (not installed) → 1" 1 "${Q[@]}" engine remove llama-server b1 cpu --confirm
+check_content "engine remove embedded: refused" "embedded" bash -c "'$BIN' --socket '$SOCK' engine remove llama-server embedded cpu --confirm 2>&1; true"
 
 # ── stt / resilience / plan cache / chat --list ─────────────────────────
 section "stt / resilience / plan cache"

@@ -23,6 +23,14 @@ use super::error::ImapError;
 /// is the address.
 pub const IMAP_SECRET_SERVICE: &str = "apollia-imap";
 
+/// Whether `a` and `b` name the same mailbox: an address is found whatever
+/// the case it is written in, so that every reader of a mailbox (the store,
+/// the executor, the decision on a call) matches it the same way.
+#[must_use]
+pub fn same_address(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
 /// File name of the connection list in the data directory.
 pub const IMAP_INDEX_FILE: &str = "imap-accounts.json";
 
@@ -45,6 +53,15 @@ pub trait ConnectionProbe: Send + Sync {
 struct Index {
     #[serde(default)]
     accounts: Vec<ImapAccount>,
+}
+
+/// A mailbox connection removed from the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedMailbox {
+    /// The connection removed from the list.
+    pub account: ImapAccount,
+    /// Whether its password was deleted from the secret store.
+    pub password_deleted: bool,
 }
 
 /// The mailbox connections of this machine.
@@ -99,7 +116,7 @@ impl ImapAccountStore {
     pub fn get(&self, email: &str) -> Result<ImapAccount, ImapError> {
         self.list()?
             .into_iter()
-            .find(|a| a.email.eq_ignore_ascii_case(email))
+            .find(|a| same_address(&a.email, email))
             .ok_or_else(|| ImapError::NotFound {
                 email: email.to_owned(),
             })
@@ -152,7 +169,7 @@ impl ImapAccountStore {
             .map_err(ImapError::Secret)?;
         index
             .accounts
-            .retain(|a| !a.email.eq_ignore_ascii_case(&account.email));
+            .retain(|a| !same_address(&a.email, &account.email));
         index.accounts.push(account.clone());
         if let Err(err) = self.write_index(&index) {
             if let Err(rollback) = self.secrets.delete(IMAP_SECRET_SERVICE, &account.email) {
@@ -172,6 +189,51 @@ impl ImapAccountStore {
             "imap.account.added"
         );
         Ok(account)
+    }
+
+    /// Remove the stored connection for `email`: out of the list first, then
+    /// its password out of the secret store. Answers the connection removed,
+    /// and whether its password was deleted.
+    ///
+    /// A password that cannot be deleted is not an error: the mailbox is gone
+    /// from the list, and nothing reads the password of a mailbox the list no
+    /// longer holds. It is logged, and answered so the caller can say it was
+    /// left behind.
+    ///
+    /// # Errors
+    /// [`ImapError::NotFound`] when there is none, [`ImapError::Index`] when
+    /// the list cannot be read or written.
+    pub fn remove(&self, email: &str) -> Result<RemovedMailbox, ImapError> {
+        let mut index = self.read_index()?;
+        let position = index
+            .accounts
+            .iter()
+            .position(|a| same_address(&a.email, email))
+            .ok_or_else(|| ImapError::NotFound {
+                email: email.to_owned(),
+            })?;
+        let account = index.accounts.remove(position);
+        self.write_index(&index)?;
+        let password_deleted = match self.secrets.delete(IMAP_SECRET_SERVICE, &account.email) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::event!(
+                    tracing::Level::WARN,
+                    error = %e,
+                    "imap.account.secret_delete_failed"
+                );
+                false
+            }
+        };
+        tracing::event!(
+            tracing::Level::INFO,
+            host = %account.host,
+            "imap.account.removed"
+        );
+        Ok(RemovedMailbox {
+            account,
+            password_deleted,
+        })
     }
 
     fn read_index(&self) -> Result<Index, ImapError> {

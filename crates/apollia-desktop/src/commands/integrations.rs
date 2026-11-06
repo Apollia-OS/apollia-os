@@ -48,8 +48,10 @@
 //! client ids, secrets, API keys and Drive folders, and the checks that refuse
 //! a half-resolved credential.
 
+mod admin_approval;
 mod attached;
 pub mod credentials;
+pub mod onedrive;
 
 use credentials::ensure_credentials;
 
@@ -161,6 +163,11 @@ pub enum IntegrationsError {
     /// The connection admission refused the account; the detail is its reason.
     #[error("refused by the connection policy: {0}")]
     RefusedByPolicy(String),
+    /// The provider answered that an administrator of the user's
+    /// organisation must approve the application; the detail is the approval
+    /// page to send them.
+    #[error("an administrator must approve the application: {0}")]
+    AdminApprovalRequired(String),
     /// Catch-all internal failure.
     #[error("internal: {0}")]
     Internal(String),
@@ -195,15 +202,6 @@ pub struct OauthCompletedAccount {
     pub account_id: String,
     /// Scopes the AS actually granted.
     pub granted_scopes: Vec<String>,
-}
-
-/// Account metadata returned by `oauth_get_status`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OauthAccountInfo {
-    /// Provider id.
-    pub provider: String,
-    /// Account id.
-    pub account_id: String,
 }
 
 // ─── Provider + scope resolution ─────────────────────────────────────────────
@@ -253,9 +251,14 @@ pub async fn oauth_start_flow(
 ) -> Result<OauthStartFlow, IntegrationsError> {
     use tauri::Emitter;
 
-    if let RuntimeLink::Embedded(runtime) = link.inner() {
-        admit_start(&runtime.connection_governance, &provider)?;
-    }
+    let sink = match link.inner() {
+        RuntimeLink::Embedded(runtime) => {
+            admit_start(&runtime.connection_governance, &provider)?;
+            admin_approval::StateSink::embedded(&runtime.event_sender)
+        }
+        RuntimeLink::Attached(_) => None,
+    };
+    let provider_for_task = ConnectorProvider::from_id(&provider);
     let (listener, port) = apollia_auth::callback::bind_ephemeral_port()
         .await
         .map_err(|e| IntegrationsError::Internal(e.to_string()))?;
@@ -313,10 +316,19 @@ pub async fn oauth_start_flow(
                 );
             }
             Err(err) => {
-                let _ = app_handle.emit(
-                    "oauth://error",
-                    serde_json::json!({ "state": state_for_task, "error": err.to_string() }),
-                );
+                // An organisation that requires its administrator's approval
+                // is kept blocked with the approval page; a work account that
+                // refused is offered the same page, unblocked. The dialog
+                // shows it to copy.
+                let payload = admin_approval::answer_callback_error(
+                    &err,
+                    provider_for_task,
+                    apollia_auth::admin_approval::resolved_admin_consent_url(),
+                    sink,
+                    &state_for_task,
+                )
+                .await;
+                let _ = app_handle.emit("oauth://error", payload);
             }
         }
     });
@@ -356,14 +368,18 @@ pub async fn oauth_complete_flow(
     };
     admit_account(governance, provider)?;
 
-    let token: StoredToken = apollia_auth::token::exchange_code(&provider_config, &flow, &code)
-        .await
-        .map_err(|e| IntegrationsError::Auth(e.to_string()))?;
+    let sink = admin_approval::StateSink::embedded(&runtime.event_sender);
+    let token: StoredToken =
+        match apollia_auth::token::exchange_code(&provider_config, &flow, &code).await {
+            Ok(token) => token,
+            Err(e) => return Err(exchange_refused(sink, provider, e.to_string()).await),
+        };
 
     let account_id = resolve_account_id(provider, &token.access_token).await?;
     let manager = auth_manager().await?;
     let granted_scopes = token.scopes.clone();
     store_and_record(governance, &manager, provider, &account_id, token).await?;
+    admin_approval::lift_block(sink, provider).await;
     // Publish the tools of the account so it is usable without a restart. A
     // failure is logged: the account is connected, and its tools are
     // published at the next start.
@@ -389,6 +405,28 @@ pub async fn oauth_complete_flow(
     })
 }
 
+/// The error of a token exchange `provider` refused with `text`: an
+/// administrator approval is kept blocked and answered with its approval page,
+/// anything else is an authentication error.
+async fn exchange_refused(
+    sink: Option<admin_approval::StateSink>,
+    provider: ConnectorProvider,
+    text: String,
+) -> IntegrationsError {
+    let address = admin_approval::approval_address(
+        Some(provider),
+        apollia_auth::admin_approval::requires_admin_approval(&text),
+        apollia_auth::admin_approval::resolved_admin_consent_url(),
+    );
+    match address {
+        Some(address) => {
+            admin_approval::keep_blocked(sink, provider, text, address.clone()).await;
+            IntegrationsError::AdminApprovalRequired(address)
+        }
+        None => IntegrationsError::Auth(text),
+    }
+}
+
 /// Store the token of `account_id` in `manager`, then journal the connection.
 async fn store_and_record(
     governance: &ConnectionGovernance,
@@ -407,34 +445,6 @@ async fn store_and_record(
         DESKTOP_ACTOR,
     ));
     Ok(())
-}
-
-/// Revoke (forget) the token for `(provider, account_id)`.
-///
-/// The local keyring entry is cleared. The upstream is not notified; call
-/// the provider's revocation endpoint separately if a server-side revoke is
-/// required. The disconnection is journaled.
-#[tauri::command]
-pub async fn oauth_disconnect(
-    link: State<'_, RuntimeLink>,
-    provider: String,
-    account_id: String,
-) -> Result<(), IntegrationsError> {
-    let runtime = match link.inner() {
-        RuntimeLink::Embedded(runtime) => runtime,
-        RuntimeLink::Attached(remote) => {
-            return attached::disconnect(remote, &provider, &account_id).await
-        }
-    };
-    let provider_id = provider_from_id(&provider)?;
-    let manager = auth_manager().await?;
-    revoke_and_record(
-        &runtime.connection_governance,
-        &manager,
-        provider_id,
-        &account_id,
-    )
-    .await
 }
 
 /// Submit an account of `provider` to the connection admission.
@@ -457,50 +467,6 @@ fn admit_account(
         AdmissionDecision::Admitted => Ok(()),
         AdmissionDecision::Refused { reason } => Err(IntegrationsError::RefusedByPolicy(reason)),
     }
-}
-
-/// Forget the token of `account_id`, then journal the disconnection.
-async fn revoke_and_record(
-    governance: &ConnectionGovernance,
-    manager: &AuthManager,
-    provider: ConnectorProvider,
-    account_id: &str,
-) -> Result<(), IntegrationsError> {
-    manager
-        .revoke(provider, &AccountId::new(account_id))
-        .await
-        .map_err(|e| IntegrationsError::Auth(e.to_string()))?;
-    governance.record_or_warn(&ConnectionEvent::account_disconnected(
-        provider,
-        account_id,
-        DESKTOP_ACTOR,
-    ));
-    Ok(())
-}
-
-/// List connected accounts across all providers.
-#[tauri::command]
-pub async fn oauth_get_status(
-    link: State<'_, RuntimeLink>,
-) -> Result<Vec<OauthAccountInfo>, IntegrationsError> {
-    if let RuntimeLink::Attached(remote) = link.inner() {
-        return attached::accounts(remote).await;
-    }
-    let manager = auth_manager().await?;
-    let mut out = Vec::new();
-    for provider in [ConnectorProvider::Google, ConnectorProvider::Microsoft] {
-        let accounts = manager
-            .list_accounts(provider)
-            .await
-            .map_err(|e| IntegrationsError::Auth(e.to_string()))?;
-        for a in accounts {
-            out.push(OauthAccountInfo {
-                provider: provider.id().to_owned(),
-                account_id: a.0,
-            });
-        }
-    }
-    Ok(out)
 }
 
 // ─── Userinfo probe ──────────────────────────────────────────────────────────
@@ -650,66 +616,6 @@ mod tests {
     }
 
     // Disconnecting from the desktop forgets the token and journals it.
-    #[tokio::test]
-    async fn test_desktop_disconnect_journals_the_account() {
-        // GIVEN a connected Microsoft account in an isolated store, and
-        // governance over a journal
-        let dir = tempfile::TempDir::new().unwrap();
-        let storage = apollia_auth::MultiAccountStorage::with_store(
-            dir.path().join("connectors-index.json"),
-            Box::new(MemoryStore::default()),
-        );
-        let manager = AuthManager::with_storage(storage);
-        manager
-            .put_token(
-                ConnectorProvider::Microsoft,
-                &AccountId::new("ada@contoso.test"),
-                StoredToken {
-                    access_token: "at".into(),
-                    refresh_token: None,
-                    expires_at: None,
-                    scopes: vec![],
-                },
-            )
-            .await
-            .unwrap();
-        let journal = apollia_runtime::audit_journal::AuditJournalHandle::open(
-            &dir.path().join("journal.db"),
-        )
-        .await
-        .unwrap();
-        let governance = ConnectionGovernance::without_policy(Some(journal.clone()));
-
-        // WHEN the account is disconnected
-        revoke_and_record(
-            &governance,
-            &manager,
-            ConnectorProvider::Microsoft,
-            "ada@contoso.test",
-        )
-        .await
-        .unwrap();
-
-        // THEN the token is gone and the disconnection is journaled by the desktop
-        assert!(manager
-            .list_accounts(ConnectorProvider::Microsoft)
-            .await
-            .unwrap()
-            .is_empty());
-        let entries = journal
-            .query_run(&apollia_runtime::governance::connection_run_id(
-                "native:microsoft:ada@contoso.test",
-            ))
-            .await;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].kind,
-            apollia_runtime::audit_journal::JournalEntryKind::AccountDisconnected
-        );
-        assert_eq!(entries[0].payload["actor"], "desktop");
-        journal.shutdown().await;
-    }
-
     #[test]
     fn test_provider_from_id_known_returns_ok() {
         // GIVEN the two connector identifiers the settings page offers

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::engine_store::compat::{Rating, Verdict};
 use crate::engine_store::manifest::{compare_tags, is_safe_component, Engine, Variant};
 
 /// Name of the record written beside an installed package, once verified.
@@ -54,7 +55,9 @@ pub fn package_dir(root: &Path, engine: Engine, tag: &str, variant: Variant) -> 
 fn read_record(dir: &Path) -> Option<InstalledPackage> {
     let bytes = std::fs::read(dir.join(RECORD_FILE)).ok()?;
     let mut record: InstalledPackage = serde_json::from_slice(&bytes).ok()?;
-    let expected = dir.file_name()?.to_str()? == record.variant.as_str()
+    let dir_name = dir.file_name()?.to_str()?;
+    let expected = (dir_name == record.variant.as_str()
+        || record.variant.former_name() == Some(dir_name))
         && dir.parent()?.file_name()?.to_str()? == record.tag
         && is_safe_component(&record.tag);
     if !expected {
@@ -65,7 +68,8 @@ fn read_record(dir: &Path) -> Option<InstalledPackage> {
 }
 
 /// Every installed package of the store, verified records only, ordered by
-/// engine, variant, then tag.
+/// engine, variant, then tag. A package an earlier version filed under the
+/// former name of its variant (`cuda`) is listed under the current one.
 #[must_use]
 pub fn installed_packages(root: &Path) -> Vec<InstalledPackage> {
     let mut found = Vec::new();
@@ -74,9 +78,11 @@ pub fn installed_packages(root: &Path) -> Vec<InstalledPackage> {
             continue;
         };
         for tag in tags.flatten() {
-            for variant in Variant::ALL {
-                let dir = tag.path().join(variant.as_str());
-                if let Some(record) = read_record(&dir) {
+            let names = Variant::ALL
+                .into_iter()
+                .flat_map(|variant| std::iter::once(variant.as_str()).chain(variant.former_name()));
+            for name in names {
+                if let Some(record) = read_record(&tag.path().join(name)) {
                     if record.engine == engine {
                         found.push(record);
                     }
@@ -125,27 +131,66 @@ pub fn find_binary(dir: &Path, name: &str) -> Option<PathBuf> {
     walk(dir, name, 3)
 }
 
-/// The engine variant the launcher wants on this hardware, when the store
-/// holds one: CUDA on a machine with an NVIDIA card, nothing otherwise.
+/// The `llama-server` variants the store holds, each once, in the order of
+/// [`Variant::ALL`].
 #[must_use]
-pub fn wanted_llama_variant(nvidia_detected: bool) -> Option<Variant> {
-    nvidia_detected.then_some(Variant::Cuda)
+pub fn installed_llama_variants(root: &Path) -> Vec<Variant> {
+    let held = installed_packages(root);
+    Variant::ALL
+        .into_iter()
+        .filter(|v| {
+            held.iter()
+                .any(|p| p.engine == Engine::LlamaServer && p.variant == *v)
+        })
+        .collect()
 }
 
-/// The installed `llama-server` the launcher should take, or `None` to keep
+/// The `llama-server` variant the automatic choice takes among `installed`,
+/// by the `ratings` of this machine: the recommended one when it is
+/// installed, otherwise the best compatible one in the order of
+/// [`AUTOMATIC_ORDER`], otherwise none, which keeps the embedded engine. An
+/// incompatible build, or one the ratings do not cover, is never taken.
+#[must_use]
+pub fn wanted_llama_variant(ratings: &[Rating], installed: &[Variant]) -> Option<Variant> {
+    let verdict = |variant: Variant| {
+        ratings
+            .iter()
+            .find(|r| r.variant == variant)
+            .map(|r| r.verdict)
+    };
+    let held = |verdict_wanted: Verdict| {
+        AUTOMATIC_ORDER
+            .into_iter()
+            .find(|v| installed.contains(v) && verdict(*v) == Some(verdict_wanted))
+    };
+    held(Verdict::Recommended).or_else(|| held(Verdict::Compatible))
+}
+
+/// The order in which the automatic choice prefers the compatible builds.
+pub const AUTOMATIC_ORDER: [Variant; 6] = [
+    Variant::Metal,
+    Variant::Cuda13,
+    Variant::Cuda12,
+    Variant::Rocm,
+    Variant::Vulkan,
+    Variant::Cpu,
+];
+
+/// The installed `llama-server` the automatic choice takes, or `None` to keep
 /// the embedded one.
 ///
-/// `nvidia_detected` is only asked for when a CUDA package is installed, since
-/// detecting the card spawns `nvidia-smi`.
+/// `ratings` is only asked for when the store holds a `llama-server` build,
+/// since rating the machine probes its cards.
 pub fn preferred_llama_server(
     root: &Path,
     binary_name: &str,
-    nvidia_detected: impl FnOnce() -> bool,
+    ratings: impl FnOnce() -> Vec<Rating>,
 ) -> Option<PathBuf> {
-    let newest = newest_installed(root, Engine::LlamaServer, Variant::Cuda)?;
-    let variant = wanted_llama_variant(nvidia_detected())?;
-    if variant != newest.variant {
+    let installed = installed_llama_variants(root);
+    if installed.is_empty() {
         return None;
     }
+    let variant = wanted_llama_variant(&ratings(), &installed)?;
+    let newest = newest_installed(root, Engine::LlamaServer, variant)?;
     find_binary(&newest.path, binary_name)
 }

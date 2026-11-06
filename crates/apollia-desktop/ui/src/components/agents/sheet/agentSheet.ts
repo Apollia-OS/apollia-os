@@ -157,7 +157,11 @@ function provenanceOf(id: string, descriptor: AccessDescriptor | null): AccessPr
   if (!descriptor) return "unknown";
   if (descriptor.family_source === "package" || descriptor.kind === "python") return "package";
   if (descriptor.kind === "mcp_server" || descriptor.kind === "mcp") return "connection";
-  if (descriptor.family_source === "server" || descriptor.family_source === "selection") {
+  if (
+    descriptor.family_source === "server" ||
+    descriptor.family_source === "selection" ||
+    descriptor.family_source === "operator"
+  ) {
     return "connection";
   }
   return "builtin";
@@ -195,6 +199,22 @@ export function accessView(id: string, descriptor: AccessDescriptor | null): Acc
 }
 
 /** One group of the access section. */
+/** Where the access of an agent comes from, as its sheet says it. */
+export interface AccessOrigin {
+  /** The agent holds the default access, read again at every run. */
+  byDefault: boolean;
+  /** The accesses given on top of the default access. */
+  added: Set<string>;
+}
+
+/** Whether `resolved` holds the default access, and what it was given on top of it. */
+export function accessOrigin(
+  resolved: { access_by_default?: boolean; access_added?: string[] } | null,
+): AccessOrigin {
+  const byDefault = resolved?.access_by_default === true;
+  return { byDefault, added: new Set(byDefault ? (resolved?.access_added ?? []) : []) };
+}
+
 export interface AccessGroup {
   key: AccessGroupKey;
   accesses: AccessView[];

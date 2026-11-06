@@ -24,27 +24,5 @@ export interface BuiltinToolsCount {
   total: number;
 }
 
-/** Status filter values for the sidebar chip bar. */
-export type StatusFilter = "all" | "active" | "attention" | "error" | "idle";
-
-/** Context-menu action requested from an MCP sidebar row. */
-export type McpRowAction = "test" | "configure" | "disconnect";
-
-/** MCP detail tab keys. */
-export type McpTab = "overview" | "tools" | "settings";
-
-/** Native connector detail tab keys. */
-export type NativeTab = "accounts" | "capabilities" | "settings";
-
-/** Live-test verdict for an MCP server. */
-export type TestState =
-  | "idle"
-  | "testing"
-  | "ok"
-  | "unverified"
-  | "degraded"
-  | "needs_reauth"
-  | "error";
-
 /** Custom MCP transport kinds. */
 export type CustomTransport = "stdio" | "streamable-http" | "sse";

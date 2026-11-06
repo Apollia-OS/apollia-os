@@ -1,6 +1,6 @@
 [package]
 name = "apollia-cli"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 description = "Apollia OS CLI binary (apollia-os)"
 license.workspace = true
@@ -39,6 +39,7 @@ apollia-tools    = { workspace = true }
 apollia-memory   = { workspace = true }
 apollia-oria     = { workspace = true }
 apollia-runtime  = { workspace = true }
+apollia-sources  = { workspace = true }
 apollia-llm      = { workspace = true, default-features = false }
 apollia-eval     = { workspace = true }
 chrono           = { workspace = true }

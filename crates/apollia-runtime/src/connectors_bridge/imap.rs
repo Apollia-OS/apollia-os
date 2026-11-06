@@ -12,8 +12,13 @@
 //!
 //! A mailbox the organisation policy forbids is refused before anything is
 //! read from it: each call submits the mailbox it names to the admission a
-//! connection goes through, under the policy deposited on the machine.
+//! connection goes through, under the policy deposited on the machine. A
+//! mailbox the user put in pause is refused by the decision on the call, which
+//! reads the mailbox the call names (or the only one connected, see
+//! [`mailbox_of_call`]) and journals the refusal; each call also reads the
+//! pauses of `governance.db`, so a caller that decides nothing is refused too.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -32,6 +37,13 @@ use crate::governance::{mailbox_refusal, ConnectionAdmission, PolicyAdmission};
 
 /// Code of the error a call on a mailbox the policy forbids answers.
 pub const IMAP_FORBIDDEN_CODE: &str = "imap.forbidden_by_policy";
+
+/// Code of the error a call on a mailbox in pause answers.
+pub const IMAP_PAUSED_CODE: &str = "imap.paused";
+
+/// What a call on a mailbox in pause answers.
+const IMAP_PAUSED_REASON: &str =
+    "refused: this mailbox is paused; the user can resume it from the connections";
 
 /// Lists the folders of a connected mailbox.
 pub const IMAP_LIST_FOLDERS: &str = "imap.list_folders";
@@ -156,9 +168,10 @@ impl DispatchableExecutor for ImapToolExecutor {
                 action: "read",
                 detail: "the home directory cannot be resolved".to_owned(),
             });
-            let store = data_dir.and_then(|dir| ImapAccountStore::open(&dir));
-            let store = store.map_err(failed)?;
-            run_tool(self.tool, &input, &store, &deposited_policy()).await
+            let dir = data_dir.map_err(failed)?;
+            let store = ImapAccountStore::open(&dir).map_err(failed)?;
+            let paused = paused_connections(&dir);
+            run_tool(self.tool, &input, &store, &deposited_policy(), &paused).await
         })
     }
 }
@@ -179,13 +192,24 @@ fn failed(e: ImapError) -> ToolExecutionError {
     }
 }
 
+/// The connections in pause in the `governance.db` of `data_dir`; none when
+/// it cannot be read, which the decision on the call reports on its own.
+fn paused_connections(data_dir: &std::path::Path) -> HashSet<String> {
+    let db = apollia_core::paths::DataFile::Governance.path(data_dir);
+    apollia_permissions::read_paused_connections(&db).unwrap_or_else(|e| {
+        tracing::event!(tracing::Level::WARN, error = %e, "imap.paused.unreadable");
+        HashSet::new()
+    })
+}
+
 /// Run `tool` on the mailbox `input` names in `store`, once `admission`
-/// admits it.
+/// admits it and unless it is one of `paused`.
 async fn run_tool(
     tool: &str,
     input: &Value,
     store: &ImapAccountStore,
     admission: &dyn ConnectionAdmission,
+    paused: &HashSet<String>,
 ) -> Result<Value, ToolExecutionError> {
     let account =
         resolve_account(store, input.get("account").and_then(Value::as_str)).map_err(failed)?;
@@ -199,6 +223,19 @@ async fn run_tool(
         return Err(ToolExecutionError::ExecutionFailed {
             code: IMAP_FORBIDDEN_CODE.to_owned(),
             message: reason.to_owned(),
+        });
+    }
+    let connection = crate::connections::imap_connection_id(&account.email);
+    if crate::connections::paused_entry(paused, &connection).is_some() {
+        tracing::event!(
+            tracing::Level::INFO,
+            tool = %tool,
+            account = %account.email,
+            "connections.paused.call_refused"
+        );
+        return Err(ToolExecutionError::ExecutionFailed {
+            code: IMAP_PAUSED_CODE.to_owned(),
+            message: IMAP_PAUSED_REASON.to_owned(),
         });
     }
     let password = store.password(&account.email).map_err(failed)?;
@@ -243,6 +280,24 @@ async fn run_with(
     }
 }
 
+/// The address of the mailbox a call with `input` reads: the one `account`
+/// names, else the only mailbox connected in `data_dir`; `None` when neither
+/// says, and the executor answers why.
+#[must_use]
+pub fn mailbox_of_call(input: &Value, data_dir: Option<&std::path::Path>) -> Option<String> {
+    let named = input
+        .get("account")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|e| !e.is_empty());
+    if let Some(email) = named {
+        return Some(email.to_owned());
+    }
+    let store = ImapAccountStore::open(data_dir?).ok()?;
+    let mut accounts = store.list().ok()?;
+    (accounts.len() == 1).then(|| accounts.remove(0).email)
+}
+
 /// The mailbox `requested` names, or the only one connected.
 fn resolve_account(
     store: &ImapAccountStore,
@@ -272,6 +327,39 @@ fn to_value<T: serde::Serialize>(value: &T) -> Result<Value, ImapError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The mailbox a call reads is the one it names, else the only one
+    // connected; with several and none named, no mailbox is guessed.
+    #[test]
+    fn test_the_mailbox_of_a_call_is_named_or_the_only_one() {
+        // GIVEN a data directory holding one mailbox, then two
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join(apollia_connectors::imap::IMAP_INDEX_FILE);
+        let account = |email: &str| json!({"email": email, "host": "imap.example.org", "port": 993, "username": email});
+        std::fs::write(
+            &index,
+            json!({"accounts": [account("ada@example.org")]}).to_string(),
+        )
+        .unwrap();
+
+        // WHEN the mailbox of calls is resolved
+        let named = mailbox_of_call(&json!({"account": " bob@example.org "}), Some(dir.path()));
+        let only = mailbox_of_call(&json!({}), Some(dir.path()));
+        std::fs::write(
+            &index,
+            json!({"accounts": [account("ada@example.org"), account("bob@example.org")]})
+                .to_string(),
+        )
+        .unwrap();
+        let several = mailbox_of_call(&json!({}), Some(dir.path()));
+        let nowhere = mailbox_of_call(&json!({}), None);
+
+        // THEN the named one wins, the only one is taken, and none is guessed
+        assert_eq!(named.as_deref(), Some("bob@example.org"));
+        assert_eq!(only.as_deref(), Some("ada@example.org"));
+        assert_eq!(several, None);
+        assert_eq!(nowhere, None);
+    }
 
     /// A secret store holding nothing; resolving an account never reads it.
     struct NoSecrets;
@@ -379,8 +467,13 @@ mod tests {
                 json!({ "account": "eve@example.com", "uid": 1 }),
                 json!({ "uid": 1 }),
             ] {
-                let refused = run_tool(tool, &input, &store, &deny).await.unwrap_err();
-                let admitted = run_tool(tool, &input, &store, &admit).await.unwrap_err();
+                let none = HashSet::new();
+                let refused = run_tool(tool, &input, &store, &deny, &none)
+                    .await
+                    .unwrap_err();
+                let admitted = run_tool(tool, &input, &store, &admit, &none)
+                    .await
+                    .unwrap_err();
 
                 // THEN the forbidden mailbox is refused by the policy, before
                 //   its password is read; the admitted one goes past the gate
@@ -398,6 +491,44 @@ mod tests {
                 match admitted {
                     ToolExecutionError::ExecutionFailed { code, .. } => {
                         assert_ne!(code, IMAP_FORBIDDEN_CODE, "{tool}");
+                    }
+                    other => panic!("{tool}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_a_paused_mailbox_is_refused_before_anything_is_read() {
+        // GIVEN one mailbox the user put in pause, and a policy admitting
+        //   everything
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_one_mailbox(dir.path());
+        let admit = PolicyAdmission::new(
+            crate::governance::policy_admission::valid_verdict_with_connections(""),
+        );
+        let db = apollia_core::paths::DataFile::Governance.path(dir.path());
+        apollia_permissions::PausedConnectionStore::new(&db)
+            .unwrap()
+            .pause("imap:eve@example.com", 1)
+            .unwrap();
+        let paused = paused_connections(dir.path());
+
+        // WHEN each tool runs on it, named and left implicit
+        for tool in IMAP_TOOLS {
+            for input in [
+                json!({ "account": "eve@example.com", "uid": 1 }),
+                json!({ "uid": 1 }),
+            ] {
+                let refused = run_tool(tool, &input, &store, &admit, &paused)
+                    .await
+                    .unwrap_err();
+
+                // THEN it is refused as paused, before its password is read
+                match refused {
+                    ToolExecutionError::ExecutionFailed { code, message } => {
+                        assert_eq!(code, IMAP_PAUSED_CODE, "{tool}");
+                        assert!(message.contains("paused"), "{tool}: {message}");
                     }
                     other => panic!("{tool}: {other:?}"),
                 }

@@ -140,7 +140,8 @@ impl LlamaServerSupervisor {
             args = %args.join(" "),
             "llama.server.embeddings.spawn"
         );
-        let mut child = self.spawn_child(&args)?;
+        let bin = self.next_launch_binary().await?;
+        let mut child = self.spawn_child(&bin, &args)?;
         self.wait_until_healthy(&mut child, port).await?;
 
         let config = LlamaServerConfig {
@@ -150,13 +151,14 @@ impl LlamaServerSupervisor {
             n_parallel: Some(1),
             ..LlamaServerConfig::default()
         };
-        let instance = Instance::new(
+        let mut instance = Instance::new(
             config,
             LoadSettings::default(),
             port,
             child,
             self.next_tick(),
         );
+        instance.binary = Some(bin);
         let lease = ModelLease::new(
             instance.base_url(),
             instance.n_ctx,

@@ -27,7 +27,8 @@ use std::time::{Duration, SystemTime};
 
 use apollia_permissions::{
     is_code_executor, is_single_simple_command, ConsentFamily, ConsentScope, FamilyConsentStore,
-    PermissionScope, PolicyVerdict, PrefixRule, PrefixRuleEngine, RuleAction,
+    PausedConnectionStore, PermissionScope, PolicyVerdict, PrefixRule, PrefixRuleEngine,
+    RuleAction,
 };
 use apollia_tools::ActionFamily;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -109,6 +110,11 @@ enum Command {
         command: String,
         reply: oneshot::Sender<Result<i64, GovernanceWriteError>>,
     },
+    SetPaused {
+        connection_id: String,
+        paused: bool,
+        reply: oneshot::Sender<Result<bool, GovernanceWriteError>>,
+    },
     Refresh {
         reply: oneshot::Sender<()>,
     },
@@ -121,6 +127,9 @@ pub struct GovernanceHandle {
     tx: Option<mpsc::Sender<Command>>,
     state: watch::Receiver<Arc<GovernanceState>>,
     journal: Option<AuditJournalHandle>,
+    /// The data directory beside `governance.db`, where a call's arguments
+    /// are read against the connections they reach.
+    data_dir: Option<PathBuf>,
 }
 
 impl GovernanceHandle {
@@ -137,6 +146,11 @@ impl GovernanceHandle {
         let (state_tx, state) = watch::channel(Arc::new(initial));
         let (tx, rx) = mpsc::channel(COMMAND_CAPACITY);
         let journal = sources.journal.clone();
+        let data_dir = sources
+            .governance_db
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
         let actor = GovernanceActor {
             fingerprint: fingerprint(&sources),
             sources,
@@ -147,6 +161,7 @@ impl GovernanceHandle {
             tx: Some(tx),
             state,
             journal,
+            data_dir,
         }
     }
 
@@ -160,13 +175,38 @@ impl GovernanceHandle {
             tx: None,
             state,
             journal,
+            data_dir: None,
         }
+    }
+
+    /// The same handle, its calls' arguments read in `data_dir`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn reading_in(mut self, data_dir: &Path) -> Self {
+        self.data_dir = Some(data_dir.to_path_buf());
+        self
+    }
+
+    /// The data directory a call's arguments are read in: the one beside
+    /// `governance.db`, else the runtime's own.
+    #[must_use]
+    pub fn data_dir(&self) -> Option<PathBuf> {
+        self.data_dir.clone().or_else(apollia_core::paths::data_dir)
     }
 
     /// The state the next decision reads.
     #[must_use]
     pub fn state(&self) -> Arc<GovernanceState> {
         Arc::clone(&self.state.borrow())
+    }
+
+    /// A reader of the pauses this state publishes, for a tool built for a
+    /// turn to read them again at each of its calls.
+    #[must_use]
+    pub fn pause_reader(&self) -> Arc<dyn apollia_tools::PauseReader> {
+        Arc::new(crate::governance::pauses::PublishedPauses(
+            self.state.clone(),
+        ))
     }
 
     /// Whether records reach an audit journal.
@@ -246,6 +286,34 @@ impl GovernanceHandle {
             agent_id: agent_id.to_owned(),
             tool_name: tool_name.to_owned(),
             command: command.to_owned(),
+            reply,
+        })
+        .await
+        .map_err(|_| GovernanceWriteError::ActorGone)?;
+        answer.await.map_err(|_| GovernanceWriteError::ActorGone)?
+    }
+
+    /// Puts the connection `connection_id` in pause (`paused`) or takes it
+    /// out of it, in `governance.db`. Returns `true` when that changed
+    /// something. Once it returns, the next decision reads it: a call of a
+    /// tool of a connection in pause is refused. Nothing else changes: the
+    /// accesses of the agents, the configuration and the secrets of the
+    /// connection are kept as they are.
+    ///
+    /// # Errors
+    ///
+    /// [`GovernanceWriteError::NoDatabase`], [`GovernanceWriteError::ActorGone`]
+    /// or [`GovernanceWriteError::Store`] when the write cannot be made.
+    pub async fn set_paused(
+        &self,
+        connection_id: &str,
+        paused: bool,
+    ) -> Result<bool, GovernanceWriteError> {
+        let tx = self.tx.as_ref().ok_or(GovernanceWriteError::NoDatabase)?;
+        let (reply, answer) = oneshot::channel();
+        tx.send(Command::SetPaused {
+            connection_id: connection_id.to_owned(),
+            paused,
             reply,
         })
         .await
@@ -352,6 +420,11 @@ impl GovernanceActor {
                         self.publish().await;
                         let _ = reply.send(written);
                     }
+                    Some(Command::SetPaused { connection_id, paused, reply }) => {
+                        let written = self.write_paused(connection_id, paused).await;
+                        self.publish().await;
+                        let _ = reply.send(written);
+                    }
                     Some(Command::Refresh { reply }) => {
                         self.publish().await;
                         let _ = reply.send(());
@@ -392,6 +465,38 @@ impl GovernanceActor {
             "governance.consent.granted"
         );
         Ok(written)
+    }
+
+    async fn write_paused(
+        &self,
+        connection_id: String,
+        paused: bool,
+    ) -> Result<bool, GovernanceWriteError> {
+        let db = self
+            .sources
+            .governance_db
+            .clone()
+            .ok_or(GovernanceWriteError::NoDatabase)?;
+        let id = connection_id.clone();
+        let changed = tokio::task::spawn_blocking(move || {
+            let store = PausedConnectionStore::new(&db)?;
+            if paused {
+                store.pause(&id, chrono::Utc::now().timestamp())
+            } else {
+                store.resume(&id)
+            }
+        })
+        .await
+        .map_err(|e| GovernanceWriteError::Store(e.to_string()))?
+        .map_err(|e| GovernanceWriteError::Store(e.to_string()))?;
+        tracing::event!(
+            tracing::Level::INFO,
+            connection_id = %connection_id,
+            paused,
+            changed,
+            "governance.connection.pause_written"
+        );
+        Ok(changed)
     }
 
     /// Moves the events the stores of `governance.db` left in its outbox to
@@ -534,6 +639,7 @@ pub(crate) fn load_state(
                 rules: p.rules.clone(),
                 consents: p.consents.clone(),
                 disabled_tools: p.disabled_tools.clone(),
+                paused: p.paused.clone(),
             });
             (kept, Some(FailClosed::StoreUnreadable { detail }))
         }
@@ -544,6 +650,7 @@ pub(crate) fn load_state(
         rules: store.rules,
         consents: store.consents,
         disabled_tools: store.disabled_tools,
+        paused: store.paused,
         developer_mode: developer_mode(sources),
         fail_closed: FailClosed::from_policy(&sources.policy)
             .or_else(|| FailClosed::from_journal(&sources.policy, sources.journal.is_some()))
@@ -557,10 +664,11 @@ struct StoreState {
     rules: Vec<apollia_permissions::PrefixRule>,
     consents: std::collections::HashSet<(String, ConsentFamily)>,
     disabled_tools: Vec<String>,
+    paused: std::collections::HashSet<String>,
 }
 
-/// Reads the fine rules, the standing consents and the disabled tools of
-/// `db`, or says why it cannot.
+/// Reads the fine rules, the standing consents, the disabled tools and the
+/// connections in pause of `db`, or says why it cannot.
 fn read_store(db: &Path) -> Result<StoreState, String> {
     let read = || -> Result<StoreState, String> {
         let rules = PrefixRuleEngine::new(db)
@@ -570,10 +678,12 @@ fn read_store(db: &Path) -> Result<StoreState, String> {
             .and_then(|store| store.list_permanent())
             .map_err(|e| e.to_string())?;
         let disabled_tools = disabled_tools(db)?;
+        let paused = apollia_permissions::read_paused_connections(db).map_err(|e| e.to_string())?;
         Ok(StoreState {
             rules,
             consents: consents.into_iter().collect(),
             disabled_tools,
+            paused,
         })
     };
     read().inspect_err(|error| {

@@ -364,12 +364,33 @@ Linux ne le portent pas.
 
 Les moteurs ont leur propre canal de mise à jour et ne suivent pas la version
 d'Apollia. Le moteur embarqué sert chaque machine dès le premier lancement ; une
-version accélérée, CUDA sur une machine dotée d'une carte NVIDIA, se télécharge
-à la demande, ou s'importe depuis un disque sans réseau, et le lanceur prend
-alors la version installée la plus récente de cette variante plutôt que le
-moteur embarqué. Le moteur qui sert chaque format de modèle est un réglage,
-automatique par défaut ; une variante choisie qui n'est plus installée retombe
-sur le choix automatique. Le canal suivi est vérifié au démarrage du runtime et
+version accélérée se télécharge à la demande, ou s'importe depuis un disque sans
+réseau. Le canal propose `llama-server` en cinq variantes, `cuda-12`, `cuda-13`,
+`rocm`, `vulkan` et `cpu`, chacune pour les plateformes où le canal la publie ;
+`cuda` reste un ancien nom, lu comme `cuda-12` dans un enregistrement installé
+et, comme réglage, comme le meilleur build CUDA installé. Le runtime classe
+chaque variante pour la machine, recommandée, compatible ou incompatible, avec
+un code de raison, d'après les cartes qu'il sonde et leur pilote : CUDA 13 à
+partir de la capacité de calcul 7.5, compatible à partir du pilote R580 et
+recommandé à partir de R615 ; CUDA 12 recommandé à partir du pilote de son
+toolkit (570.26 sous Linux, 551.61 sous Windows) et seul build CUDA des cartes
+Maxwell, Pascal et Volta ; ROCm quand la cible gfx de la carte est dans la liste
+du build, et sous Linux quand l'hôte porte le runtime ROCm, que ce build charge
+depuis la machine ; Vulkan quand un chargeur est présent ; le build processeur
+toujours. Un build GPU installé dont `--list-devices` ne liste aucun
+périphérique est incompatible quoi que dise le reste. Une variante au plus est
+recommandée, la plus capable que la machine fait tourner. Le moteur qui sert
+chaque format de modèle est un réglage, automatique par défaut : le choix
+automatique prend le build installé classé recommandé, sinon le meilleur
+compatible, sinon le moteur embarqué, et une variante choisie qui n'est plus
+installée y retombe. Le choix est relu à chaque lancement d'un moteur. Un paquet
+CUDA porte le runtime CUDA que l'amont publie pour son build, à côté du
+serveur, sous Linux comme sous Windows, si bien qu'une machine qui n'a que le
+pilote NVIDIA le fait tourner ; le coût est un téléchargement plus lourd que
+celui d'un serveur qui s'appuierait sur un toolkit de l'hôte. Le classement est
+une table de seuils qui suit les builds amont : il se révise à chaque build que
+le canal épingle, et une carte qu'il classe à tort est corrigée par la liste du
+build installé plutôt que par une supposition. Le canal suivi est vérifié au démarrage du runtime et
 au changement de canal, et une mise à jour qu'il annonce pour un moteur choisi
 est installée sans qu'on la demande, sauf si le réglage qui la gouverne est
 éteint, auquel cas elle est seulement annoncée. Tout téléchargement ou import
@@ -380,14 +401,27 @@ manifeste, qui liste chaque archive de moteur avec son SHA-256. La moitié
 publique de cette clé est compilée dans le binaire et c'est la seule clé
 acceptée. Aucune archive n'est demandée avant que la signature tienne, une
 archive dont l'empreinte diffère du manifeste est supprimée, et un manifeste
-plus ancien que le dernier accepté sur son canal est refusé. Un miroir peut
-remplacer l'adresse d'où viennent manifestes et archives ; il ne peut pas
-remplacer la clé. Les archives de moteur se lisent au format zip seul, celui déjà
+plus ancien que le dernier accepté sur son canal est refusé. Le runtime lit un
+canal sur le registre d'Apollia d'abord, sous `engines-<canal>/`, et sur son
+miroir GitHub Releases quand le registre ne répond pas ; aucune des deux
+adresses n'est de confiance, et la signature est la seule autorité. Un miroir
+peut remplacer l'adresse d'où viennent manifestes et archives, et il est alors
+le seul lu ; il ne peut pas remplacer la clé. Les archives de moteur se lisent au format zip seul, celui déjà
 lu pour les paquets d'agents, et aucun autre format d'archive n'est analysé. Les
 versions amont publiées en `.tar.gz`, dont celles pour macOS et Linux, sont
 reconditionnées en zip par la chaîne de publication qui produit le manifeste, et
-le manifeste porte l'empreinte de ce zip. L'environnement du moteur MLX figure
-dans le même manifeste et s'installe par la même vérification.
+le manifeste porte l'empreinte de ce zip. L'outil `llama-connect` que portent
+les builds amont, un tunnel pair à pair, est exclu de chaque paquet : rien de ce
+que signe la clé de distribution ne peut ouvrir un tunnel. L'environnement du
+moteur MLX figure dans le même manifeste et s'installe par la même vérification.
+
+Un moteur lancé reçoit l'environnement du daemon privé de toute variable
+`LLAMA_ARG_*`. llama.cpp lit chacune de ses options depuis une telle variable
+aussi, `--connect` comprise, et une variable laissée dans un shell ou une unité
+de service ne doit pas activer une option que le runtime n'a pas choisie. Le
+coût est qu'un moteur ne se règle plus par cette voie : les options
+supplémentaires passent par `APOLLIA_LLAMA_EXTRA_ARGS`, que le daemon transmet
+comme options.
 
 Il n'y a aucun fournisseur cloud dédié. Un modèle distant se joint par une seule
 connexion générique à un serveur compatible OpenAI, à l'adresse que
@@ -527,11 +561,156 @@ distribution dédiée d'Apollia (voir [Inférence locale](#local-inference)), et
 elle se télécharge au premier serveur lancé par `node` ou `npx` qui en a
 besoin : la signature du manifeste est vérifiée avant toute requête d'archive,
 puis l'empreinte de l'archive, puis l'archive est extraite dans le magasin des
-moteurs. Un tel serveur tourne alors sur ce Node.js par son chemin absolu,
-jamais par le `PATH` ; tant qu'aucun n'est installé, son lancement échoue sur
-une erreur typée « Node.js requis ». Un poste sans réseau importe Node.js depuis
-un disque, par la même vérification. Les paquets npm des serveurs s'installent
-depuis un verrou qui porte une empreinte d'intégrité par paquet.
+moteurs. Un tel serveur tourne alors sur ce Node.js par son chemin absolu. Un
+poste sans réseau importe Node.js depuis un disque, par la même vérification.
+Les paquets npm des serveurs s'installent depuis un verrou qui porte une
+empreinte d'intégrité par paquet.
+
+### Le Node.js du poste, en repli {#mcp-machine-node}
+
+Quand le canal des moteurs ne peut pas fournir Node.js (non publié,
+injoignable, hors ligne, ou vérification refusée), Apollia se replie sur un
+Node.js déjà installé sur le poste. Cette version n'est pas vérifiée par
+Apollia, et elle est acceptée tout de même, parce que l'utilisateur l'a
+installée et choisie : elle a déjà sa confiance pour exécuter du code sur ce
+poste, et Apollia n'ajoute rien à ce qu'elle peut faire. La recherche lit les
+entrées absolues du `PATH` du processus (une entrée relative ou vide, qui vaut
+le dossier courant, est écartée, si bien qu'un `node` déposé dans le dossier
+d'où l'application est partie n'est jamais lancé), puis les dossiers
+d'installation usuels (`/opt/homebrew/bin`, `/usr/local/bin`,
+`Program Files\nodejs` sous Windows), les formules Homebrew non liées
+(`opt/node@<majeure>` sous `/opt/homebrew` et `/usr/local`, la majeure la plus
+récente d'abord) et les versions des gestionnaires courants (nvm, Volta, fnm),
+et le seul
+programme qu'elle lance est le `node` candidat lui-même, avec `--version`. Un
+candidat n'est retenu que si sa version majeure est 22 ou plus, la ligne que
+publie le canal et avec laquelle les verrous sont essayés, et si son propre npm
+se trouve à côté de lui ; `npx` et `npm` sont toujours ceux du `node` retenu. La
+version du canal reste préférée : dès qu'elle est installée, les serveurs
+tournent de nouveau sur elle. Ce qui reste vérifié, c'est le code des
+serveurs : un paquet épinglé s'installe toujours par `npm ci` depuis son verrou
+embarqué, qui refuse toute l'installation sur une seule empreinte d'intégrité
+qui ne correspond pas, les scripts des paquets désactivés. Quand il n'y a aucun
+Node.js, l'ajout dit d'en installer un ou d'attendre le canal, avec un lien vers
+la page d'aide.
+
+### Un seul écrivain, un état publié, des appels détachés {#mcp-manager-snapshot}
+
+Le gestionnaire MCP est un acteur, et il reste le seul écrivain de ses
+sessions, comme le veut le principe 5 : aucun verrou n'est partagé avec un
+autre acteur. Ce qu'il ne fait plus, c'est retenir sa boucle pendant qu'un
+serveur travaille. Un appel d'outil et un test de connexion tournent dans une
+tâche à eux, sur une poignée du lien JSON-RPC de la session ; l'issue d'un
+appel revient à l'acteur par message, et l'acteur l'inscrit dans la santé de
+la session dans l'ordre où les issues arrivent. Deux appels sur une même
+session avancent côte à côte, ce que le protocole permet, puisque chaque
+requête porte son propre identifiant.
+
+Après chaque changement (un serveur ajouté, retiré, redémarré ou rechargé,
+l'issue d'un appel inscrite), l'acteur publie l'état de chaque serveur, sa
+santé et l'index des outils sur un canal `watch`, avant de répondre. Lire la
+liste des connexions, ou l'index des outils qu'une conversation lit à chaque
+tour, prend cet état publié et n'envoie rien à l'acteur : un serveur lent ne
+retarde ni l'une ni l'autre. Le principe 5 se lit ainsi : un acteur possède
+et modifie l'état, les autres lisent une copie qu'il publie, jamais l'état
+lui-même.
+
+### L'état d'une connexion, constaté, gardé et annoncé {#connection-state}
+
+Une connexion se lit dans l'un de quatre états : elle marche, elle est à
+réparer (avec la raison et la seule action qui la répare), elle est en pause,
+ou elle est bloquée par l'organisation. Tant que rien ne l'a constatée dans
+l'un d'eux, elle se lit « pas encore vérifiée » : un état neutre, sans date,
+dont la seule action est de la vérifier, rangé avec le reste et jamais avec ce
+qui est à réparer. Elle ne marche ni n'est cassée : une installation mise à
+jour depuis une version qui ne gardait aucun état ne montre rien à réparer
+tant que rien n'a échoué. Le runtime constate l'état ; personne ne le saisit.
+L'état d'un serveur MCP suit sa santé, et une session dont la poignée de main
+a réussi mais dont aucune opération n'a encore fait ses preuves ne se lit pas
+comme marchant : elle garde l'état « marche » constaté avant, et sinon se lit
+« pas encore vérifiée ». Une vérification, un usage ou un échec au démarrage
+la remplace par l'état constaté. Un jeton impossible à obtenir au
+démarrage demande de se reconnecter ; une session dont le transport se ferme
+de lui-même est marquée injoignable au moment où il se ferme, pas au prochain
+appel.
+
+Le dernier état de chaque connexion, sa raison et le moment où il a été
+constaté sont gardés dans `connection_states` de `system.db`. La liste des
+connexions les relit : après un redémarrage, elle montre le dernier état
+connu, daté, avant que rien n'ait tourné. Chaque état gardé est annoncé par
+une variante de `RuntimeEvent`, `ConnectionStateChanged`, que le bureau relaie
+à la fenêtre. La variante et ses types d'état vivent dans `apollia-core`, dans
+son API publique, parce que l'événement les porte. Une annonce envoyée avant
+qu'un lecteur s'abonne n'est pas perdue pour lui : il retrouve le même état
+dans la liste.
+
+Une connexion se vérifie à la demande, de la façon que son genre permet, et
+ne joint que son propre service. Un compte natif obtient un jeton valide,
+rafraîchi auprès du point de jeton de son fournisseur quand il a expiré ; un
+rafraîchissement refusé demande de se reconnecter. Une boîte se connecte à
+son propre serveur ; une identification refusée se lit comme un mot de passe
+refusé. Un dossier se cherche sur cette machine ; un dossier disparu se lit
+introuvable. Un serveur MCP sans session est démarré, puis testé : une
+poignée de main neuve qui liste ses outils fait sa preuve, et la sonde en
+lecture seule que déclare son connecteur, quand il en déclare une, dit si ses
+opérations échouent. Une connexion que l'organisation interdit n'est pas
+jointe. Ce qu'une vérification constate est gardé et annoncé comme tout autre
+état.
+
+Qu'un utilisateur puisse consentir seul au courrier et à l'agenda dépend des
+réglages de consentement de son organisation. Quand Microsoft répond qu'un
+administrateur doit approuver l'application, aucun compte n'a pu se
+connecter, il n'y en a donc aucun à nommer : l'état est gardé sous le seul
+fournisseur (`native:microsoft`), bloqué, avec la raison
+`admin_approval_required` et l'adresse de la page d'accord (`adminconsent`) à
+copier. Le premier compte de ce fournisseur qui se connecte le lève. Un
+compte professionnel dont le consentement est refusé (`AADSTS65004`), que
+Microsoft ne distingue pas d'un accord d'administrateur non demandé, se voit
+proposer la même adresse à copier, sans que sa connexion soit marquée
+bloquée. Le consentement Microsoft demande les propres fichiers de
+l'utilisateur (`Files.Read`), jamais `Files.Read.All`, qui atteint tous les
+fichiers partagés avec lui et que les réglages de consentement réservent plus
+souvent à un administrateur.
+
+### Une connexion en pause {#connection-pause}
+
+L'utilisateur peut mettre une connexion en pause et la reprendre telle
+quelle. La pause est tenue par la gouvernance, à côté des refus de la
+politique : les connexions en pause sont gardées dans `paused_connections` de
+`governance.db` (schéma v6), et la décision sur un appel d'outil refuse chaque
+outil de l'une d'elles, outils de lecture compris, avec la raison qu'elle est
+en pause. Le modèle en est informé, et le refus est journalisé sous
+`paused_refused`. La politique est lue d'abord : une connexion à la fois
+interdite et en pause se lit bloquée par l'organisation, ce qu'aucune reprise
+ne lève. Une pause est lue par la décision suivante, sans redémarrage.
+
+Une pause ne retire rien : les accès des agents, la configuration et les
+secrets de la connexion restent tels quels. Un serveur MCP en pause est aussi
+arrêté et son drapeau `enabled` de `mcp.db` éteint, pour qu'il ne soit pas
+redémarré, ni au démarrage suivant ni à la demande.
+
+Certains outils sont partagés par plusieurs connexions, et l'appel dit celle
+qu'il atteint. Un outil de boîte mail atteint la boîte que l'appel nomme, ou la
+seule connectée, reconnue quelle que soit la casse de son adresse ; un outil de
+fichiers atteint le dossier le plus profond qui contient l'endroit où aboutit
+son chemin, lu comme l'outil le lit (un chemin relatif depuis le premier
+dossier accordé, `~` développé, liens suivis) ; `code_context` atteint le
+dossier de code qu'il nomme, ou chaque dossier de code de l'agent. La décision
+refuse un tel appel quand ce qu'il atteint est en pause, et le journalise comme
+tout autre. Les outils de fichiers ne reposent pas sur cette seule décision,
+puisqu'un parcours d'un dossier sain ne nomme aucun dossier imbriqué : un
+dossier en pause est retiré de leur bac à sable, il n'est pas une racine et
+aucune racine qui le contient n'y descend, si bien qu'aucun chemin, lien,
+liste ou recherche récursive n'y lit ni n'y écrit, et un parcours ne nomme
+rien de ce qu'il a trouvé en passant par lui, pas plus que la suggestion donnée
+pour un fichier introuvable. `source_search` ne le cherche pas non plus : il
+rend la source sous `paused` et cherche les autres. Les outils d'un tour sont
+construits à son début : ils relisent donc à chacun de leurs appels les pauses
+que publie la gouvernance, comme la décision, si bien qu'un dossier mis en
+pause pendant qu'un agent travaille est retiré dès son appel suivant. L'exécuteur des boîtes refuse lui aussi à
+chaque appel une boîte en pause, comme il refuse une boîte interdite. Une
+connexion en pause se lit en pause dans la liste, quel que soit l'état gardé
+pour elle avant.
 
 ## Connecteurs {#connectors}
 
@@ -560,13 +739,31 @@ passe, ou endommagé, donne une erreur typée, jamais un plantage. Un fichier CS
 qui n'est pas en UTF-8 se lit avec ses octets invalides remplacés, et le
 résultat le signale : aucun encodage n'est deviné.
 
-Le coût est nommé : `calamine` dépend de `zip` 8 quand l'espace de travail porte
-`zip` 4 pour l'archive de paquet et l'export d'un lot ; deux versions majeures
-de `zip` entrent donc dans chaque compilation, avec cinq petites crates sous
-`calamine` (`atoi_simd`, `codepage`, `debug_unsafe`, `fast-float2`,
-`typed-path`) et `csv-core` sous `csv`. `calamine` est épinglé en 0.36.1 : une
-nouvelle version, et la version de `zip` qu'elle apporte, est une décision et
-non une mise à jour.
+Le coût est nommé : trois versions majeures de `zip` entrent dans chaque
+compilation. L'espace de travail porte `zip` 4 pour l'archive de paquet et
+l'export d'un lot ; `office_oxide`, tenu en 0.1.11 par `pdf_oxide` 0.3.78 (voir
+plus bas), apporte `zip` 8 ; et `calamine` 0.38 apporte `zip` 9, avec des
+secondes versions majeures de `nix` et de `typed-path` en dessous. De petites
+crates les accompagnent, `atoi_simd`, `codepage` et `fast-float2` sous
+`calamine`, et `csv-core` sous `csv`. `calamine` est épinglé en 0.38.0, la
+version qui borne la lecture d'un `.xls` malformé (une panique et une
+allocation dimensionnée par l'en-tête du fichier dans son lecteur de fichiers
+composés, corrigées en amont) ; une nouvelle version, et la version de `zip`
+qu'elle apporte, est une décision et non une mise à jour. Une panique restée
+dans ce lecteur est encore rattrapée à sa frontière et signalée comme un
+fichier endommagé.
+
+`zip` 4 et 8 portent quatre avis sur `ZipArchive::extract` et
+`ZipStreamReader::extract` (RUSTSEC-2026-0367, 0368, 0369 et 0429 : bits de
+permission, liens qui sortent de la destination, permissions appliquées à
+travers un lien, et un abandon du processus sur un lien à taille déclarée
+énorme). Ils sont acceptés dans `deny.toml` et dans la configuration de
+`cargo audit`, car rien dans l'arbre n'appelle l'une ou l'autre fonction : le
+magasin de moteurs et le lecteur de paquets parcourent une archive entrée par
+entrée, tailles bornées, le premier lisant un lien par ses octets et refusant
+celui qui sort de l'archive, le second refusant tout lien, et les classeurs et
+les documents bureautiques se lisent en mémoire. Ils tombent quand l'espace de
+travail et `office_oxide` passent à `zip` 9.
 
 Le texte d'un document PDF s'extrait en Rust par `pdf_oxide` (MIT ou
 Apache-2.0), page par page, chaque page avec son numéro. La bibliothèque est en
@@ -649,7 +846,12 @@ aucun fichier n'est écrit à côté des documents.
 
 Le moteur lit avec un fichier de données par langue. Le français et l'anglais,
 tirés du jeu `tessdata_fast` (Apache-2.0), sont des entrées du registre des
-modèles, chacune épinglée par son SHA-256. Ils sont obtenus la première fois
+modèles, chacune épinglée par son SHA-256 et par le commit amont auquel elle est
+prise : les fichiers viennent du dépôt `tesseract-ocr/tessdata_fast` lui-même,
+à un commit fixe, et un contrôle hebdomadaire télécharge chaque langue épinglée
+depuis l'adresse que compose l'application et la compare à sa taille et à son
+empreinte épinglées, pour qu'une adresse qui cesse de répondre se voie dans la
+semaine. Ils sont obtenus la première fois
 qu'une source contient une page scannée, une fois par exécution, par le
 téléchargeur qui contrôle chaque modèle contre son empreinte ; un poste sans
 réseau prend les mêmes fichiers sur un disque par l'import de modèle, qui
@@ -661,24 +863,45 @@ arrivent ; une page sans texte qui n'est pas une image unique est listée comme
 non lue. Aucun moteur de rendu n'est livré : `hayro` et PDFium, ceux qui ont
 été pesés, restent dehors tant que les documents n'en montrent pas le besoin.
 
+Toutes les compilations livrées lisent les pages scannées : le binaire en ligne
+de commande et l'application de bureau, sur macOS, Linux et Windows, sont
+compilés avec la fonctionnalité `ocr`, et la release refuse un binaire en ligne
+de commande dont `doctor` ne dit pas la reconnaissance compilée, et un binaire
+de bureau qui ne porte pas le moteur. La fonctionnalité n'est pas parmi celles
+par défaut, si bien qu'une compilation de tous les jours de l'espace de travail
+n'en compile rien.
+
 Le coût est nommé : la chaîne C++ entre dans la compilation. Compiler le moteur
-demande cmake, un compilateur C++ et le réseau, prend une à deux minutes (83
-secondes sur macOS Apple Silicon, 133 secondes sur Linux x64 sous émulation),
-et ajoute 2,8 Mo au binaire sur macOS et 4,4 Mo sur Linux. Le script de
-compilation de `tesseract-rs` télécharge les sources de Tesseract 5.5.2 et de
-Leptonica 1.87.0 depuis GitHub sans en contrôler l'empreinte, les garde avec
+demande cmake, un compilateur C++ et les deux archives de sources, prend une à
+deux minutes (83 secondes sur macOS Apple Silicon, 133 secondes sur Linux x64
+sous émulation), et ajoute environ 2,5 Mo au binaire en ligne de commande sur
+macOS Apple Silicon et 4,4 Mo sur Linux x64. Sous Windows x64, le binaire en
+ligne de commande livré, reconnaissance comprise, pèse 97,6 Mo (97 638 912
+octets) ; la part du moteur n'y a pas été mesurée à part. Le script de compilation de
+`tesseract-rs` garde les sources de Tesseract 5.5.2 et de Leptonica 1.87.0 avec
 les bibliothèques compilées dans un dossier du répertoire personnel plutôt que
-sous `target/`, et y pose deux fichiers de langue que le produit ne lit pas. La
-reconnaissance est donc derrière la fonctionnalité `ocr`, désactivée par
-défaut : une compilation de tous les jours n'en compile rien, et une
-compilation qui livre la reconnaissance l'active. `tesseract-rs` est épinglée à 0.4.0, puisqu'une version change les
-sources qu'elle va chercher ; trois crates entrent dans le fichier de
-verrouillage, `tesseract-rs` elle-même et `aws-lc-rs` avec `aws-lc-sys`, que
-le client HTTP de son script de compilation apporte et qui ne s'exécutent qu'à
-la compilation. `image` était déjà compilée pour le lecteur PDF et n'en ajoute
-aucune. La compilation statique est mesurée sur macOS et sur Linux ; elle ne
-l'est pas sur Windows, où la fonctionnalité reste désactivée tant qu'elle ne
-l'est pas.
+sous `target/`, et les télécharge depuis GitHub sans en contrôler l'empreinte
+quand ce dossier ne les contient pas. Elles y sont donc posées avant la
+compilation par `packaging/fetch-tesseract-sources.sh`, qui contrôle chaque
+archive contre un SHA-256 épinglé et contre le commit amont que GitHub y
+inscrit, refuse un écart, et n'offre aucun moyen de couper l'un ou l'autre
+contrôle ; la garde des téléchargements refuse un workflow où une compilation
+avec `ocr` n'est pas précédée, dans son job, d'un appel à ce script. Sur un
+poste, l'ordre est le même, le script d'abord, puis la compilation. Le script
+de compilation va aussi chercher deux fichiers de langue que le produit ne lit
+pas, sauf si des fichiers de ces noms sont présents : le script y pose deux
+fichiers vides, rien n'est donc téléchargé, et le produit ne les ouvre jamais.
+`tesseract-rs` est épinglée à 0.4.0, puisqu'une version change les sources
+qu'elle attend ; trois crates entrent dans le fichier de verrouillage,
+`tesseract-rs` elle-même et `aws-lc-rs` avec `aws-lc-sys`, que le client HTTP
+de son script de compilation apporte. Le fichier de verrouillage compte aussi
+`aws-lc-rs` parmi les dépendances de `rustls`, `quinn-proto` et
+`rustls-webpki`, mais seul ce script de compilation compile les deux : elles
+s'exécutent à la compilation, et aucun binaire livré ne les lie. `image` était
+déjà compilée pour le lecteur PDF et n'en ajoute aucune. Sous Windows, un
+binaire lié au runtime C statique reçoit un moteur compilé contre ce runtime,
+par la copie corrigée décrite plus bas (voir
+[Une copie corrigée de tesseract-rs](#tesseract-rs-copy)).
 
 Les résultats d'un lot sont écrits dans le tableau qu'il a lu, par défaut dans
 une copie posée à côté de l'original, `<nom> (résultats AAAA-MM-JJ).xlsx`,
@@ -731,6 +954,36 @@ Le coût est nommé : deux crates et leurs petits arbres (`imap-proto`, `hashify
 `stop-token`, `async-channel`) entrent dans chaque compilation, pour un
 protocole dont les serveurs varient dans leur rigueur. Un serveur qui comprend
 mal une commande donne une erreur de protocole typée, pas un plantage.
+
+### Une copie corrigée de tesseract-rs {#tesseract-rs-copy}
+
+Les binaires Windows lient le runtime C de façon statique
+(`-C target-feature=+crt-static`), pour qu'une machine sans le Redistributable
+Visual C++ les exécute, et chaque bibliothèque C ou C++ liée dedans doit être
+compilée contre ce même runtime statique, avec `/MT`. Le script de compilation
+de `tesseract-rs` 0.4.0 compile Leptonica et Tesseract avec `/MD`, quoi que
+demande la cible Rust : il écrit lui-même `/MD` dans les options de la
+configuration de production et fixe `CMAKE_MSVC_RUNTIME_LIBRARY` à
+`MultiThreadedDLL`, ce qui écrase la valeur que donne l'environnement de
+compilation. L'édition des liens d'un binaire Windows avec la fonctionnalité
+`ocr` échoue alors sur des symboles du runtime qu'aucun objet ne fournit.
+
+La crate est donc compilée depuis une copie gardée dans l'arbre, sous
+`third_party/tesseract-rs/`, par `[patch.crates-io]` dans le manifeste de
+l'espace de travail. La copie est la 0.4.0 publiée, octet pour octet, à un
+changement près dans son script de compilation : quand la cible a
+`crt-static`, il passe `/MT` dans les options de production et de mise au
+point et `MultiThreaded` comme bibliothèque de runtime ; sans elle, chaque
+valeur est celle de l'amont, si bien que macOS et Linux compilent exactement ce
+que compile la crate publiée. Rien d'autre de la copie ne diffère, ses autres
+défauts compris : ses sources sont toujours posées à l'avance par
+`packaging/fetch-tesseract-sources.sh`. Les gardes qui jugent le code écrit ici
+laissent la copie de côté, puisque son code et sa prose sont ceux de ses
+auteurs. L'installeur ne change pas.
+
+La copie est retirée, avec l'entrée `[patch]`, dès qu'une version publiée de
+`tesseract-rs` suit `crt-static` sous Windows, et l'épinglage passe à cette
+version.
 
 ## Export d'un lot {#batch-export}
 
@@ -936,6 +1189,31 @@ d'autre dépendance que sa propre cale d'édition de liens, et la même version
 était déjà dans l'arbre par d'autres crates : le fichier de verrouillage n'a
 gagné aucun paquet. Le coût est un bloc de code FFI avec sa propre permission
 `unsafe`, confiné à un module.
+
+### Les outils appelés depuis le code d'un paquet {#python-tool-calls}
+
+Le proxy derrière `ctx.tools` décide chaque appel par la même gouvernance
+qu'un appel du Chat, d'un plan ou d'un élément de lot, dans le même ordre : la
+politique, une connexion en pause, les règles fines, puis les consentements de
+l'agent. Aucun code de paquet ne reçoit ce proxy aujourd'hui : `ctx.tools` vaut
+`None` dans un outil comme dans un workflow. Un workflow atteint les outils par
+un agent, avec `ctx.agents.run`, et cet agent tourne sur le moteur du Chat, qui
+décide déjà chacun de ses appels. La décision est placée dans le proxy pour que,
+le jour où `ctx.tools` sera donné au code d'un paquet, aucun appel de ce code
+ne la contourne.
+
+Ce code tournerait sans personne qui le regarde : il suit donc la règle d'un
+élément de lot, et aucune forme de consentement n'est ajoutée pour lui. Un
+refus de la politique, d'une règle ou d'une pause n'exécute pas l'outil :
+l'appel lève une `RuntimeError` qui nomme l'outil et la raison, sans ses
+arguments, le runtime émet le refus comme un appel d'outil refusé, et le
+journal l'enregistre comme sur les autres chemins. Un appel qui demanderait
+l'accord de la personne ne s'exécute pas non plus : il lève `NeedHumanInput`,
+porteur de la demande d'accord. Le moteur des workflows ne met pas une
+exécution en pause sur cette erreur : non rattrapée, elle termine l'exécution
+comme toute autre erreur. Un accès que l'appelant de l'exécution a accordé pour
+elle vaut consentement, comme un lot accorde les accès de son agent à ses
+éléments.
 
 ## Le fichier de configuration {#configuration-file}
 
@@ -1199,15 +1477,19 @@ Il y a un installeur par système. Aucun installeur n'existe en seconde édition
 pour une sorte de carte graphique : une édition par carte faisait choisir un
 téléchargement d'après un matériel que le lecteur ne connaît pas forcément, et
 liait la version d'un moteur à une version de l'application. Les moteurs qu'un
-installeur n'embarque pas, la compilation CUDA de `llama-server` et le Node.js
-qui fait tourner les serveurs d'outils, sont publiés à part, sur leur propre
+installeur n'embarque pas, les variantes de `llama-server` du canal
+(`cuda-12`, `cuda-13`, `rocm`, `vulkan`, `cpu`) et le Node.js qui
+fait tourner les serveurs d'outils, sont publiés à part, sur leur propre
 canal, sous un manifeste signé au format minisign avec une clé de distribution
 dédiée (voir [Inférence locale](#local-inference)). La chaîne qui les publie
 est distincte de celle qui publie l'application et se lance à la main : elle
 prend des archives amont épinglées par SHA-256, reconditionne chacune en zip, et
 signe le manifeste avec une clé qui ne signe rien d'autre, distincte de la clé
 des mises à jour de l'application. Le registre d'Apollia sert le manifeste et
-les archives, et GitHub Releases en est le miroir. Une application installée
+les archives sous `engines-<canal>/`, et la release GitHub `engines-<canal>` en
+est le miroir sous les mêmes noms ; le runtime lit le registre d'abord et le
+miroir quand le registre ne répond pas, et n'accepte l'un ou l'autre que sous
+la signature. Une application installée
 depuis une ancienne édition CUDA continue de se mettre à jour : le manifeste de
 mise à jour qu'elle demande est toujours publié, en copie du manifeste standard,
 si bien qu'elle passe à l'installeur unique de son système et reçoit le moteur

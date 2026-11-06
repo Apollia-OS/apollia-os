@@ -18,6 +18,7 @@
 //! 7. KeyringStorage::store(name, &token)      → persisted
 //! ```
 
+pub mod admin_approval;
 pub mod auth_manager;
 pub mod callback;
 pub mod connector_consent;
@@ -36,7 +37,7 @@ pub mod secret_storage;
 pub mod storage;
 pub mod token;
 
-pub use auth_manager::AuthManager;
+pub use auth_manager::{AuthManager, HttpTokenRefresh, TokenRefresh};
 pub use connector_consent::{
     ConnectedAccount, ConsentError, ConsentStart, PendingConsent, PendingConsents,
 };

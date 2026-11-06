@@ -1,8 +1,8 @@
 //! The manager actor's command handlers.
 //!
 //! Split out of `manager.rs`: the actor loop stays in the parent, the arm of
-//! each `McpCommand` (server lifecycle, tool calls, resources)
-//! lives here.
+//! each `McpCommand` (server lifecycle, tool calls) lives
+//! here; resources live in `resources`.
 
 use apollia_core::{McpHealth, RuntimeEvent};
 
@@ -12,10 +12,7 @@ use crate::manager::views::{
     build_status, register_session_tools_in_registry, registry_names, session_tool_names,
     ServerHints,
 };
-use crate::manager::{
-    McpClientManager, McpConnectionTestResult, McpResourcePayload, McpResourceSummary,
-    McpServerStatus, McpToolSummary, ProbeSpec,
-};
+use crate::manager::{McpClientManager, McpConnectionTestResult, McpServerStatus, McpToolSummary};
 use crate::protocol::{extract_text_parts, ToolCallResult};
 use crate::session::{LoadingMode, McpSession, McpSessionError};
 
@@ -65,6 +62,7 @@ impl McpClientManager {
         self.request_servers.insert(name.clone());
         self.register_session_tools(&name, &session).await;
         let status = build_status(&name, &session, None);
+        self.watch_session_end(&name, &session);
         self.sessions.insert(name, session);
         Ok(status)
     }
@@ -83,44 +81,76 @@ impl McpClientManager {
                 cause: "server with this name already exists".to_string(),
             });
         }
+        // A dormant server of that name gives way to the session, and comes
+        // back when the session does not start.
+        let dormant = self.take_dormant(&name)?;
 
-        let session =
-            McpSession::start_with_mode(config, Some(&DefaultMcpSecretResolver), self.loading_mode)
-                .await?;
+        let session = match McpSession::start_with_mode(
+            config,
+            Some(&DefaultMcpSecretResolver),
+            self.loading_mode,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(e) => {
+                // An explicit start was tried: a listing may try once again.
+                if let Some(mut dormant) = dormant {
+                    dormant.start_failed = false;
+                    self.dormant.insert(name, dormant);
+                }
+                return Err(e);
+            }
+        };
         tracing::info!(
             server = %name,
             tools = session.tools().len(),
             indexed = session.tool_index().len(),
             "mcp.server.added"
         );
+        if let Some(dormant) = &dormant {
+            self.unregister_dormant(&name, dormant).await;
+        }
         self.register_session_tools(&name, &session).await;
         let status = build_status(
             &name,
             &session,
             self.last_call_at.get(&name).map(String::as_str),
         );
-        self.sessions.insert(name, session);
+        self.watch_session_end(&name, &session);
+        self.sessions.insert(name.clone(), session);
+        self.mark_used(&name);
         Ok(status)
     }
-    /// Shutdown the session named `name` and remove it from the managed set.
+    /// Shutdown the session named `name`, remove it from the managed set, and
+    /// take the descriptors it registered out of the tool registry.
     ///
     /// Returns [`McpSessionError::ServerExited`] when the name is not found.
     pub(super) async fn handle_remove_server(&mut self, name: &str) -> Result<(), McpSessionError> {
         match self.sessions.remove(name) {
             Some(session) => {
-                if self.request_servers.remove(name) {
+                self.request_servers.remove(name);
+                // A deferred session registered no descriptor.
+                if self.loading_mode != LoadingMode::Deferred {
                     for tool in registry_names(name, &session) {
                         if let Err(e) = self.tool_registry.unregister(&tool).await {
                             tracing::warn!(
                                 server = %name,
                                 error = %e,
-                                "mcp.request_server.unregister.failed"
+                                "mcp.server.unregister.failed"
                             );
                         }
                     }
-                    self.last_call_at.remove(name);
                 }
+                self.last_call_at.remove(name);
+                self.last_used.remove(name);
+                self.in_flight.remove(name);
                 session.shutdown().await;
+                tracing::info!(server = %name, "mcp.server.removed");
+                Ok(())
+            }
+            None if self.drop_dormant(name).await => {
+                self.last_call_at.remove(name);
                 tracing::info!(server = %name, "mcp.server.removed");
                 Ok(())
             }
@@ -191,7 +221,9 @@ impl McpClientManager {
         );
 
         self.register_session_tools(name, &new_session).await;
+        self.watch_session_end(name, &new_session);
         self.sessions.insert(name.to_string(), new_session);
+        self.mark_used(name);
         self.reloading.remove(name);
 
         if let Some(ref tx) = self.event_bus {
@@ -245,107 +277,6 @@ impl McpClientManager {
         };
         session.shutdown().await;
         Ok(result)
-    }
-    /// Test an already-installed server: re-handshake for reachability, then run
-    /// an optional read-only probe against the live session to exercise real
-    /// operational access. The probe bypasses HITL (it is a system health check,
-    /// not an agent action) and updates the live session's health, so the badge
-    /// reflects the verdict and a [`RuntimeEvent::McpServerHealthChanged`] fires.
-    pub(super) async fn handle_test_live_server(
-        &mut self,
-        server_name: String,
-        probe: Option<ProbeSpec>,
-    ) -> Result<McpConnectionTestResult, McpSessionError> {
-        let config = match self.sessions.get(&server_name) {
-            Some(session) => session.config().clone(),
-            None => {
-                return Err(McpSessionError::ServerExited {
-                    server: server_name,
-                });
-            }
-        };
-
-        let mut result = Self::handle_test_connection(config).await?;
-
-        if let Some(probe) = probe {
-            // Only run a probe whose tool the server actually exposes. A
-            // misconfigured or absent probe tool then degrades gracefully to a
-            // reachability-only verdict instead of a false "not found" failure.
-            let probe_available = self
-                .sessions
-                .get(&server_name)
-                .map(|s| session_tool_names(s).contains(&probe.tool))
-                .unwrap_or(false);
-            if probe_available {
-                let call = {
-                    let Some(session) = self.sessions.get(&server_name) else {
-                        return Err(McpSessionError::ServerExited {
-                            server: server_name,
-                        });
-                    };
-                    session.call_tool(&probe.tool, probe.args).await
-                };
-                self.record_call_outcome(&server_name, &call);
-            } else {
-                tracing::debug!(
-                    server = %server_name,
-                    probe = %probe.tool,
-                    "mcp.health_probe_skipped_unknown_tool"
-                );
-            }
-        }
-
-        result.live_health = self.sessions.get(&server_name).map(|s| s.health().clone());
-        Ok(result)
-    }
-    /// Resolve a [`McpCommand::CallTool`] command.
-    pub(super) async fn handle_call_tool(
-        &mut self,
-        server_name: String,
-        tool_name: String,
-        arguments: Option<serde_json::Value>,
-    ) -> Result<ToolCallResult, McpSessionError> {
-        if self.reloading.contains(&server_name) {
-            return Err(McpSessionError::ServerReloading {
-                server: server_name,
-            });
-        }
-
-        // In deferred mode, warm the schema cache on first use. This mutable
-        // borrow is opened and dropped in its own scope before the immutable
-        // borrow taken by the call below. The fetch is best-effort: a failure
-        // here is logged and ignored, since `call_tool` does not require the
-        // schema to execute.
-        if self.loading_mode == LoadingMode::Deferred {
-            if let Some(session) = self.sessions.get_mut(&server_name) {
-                if let Err(e) = session.fetch_tool_schema(&tool_name).await {
-                    tracing::warn!(
-                        server = %server_name,
-                        tool = %tool_name,
-                        error = %e,
-                        detail = "the tool call continues on the deferred index",
-                        "mcp.schema.fetch.failed"
-                    );
-                }
-            }
-        }
-
-        // Build and await the call inside a scope so the immutable borrow of
-        // `self.sessions` ends before `record_call_outcome` takes `&mut self`.
-        let result = {
-            let session = match self.sessions.get(&server_name) {
-                Some(session) => session,
-                None => {
-                    return Err(McpSessionError::ServerExited {
-                        server: server_name,
-                    });
-                }
-            };
-            session.call_tool(&tool_name, arguments).await
-        };
-
-        self.record_call_outcome(&server_name, &result);
-        result
     }
     /// Classify a tool-call outcome and update the session's health, emitting
     /// [`RuntimeEvent::McpServerHealthChanged`] only when the state changes.
@@ -402,9 +333,14 @@ impl McpClientManager {
         let old_session = match self.sessions.remove(&server_name) {
             Some(session) => session,
             None => {
-                return Err(McpSessionError::ServerExited {
-                    server: server_name,
-                });
+                // A dormant server has no session to stop: it starts.
+                let config = self.dormant.get(&server_name).map(|d| d.config.clone());
+                return match config {
+                    Some(config) => self.handle_add_server(config).await,
+                    None => Err(McpSessionError::ServerExited {
+                        server: server_name,
+                    }),
+                };
             }
         };
         let config = old_session.config().clone();
@@ -416,96 +352,9 @@ impl McpClientManager {
         // misleading, so clear it and report no prior call.
         self.last_call_at.remove(&server_name);
         let status = build_status(&server_name, &new_session, None);
-        self.sessions.insert(server_name, new_session);
+        self.watch_session_end(&server_name, &new_session);
+        self.sessions.insert(server_name.clone(), new_session);
+        self.mark_used(&server_name);
         Ok(status)
-    }
-    /// Aggregate `resources/list` across every connected session.
-    ///
-    /// Servers that do not advertise the `resources` capability are skipped
-    /// without a round-trip. A per-server failure is logged and skipped; it
-    /// never aborts the aggregation of the others.
-    pub(super) async fn handle_list_resources(&self) -> Vec<McpResourceSummary> {
-        let mut out: Vec<McpResourceSummary> = Vec::new();
-        for (server_name, session) in &self.sessions {
-            if session.capabilities().resources.is_none() {
-                continue;
-            }
-            match session.list_resources().await {
-                Ok(result) => {
-                    for resource in result.resources {
-                        out.push(McpResourceSummary {
-                            server: server_name.clone(),
-                            uri: resource.uri,
-                            name: resource.name,
-                            mime_type: resource.mime_type,
-                            description: resource.description,
-                        });
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        server = %server_name,
-                        error = %e,
-                        "mcp.resources_list_failed"
-                    );
-                }
-            }
-        }
-        out
-    }
-    /// Resolve and read a single resource via `resources/read`.
-    ///
-    /// When `server_name` is `None`, the owning server is resolved by matching
-    /// `uri` against each connected session's resource list.
-    pub(super) async fn handle_read_resource(
-        &self,
-        server_name: Option<String>,
-        uri: &str,
-    ) -> Result<McpResourcePayload, McpSessionError> {
-        let resolved = match server_name {
-            Some(name) => name,
-            None => self.resolve_resource_server(uri).await.ok_or_else(|| {
-                McpSessionError::ServerExited {
-                    server: format!("(none exposes resource {uri})"),
-                }
-            })?,
-        };
-
-        let session =
-            self.sessions
-                .get(&resolved)
-                .ok_or_else(|| McpSessionError::ServerExited {
-                    server: resolved.clone(),
-                })?;
-
-        let result = session.read_resource(uri).await?;
-        let mime_type = result.contents.iter().find_map(|c| c.mime_type.clone());
-        let text = result
-            .contents
-            .iter()
-            .filter_map(|c| c.text.as_deref())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(McpResourcePayload {
-            server: resolved,
-            uri: uri.to_string(),
-            mime_type,
-            text,
-        })
-    }
-    /// Find the first connected server that exposes a resource with `uri`.
-    pub(super) async fn resolve_resource_server(&self, uri: &str) -> Option<String> {
-        for (server_name, session) in &self.sessions {
-            if session.capabilities().resources.is_none() {
-                continue;
-            }
-            if let Ok(result) = session.list_resources().await {
-                if result.resources.iter().any(|r| r.uri == uri) {
-                    return Some(server_name.clone());
-                }
-            }
-        }
-        None
     }
 }

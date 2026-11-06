@@ -57,6 +57,10 @@ export interface SourceRow {
   tooLarge: number;
   /** Files left out, that no reader could open. */
   unreadable: number;
+  /** Pages of scanned documents waiting for recognition. */
+  awaitingOcr: number;
+  /** Pages without text that recognition cannot read. */
+  notRead: number;
   /** Paths of the files left out. */
   skipped: { path: string; reason: "too_large" | "unreadable" }[];
   /** The folder connection or mailbox it points at. */
@@ -83,6 +87,8 @@ function tokenRow(kind: SourceKind, checked: boolean): SourceRow {
     documents: 0,
     tooLarge: 0,
     unreadable: 0,
+    awaitingOcr: 0,
+    notRead: 0,
     skipped: [],
     reference: null,
     registered: false,
@@ -91,6 +97,8 @@ function tokenRow(kind: SourceKind, checked: boolean): SourceRow {
 
 function registryRow(source: Source, index: SourceIndex | undefined, checked: boolean): SourceRow {
   const skipped = index?.skipped ?? [];
+  // A runtime older than the field answers without it.
+  const unread = index?.unreadPages ?? [];
   return {
     id: source.id,
     kind: source.kind,
@@ -100,6 +108,8 @@ function registryRow(source: Source, index: SourceIndex | undefined, checked: bo
     documents: index?.documents ?? 0,
     tooLarge: skipped.filter((file) => file.reason === "too_large").length,
     unreadable: skipped.filter((file) => file.reason === "unreadable").length,
+    awaitingOcr: unread.filter((page) => page.reason === "ocr_unavailable").length,
+    notRead: unread.filter((page) => page.reason === "not_read").length,
     skipped: skipped.map((file) => ({ path: file.path, reason: file.reason })),
     reference: source.reference,
     registered: true,
@@ -347,4 +357,25 @@ export function folderToConnect(row: SourceRow, connections: Connection[]): stri
   if (!row.checked || row.kind !== "file" || row.reference === null) return null;
   if (connectionOf(row, connections) !== null) return null;
   return parentFolder(row.reference);
+}
+
+/** The mailbox connection a mail source reads: the IMAP mailbox it names, or the Outlook account. */
+function mailboxOf(row: SourceRow, connections: Connection[]): Connection | null {
+  if (row.kind !== "mail" || row.reference === null) return null;
+  const reference = row.reference;
+  const id = reference.startsWith("outlook:") ? `${MICROSOFT_PREFIX}${reference.slice("outlook:".length)}` : reference;
+  return connections.find((c) => c.id === id) ?? null;
+}
+
+/**
+ * The rows read through a connection its user paused: a mailbox, a folder,
+ * or a file a folder connection holds. By row identifier.
+ */
+export function pausedSources(rows: SourceRow[], connections: Connection[]): Set<string> {
+  const paused = new Set<string>();
+  for (const row of rows) {
+    const connection = mailboxOf(row, connections) ?? connectionOf(row, connections);
+    if (connection?.status === "paused") paused.add(row.id);
+  }
+  return paused;
 }

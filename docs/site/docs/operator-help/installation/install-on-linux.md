@@ -63,9 +63,10 @@ apollia-os doctor
 ```
 
 `doctor` checks the data directory, the configuration file, the two databases,
-the models directory, Python, the sandbox posture and the runtime socket. It
-does **not** detect your GPU. The command that reports the detected hardware is
-a separate one, and it needs the daemon running:
+the models directory, `recognition` (whether this build reads scanned pages,
+and which reading languages are in place), Python, the sandbox posture and the
+runtime socket. It does **not** detect your GPU. The command that reports the
+detected hardware is a separate one, and it needs the daemon running:
 
 ```sh
 apollia-os model hardware --json
@@ -97,9 +98,11 @@ a machine with no graphics driver.
 
 **An NVIDIA card can go further.** There is one installer per system, and no
 separate one for NVIDIA cards. When the application detects such a card, its AI
-screen offers the accelerated engine, **Speed up with your NVIDIA card**: one
-click downloads it, after its signature is verified, and the next model load
-uses it. On Linux that engine relies on the CUDA libraries of the machine.
+screen offers the accelerated engine that suits the card and its driver,
+**Speed up with the CUDA 13 engine** for instance: one click downloads it,
+after its signature is verified, and the next model load uses it. The engine
+carries the CUDA libraries it needs, so the NVIDIA driver is the only thing the
+machine has to provide.
 
 **Dictation runs on the processor in the desktop packages.** Speech to text
 runs in the `apollia-runner` sidecar, which is built on whisper. The desktop

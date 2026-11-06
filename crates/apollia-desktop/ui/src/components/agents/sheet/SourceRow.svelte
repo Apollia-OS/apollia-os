@@ -3,8 +3,11 @@
    * SourceRow - one source of an agent's sheet: its kind and name, where its
    * index stands (waiting, being read with the files read so far, ready,
    * failed, keywords only with a link to the AI screen), and the files left
-   * out, over 50 MB or unreadable. In adjustment the row carries its box and,
-   * for a source of the registry, its removal.
+   * out, over 50 MB or unreadable, then the pages without text: waiting for
+   * recognition, with a link to the AI screen where its language is imported,
+   * or that it cannot read. In adjustment the row carries its box and,
+   * for a source of the registry, its removal. A source read through a
+   * connection its user paused carries the "Paused" badge.
    */
   import type { Snippet } from "svelte";
   import { t } from "svelte-i18n";
@@ -29,9 +32,11 @@
     onremove?: () => void;
     /** What follows the row: a note about what the agent may read. */
     note?: Snippet;
+    /** Whether the connection it is read through is paused. */
+    paused?: boolean;
   }
 
-  let { row, ontoggle, onremove, note }: Props = $props();
+  let { row, ontoggle, onremove, note, paused = false }: Props = $props();
 
   let showSkipped = $state(false);
 
@@ -53,7 +58,7 @@
   const badge = $derived(SOURCE_STATE_BADGE[row.state]);
 </script>
 
-<li class="py-2" data-testid="agent-sheet-source" data-source={row.kind} data-state={row.state}>
+<li class="py-2" data-testid="agent-sheet-source" data-source={row.kind} data-state={row.state} data-paused={paused ? "true" : undefined}>
   <div class="flex items-start gap-2.5">
     {#if ontoggle}
       <Checkbox
@@ -87,6 +92,26 @@
             {$t("agent_sources.skipped", { values: { count: skippedCount } })}
           </button>
         {/if}
+        {#if row.awaitingOcr > 0}
+          ·
+          <span data-testid="agent-sheet-source-awaiting-ocr">
+            {$t("agent_sources.awaiting_ocr", { values: { count: row.awaitingOcr } })}
+          </span>
+          <button
+            type="button"
+            class="ml-1 text-primary underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+            onclick={() => navigateTo("llm")}
+            data-testid="agent-sheet-source-import-language"
+          >
+            {$t("agent_sources.import_language")}
+          </button>
+        {/if}
+        {#if row.notRead > 0}
+          ·
+          <span data-testid="agent-sheet-source-not-read">
+            {$t("agent_sources.not_read", { values: { count: row.notRead } })}
+          </span>
+        {/if}
         {#if row.state === "keywords_only"}
           <button
             type="button"
@@ -109,6 +134,9 @@
       {/if}
       {@render note?.()}
     </div>
+    {#if paused}
+      <Badge size="sm" variant="warning">{$t("agent_sheet.paused")}</Badge>
+    {/if}
     {#if badge}
       <Badge size="sm" variant={badge.tone} data-testid="agent-sheet-source-state">{$t(badge.label)}</Badge>
     {/if}

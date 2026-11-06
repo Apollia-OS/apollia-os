@@ -1,6 +1,6 @@
 [package]
 name = "apollia-runtime"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Apollia OS - Runtime Core (Supervisor, AgentRegistry, TaskRouter, EventBus, APIServer axum)"
@@ -80,9 +80,6 @@ tempfile           = { workspace = true }
 rust_xlsxwriter    = { workspace = true }
 # Engine store archives are zip, the format already read for agent packages.
 zip                = { workspace = true }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-wmi = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -63,6 +63,16 @@ pub async fn run(
     let start = Instant::now();
     let socket_path = socket.unwrap_or_else(default_socket_path);
 
+    // A factory reset this daemon recorded on Windows is carried out before
+    // the configuration or any database is read.
+    let reset_dir = apollia_core::paths::data_dir_under(apollia_core::paths::home_dir_or_temp());
+    let outcome = apollia_runtime::app_lifecycle::apply_pending_factory_reset(
+        &reset_dir,
+        apollia_runtime::app_lifecycle::PENDING_RESET_WAIT,
+    )
+    .await;
+    apollia_runtime::app_lifecycle::log_pending_reset(&outcome, &reset_dir);
+
     // Load apollia.toml if found. Agents, triggers, pipelines, notifications, and stt
     // are loaded from SQLite by the Supervisor; only static sections are parsed here.
     // Read before the port check, since `[api].port` names the port to check.
@@ -179,6 +189,7 @@ pub async fn run(
         package_repository,
         tools_config: tools_config.clone(),
         mcp_loading: apollia_mcp::session::LoadingMode::from(mcp_config.tool_loading),
+        mcp_idle_stop: std::time::Duration::from_secs(mcp_config.idle_stop_secs),
         tool_search_limit: mcp_config.tool_search_limit,
         hooks_config,
         plan_mode_default: chat_config.plan_mode_default,

@@ -88,6 +88,7 @@ pub(crate) fn build_router<B: ExecutionBackend + Clone + From<DynBackend>>(
         get_audit_anchor, list_audit_journal, post_replay_run, show_audit_entry, show_audit_run,
         verify_audit_journal, verify_audit_run,
     };
+    use crate::api::routes_audit_activity::get_connection_activity;
     use crate::api::routes_audit_export::export_audit_journal;
     use crate::api::routes_chat::conversations::{conversations_router, update_session};
     use crate::api::routes_chat::user_inputs::{
@@ -125,6 +126,7 @@ pub(crate) fn build_router<B: ExecutionBackend + Clone + From<DynBackend>>(
     };
     use crate::api::routes_oauth_clients::oauth_clients_router;
     use crate::api::routes_onboarding::onboarding_router;
+    use crate::api::routes_onedrive_choices::onedrive_choices_router;
     use crate::api::routes_permissions::permissions_router;
     use crate::api::routes_plan_cache::{clear_plan_cache, get_plan_cache_stats};
     use crate::api::routes_profile::profile_router;
@@ -198,6 +200,7 @@ pub(crate) fn build_router<B: ExecutionBackend + Clone + From<DynBackend>>(
         .route("/api/v1/audit/verify/:run_id", get(verify_audit_run::<B>))
         .route("/api/v1/audit/anchor", get(get_audit_anchor::<B>))
         .route("/api/v1/audit/export", get(export_audit_journal::<B>))
+        .route("/api/v1/audit/activity", get(get_connection_activity::<B>))
         .route("/api/v1/audit/journal", get(list_audit_journal::<B>))
         .route("/api/v1/audit/journal/:run_id", get(show_audit_run::<B>))
         .route(
@@ -442,6 +445,7 @@ pub(crate) fn build_router<B: ExecutionBackend + Clone + From<DynBackend>>(
         .merge(chat_assists_router::<B>())
         .merge(connectors_router::<B>())
         .merge(drive_folders_router::<B>())
+        .merge(onedrive_choices_router::<B>())
         .merge(imap_router::<B>())
         .merge(crate::api::routes_sources::sources_router::<B>())
         .merge(crate::api::routes_batches::batch_routes::<B>())

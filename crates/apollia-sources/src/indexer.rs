@@ -11,6 +11,11 @@
 //! - **Following the files.** The watcher reports each change; the pass that
 //!   follows reads again only the files whose date and then fingerprint
 //!   changed, and drops the documents whose file is gone ([`pass`]).
+//! - **A folder chosen again.** A source whose folder connection now names
+//!   another folder forgets its old index and the watch over the old folder,
+//!   and is indexed in the new one: at once when the registry is told
+//!   (`SourceRegistryHandle::folder_repointed`), else at the next sweep,
+//!   which reads the folder connections once for every source.
 //! - **After a restart.** The first pass compares the disk with what the
 //!   index holds, so changes made while Apollia was stopped are caught.
 //! - **With one model.** When the default embeddings model changes, every
@@ -27,6 +32,12 @@
 //!   then reads those pages. That fetch carries nothing of the documents; it
 //!   is tried once per run, and a machine without the network takes the same
 //!   files from a disk.
+//! - **A language that arrives.** The language data is read in the models
+//!   folder in force (the `[models] dir` key), which the runtime resolves and
+//!   hands over at the start. Each sweep notes whether the engine opens; when
+//!   it opens where it did not, a language was imported or copied there, and
+//!   every source is read again, as after a download, so the pages that
+//!   waited are read within one sweep, without a restart.
 //!
 //! The actor stops when the registry that started it stops.
 //!
@@ -53,6 +64,7 @@ pub mod extract;
 mod pass;
 mod watch;
 
+pub(crate) use pass::is_under;
 pub use pass::{PassOutcome, MAX_INDEXED_FILE_BYTES};
 
 /// Capacity of the indexer's channel. A watcher that finds it full asks for
@@ -88,6 +100,9 @@ pub trait PassageEmbedder: Send + Sync + 'static {
 pub(crate) enum IndexerCommand {
     /// The registry changed: read it again.
     Sync,
+    /// The folder connection of these sources now names another folder:
+    /// read where they are again and index them there at once.
+    Repointed(Vec<String>),
     /// Files of `source` changed on the disk.
     Changed {
         /// The source.
@@ -97,6 +112,9 @@ pub(crate) enum IndexerCommand {
     },
     /// Index every source again against the disk, then answer.
     Refresh(oneshot::Sender<()>),
+    /// Answer, once every command sent before is served.
+    #[cfg(test)]
+    Served(oneshot::Sender<()>),
 }
 
 /// The registry's way to reach the indexer.
@@ -132,6 +150,13 @@ struct Indexer<E> {
     rescan_rx: mpsc::Receiver<()>,
     tracked: HashMap<String, Tracked>,
     model: Option<Option<String>>,
+    /// Where the language data of recognition lives: `tessdata` in the
+    /// models folder the indexer was started with.
+    tessdata: PathBuf,
+    /// Opens the engine over that folder.
+    open_ocr: OpenOcr,
+    /// Whether the engine opened at the last sweep; `None` before the first.
+    ocr_opened: Option<bool>,
     /// Where the language data of recognition is fetched from; `None` in a
     /// build without the engine, which asks for nothing.
     ocr_data: Option<Arc<OcrDataFetch>>,
@@ -174,9 +199,35 @@ impl OcrDataFetch {
     }
 }
 
-/// Where the language data of recognition lives under `data_dir`.
-fn tessdata_dir(data_dir: &Path) -> PathBuf {
-    apollia_llm::ocr_data::tessdata_dir(&data_dir.join("models"))
+/// Opens the recognition engine over a folder of language data.
+pub(crate) type OpenOcr = Arc<dyn Fn(&Path) -> Ocr + Send + Sync>;
+
+/// Where the language data of recognition lives in the models folder
+/// `models_dir`.
+fn tessdata_dir(models_dir: &Path) -> PathBuf {
+    apollia_llm::ocr_data::tessdata_dir(models_dir)
+}
+
+/// How an indexer reads scanned pages and pictures.
+pub(crate) struct Recognition {
+    /// The models folder in force, whose `tessdata` holds the language data.
+    pub(crate) models_dir: PathBuf,
+    /// Where the language data is fetched from; `None` never fetches it.
+    pub(crate) fetch: Option<OcrDataFetch>,
+    /// Opens the engine over the language data.
+    pub(crate) open: OpenOcr,
+}
+
+impl Recognition {
+    /// The engine of this build over `models_dir`, its language data
+    /// fetched from the registry shipped in the binary.
+    pub(crate) fn shipped(models_dir: PathBuf) -> Self {
+        Self {
+            models_dir,
+            fetch: OcrDataFetch::shipped(),
+            open: Arc::new(Ocr::open),
+        }
+    }
 }
 
 /// What an indexer is started over, beside its registry and its embedder.
@@ -187,9 +238,8 @@ pub(crate) struct Start {
     pub(crate) data_dir: PathBuf,
     /// Time between two sweeps.
     pub(crate) interval: Duration,
-    /// Where the language data of recognition is fetched from; `None` never
-    /// fetches it.
-    pub(crate) ocr_data: Option<OcrDataFetch>,
+    /// How scanned pages and pictures are read.
+    pub(crate) recognition: Recognition,
 }
 
 /// Starts the indexer over the registry `registry` and returns the handle the
@@ -203,7 +253,7 @@ pub(crate) fn spawn<E: PassageEmbedder>(
         system_db,
         data_dir,
         interval,
-        ocr_data,
+        recognition,
     } = start;
     let (tx, rx) = mpsc::channel(INDEXER_CAPACITY);
     let (rescan_tx, rescan_rx) = mpsc::channel(1);
@@ -218,7 +268,10 @@ pub(crate) fn spawn<E: PassageEmbedder>(
         rescan_rx,
         tracked: HashMap::new(),
         model: None,
-        ocr_data: ocr_data.map(Arc::new),
+        tessdata: tessdata_dir(&recognition.models_dir),
+        open_ocr: recognition.open,
+        ocr_opened: None,
+        ocr_data: recognition.fetch.map(Arc::new),
         ocr_data_asked: AtomicBool::new(false),
     };
     tokio::spawn(indexer.run(interval));
@@ -234,20 +287,33 @@ impl<E: PassageEmbedder> Indexer<E> {
             tokio::select! {
                 command = self.rx.recv() => match command {
                     None => break,
-                    Some(IndexerCommand::Sync) => self.sweep(false).await,
-                    Some(IndexerCommand::Refresh(reply)) => {
-                        self.sweep(true).await;
-                        let _ = reply.send(());
-                    }
                     Some(IndexerCommand::Changed { source, paths }) => {
                         self.changed(source, paths).await;
                     }
+                    Some(command) => self.serve(command).await,
                 },
                 Some(()) = self.rescan_rx.recv() => self.sweep(true).await,
                 _ = ticker.tick() => self.sweep(false).await,
             }
         }
         tracing::event!(tracing::Level::INFO, "sources.indexer.stopped");
+    }
+
+    /// Serves a command other than a change of files.
+    async fn serve(&mut self, command: IndexerCommand) {
+        match command {
+            IndexerCommand::Sync => self.sweep(false).await,
+            IndexerCommand::Repointed(ids) => self.repointed(ids).await,
+            IndexerCommand::Refresh(reply) => {
+                self.sweep(true).await;
+                let _ = reply.send(());
+            }
+            IndexerCommand::Changed { .. } => {}
+            #[cfg(test)]
+            IndexerCommand::Served(reply) => {
+                let _ = reply.send(());
+            }
+        }
     }
 
     /// The default model, `None` when there is none to use.
@@ -267,13 +333,32 @@ impl<E: PassageEmbedder> Indexer<E> {
         }
     }
 
+    /// Whether the engine opens now, read under `spawn_blocking`: opening
+    /// checks the language data against its digests. `true` the first time
+    /// it opens after a sweep where it did not, a language having arrived.
+    async fn ocr_arrived(&mut self) -> bool {
+        let open = Arc::clone(&self.open_ocr);
+        let tessdata = self.tessdata.clone();
+        let opens = tokio::task::spawn_blocking(move || open(&tessdata).is_available())
+            .await
+            .unwrap_or(false);
+        let arrived = self.ocr_opened == Some(false) && opens;
+        self.ocr_opened = Some(opens);
+        if arrived {
+            tracing::event!(tracing::Level::INFO, "sources.indexer.ocr_arrived");
+        }
+        arrived
+    }
+
     /// Reads the registry and the model again: stops keeping the sources
     /// removed, starts keeping the new ones, and runs a full pass over the
-    /// new ones, or over every one when `all` is set or the model changed.
+    /// new ones, or over every one when `all` is set, the model changed or
+    /// the engine opens where it did not.
     async fn sweep(&mut self, all: bool) {
         let Some(sources) = self.registry.list().await else {
             return;
         };
+        let ocr_arrived = self.ocr_arrived().await;
         let model = self.current_model().await;
         let model_changed = self.model.as_ref().is_some_and(|m| *m != model);
         self.model = Some(model.clone());
@@ -291,30 +376,81 @@ impl<E: PassageEmbedder> Indexer<E> {
         for id in gone {
             self.untrack(&id);
         }
+        let roots = self.resolve(&wanted).await;
         for source in wanted {
-            let new = !self.tracked.contains_key(&source.id);
-            if new && !self.track(&source).await {
-                continue;
-            }
-            if new || all || model_changed {
-                self.full_pass(&source.id, model.clone()).await;
-            }
+            let root = roots.get(&source.id).cloned();
+            let again = all || model_changed || ocr_arrived;
+            self.follow(&source, root, again, model.clone()).await;
         }
     }
 
-    /// Starts keeping `source`: resolves where its files are and watches
-    /// them. `false`, its state set to `error`, when its files cannot be
-    /// found.
-    async fn track(&mut self, source: &Source) -> bool {
-        let system_db = self.system_db.clone();
-        let resolved = {
-            let source = source.clone();
-            tokio::task::spawn_blocking(move || root_of(&system_db, &source))
-                .await
-                .ok()
-                .flatten()
+    /// Follows the sources `ids` to the folder their connection names now,
+    /// without waiting for the sweep: a source that moved forgets its old
+    /// index and the watch over its old folder, and each one is indexed
+    /// again against the disk.
+    async fn repointed(&mut self, ids: Vec<String>) {
+        let Some(sources) = self.registry.list().await else {
+            return;
         };
-        let Some(root) = resolved else {
+        let wanted: Vec<Source> = sources
+            .into_iter()
+            .filter(|s| matches!(s.kind, SourceKind::Folder | SourceKind::File))
+            .filter(|s| ids.contains(&s.id))
+            .collect();
+        let model = match &self.model {
+            Some(model) => model.clone(),
+            None => self.current_model().await,
+        };
+        let roots = self.resolve(&wanted).await;
+        for source in wanted {
+            let root = roots.get(&source.id).cloned();
+            self.follow(&source, root, true, model.clone()).await;
+        }
+    }
+
+    /// Keeps `source` in step with `root`, where its files are now: a root
+    /// changed since it was first read drops its old index and watch, a
+    /// source not kept yet starts being kept, and a full pass runs over a
+    /// new one, or over any one when `again` is set.
+    async fn follow(
+        &mut self,
+        source: &Source,
+        root: Option<PathBuf>,
+        again: bool,
+        model: Option<String>,
+    ) {
+        let moved = match (self.tracked.get(&source.id), &root) {
+            (Some(kept), Some(root)) => kept.root != *root,
+            _ => false,
+        };
+        if moved {
+            self.untrack(&source.id);
+        }
+        let new = !self.tracked.contains_key(&source.id);
+        if new && !self.track(source, root).await {
+            return;
+        }
+        if new || again {
+            self.full_pass(&source.id, model).await;
+        }
+    }
+
+    /// Where the files of each of `sources` are now, read in one go under
+    /// `spawn_blocking`: the folder connections are read once, whatever
+    /// the number of sources.
+    async fn resolve(&self, sources: &[Source]) -> HashMap<String, PathBuf> {
+        let system_db = self.system_db.clone();
+        let sources = sources.to_vec();
+        tokio::task::spawn_blocking(move || roots_of(&system_db, &sources))
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Starts keeping `source`, whose files are at `root`, and watches
+    /// them. `false`, its state set to `error`, when its files could not be
+    /// found.
+    async fn track(&mut self, source: &Source, root: Option<PathBuf>) -> bool {
+        let Some(root) = root else {
             tracing::event!(
                 tracing::Level::WARN,
                 source = %source.id,
@@ -353,12 +489,19 @@ impl<E: PassageEmbedder> Indexer<E> {
         let Some(root) = self.tracked.get(id).map(|t| t.root.clone()) else {
             return;
         };
+        tracing::event!(
+            tracing::Level::DEBUG,
+            source = %id,
+            root = %root.display(),
+            "sources.indexer.full_pass"
+        );
         self.registry.set_state(id, IndexState::Indexing).await;
         let scopes = vec![root.clone()];
-        let outcome = self.pass(id, root, scopes, model.clone()).await;
+        let outcome = self.pass(id, root.clone(), scopes, model.clone()).await;
         self.registry
             .set_state(id, state_after(outcome.as_ref(), model.as_deref()))
             .await;
+        self.registry.indexed(id, root).await;
     }
 
     /// Reads again the files the watcher reported for `source`, with the
@@ -394,14 +537,7 @@ impl<E: PassageEmbedder> Indexer<E> {
                 .await;
         }
         for command in later {
-            match command {
-                IndexerCommand::Sync => self.sweep(false).await,
-                IndexerCommand::Refresh(reply) => {
-                    self.sweep(true).await;
-                    let _ = reply.send(());
-                }
-                IndexerCommand::Changed { .. } => {}
-            }
+            self.serve(command).await;
         }
     }
 
@@ -416,7 +552,7 @@ impl<E: PassageEmbedder> Indexer<E> {
         if self.ocr_data_asked.swap(true, Ordering::AcqRel) {
             return;
         }
-        let dir = tessdata_dir(&self.data_dir);
+        let dir = self.tessdata.clone();
         let rescan = self.rescan_tx.clone();
         tokio::spawn(async move {
             let fetched = apollia_llm::ocr_data::fetch_missing(
@@ -457,11 +593,13 @@ impl<E: PassageEmbedder> Indexer<E> {
         let data_dir = self.data_dir.clone();
         let source = id.to_owned();
         let embedder = Arc::clone(&self.embedder);
+        let open = Arc::clone(&self.open_ocr);
+        let tessdata = self.tessdata.clone();
         let runtime = tokio::runtime::Handle::current();
         let outcome = tokio::task::spawn_blocking(move || -> Result<PassOutcome, IndexError> {
             let mut index = SourceIndex::open(&data_dir, &source)?;
             let embed = |texts: &[String]| runtime.block_on(embedder.embed_passages(texts));
-            let ocr = Ocr::open(&tessdata_dir(&data_dir));
+            let ocr = open(&tessdata);
             let means = pass::Means {
                 model: model.as_deref(),
                 embed: &embed,
@@ -546,20 +684,39 @@ fn scopes_of(root: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
     scopes
 }
 
-/// Where the files of `source` are: the folder of its connection, or its
-/// file. `None` when the connection is gone or the store cannot be read.
-fn root_of(system_db: &Path, source: &Source) -> Option<PathBuf> {
-    let reference = source.reference.as_deref()?;
-    let path = match source.kind {
-        SourceKind::Folder => {
-            let id = reference.strip_prefix("folder:").unwrap_or(reference);
-            let store = FolderConnectionStore::open(system_db).ok()?;
-            PathBuf::from(store.get(id).ok()??.path)
-        }
-        SourceKind::File => PathBuf::from(reference),
-        _ => return None,
+/// Where the files of each of `sources` are: the folder of its connection,
+/// or its file. The folder connections are read once, and only when a folder
+/// source is among them. A source whose connection is gone, or whose store
+/// cannot be read, is left out.
+pub(crate) fn roots_of(system_db: &Path, sources: &[Source]) -> HashMap<String, PathBuf> {
+    let folders: HashMap<String, String> = if sources.iter().any(|s| s.kind == SourceKind::Folder) {
+        FolderConnectionStore::open(system_db)
+            .and_then(|store| store.list())
+            .map(|all| all.into_iter().map(|c| (c.id, c.path)).collect())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
     };
-    Some(std::fs::canonicalize(&path).unwrap_or(path))
+    let mut roots = HashMap::new();
+    for source in sources {
+        let Some(reference) = source.reference.as_deref() else {
+            continue;
+        };
+        let path = match source.kind {
+            SourceKind::Folder => {
+                let id = reference.strip_prefix("folder:").unwrap_or(reference);
+                let Some(path) = folders.get(id) else {
+                    continue;
+                };
+                PathBuf::from(path)
+            }
+            SourceKind::File => PathBuf::from(reference),
+            _ => continue,
+        };
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        roots.insert(source.id.clone(), path);
+    }
+    roots
 }
 
 #[cfg(test)]

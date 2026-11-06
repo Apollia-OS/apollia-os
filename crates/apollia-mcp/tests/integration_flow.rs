@@ -24,6 +24,7 @@ fn mock_server_config(name: &str) -> McpServerConfig {
         max_tools: 256,
         tags: vec![],
         tool_families: Default::default(),
+        operator_families: Default::default(),
         origin: None,
     }
 }
@@ -87,6 +88,33 @@ async fn test_remove_server() {
         )
         .await;
     assert!(matches!(result, Err(McpSessionError::ServerExited { .. })));
+
+    manager.shutdown().await;
+}
+
+/// A server removed in immediate loading takes its descriptors out of the
+/// tool registry with it.
+#[tokio::test]
+async fn test_remove_server_unregisters_its_descriptors() {
+    // GIVEN an immediate-mode manager whose server registered its tools
+    let registry = ToolRegistryHandle::start();
+    let manager = McpClientManagerHandle::start(
+        vec![mock_server_config("gone")],
+        &registry,
+        None,
+        LoadingMode::Eager,
+    )
+    .await
+    .unwrap();
+    let before = registry.list().await.unwrap();
+    assert!(before.iter().any(|d| d.name.starts_with("mcp:gone/")));
+
+    // WHEN the server is removed
+    manager.remove_server("gone").await.unwrap();
+
+    // THEN no descriptor of it is left in the registry
+    let after = registry.list().await.unwrap();
+    assert!(after.iter().all(|d| !d.name.starts_with("mcp:gone/")));
 
     manager.shutdown().await;
 }
@@ -380,8 +408,11 @@ async fn test_reload_event_names_tools_in_deferred_mode() {
     manager.reload_server("reload-deferred").await.unwrap();
 
     // THEN the published event names the two tools on both sides: an empty
-    // pair would report that a server exposing two tools moved nothing
-    let event = rx.try_recv().unwrap();
+    // pair would report that a server exposing two tools moved nothing; the
+    // health each start announced is passed over
+    let event = std::iter::from_fn(|| rx.try_recv().ok())
+        .find(|e| !matches!(e, apollia_core::RuntimeEvent::McpServerHealthChanged { .. }))
+        .unwrap();
     match event {
         apollia_core::RuntimeEvent::McpServerReloaded {
             name,

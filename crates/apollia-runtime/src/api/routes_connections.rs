@@ -2,14 +2,23 @@
 //!
 //! The list is assembled by [`crate::connections::assemble`] from the stores
 //! each kind keeps: `mcp.db` and the live MCP sessions, the tool registry, the
-//! native account index, the mailbox list, the folders of `system.db`, and
-//! `package_items` in `agents.db` when it exists. A folder is added and
-//! removed under `/api/v1/connections/folders` (see [`folders`]).
+//! native account index, the mailbox list, the folders and the last state of
+//! each connection in `system.db`, and `package_items` in `agents.db` when it
+//! exists. A folder is added, pointed at another folder and removed under
+//! `/api/v1/connections/folders` (see [`folders`]). The agents of a connection are read, and the connection
+//! granted to several agents, under `/api/v1/connections/{id}` (see
+//! [`agents`]). A connection is checked now under
+//! `/api/v1/connections/{id}/check` (see [`check`]), and put in pause and
+//! resumed there too (see [`pause`]). A tool of a connection the selection
+//! does not classify is given another family under
+//! `/api/v1/connections/{id}/tools/{tool}/family` (see [`family`]). A
+//! connection of any kind is removed, with what it leaves behind, by
+//! `DELETE /api/v1/connections/{id}` (see [`remove`]).
 
 use axum::{
     extract::State,
     http::StatusCode,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 
@@ -18,7 +27,7 @@ use apollia_auth::ConnectorProvider;
 use crate::api::openapi::ApiErrorBody;
 use crate::api::server::AppState;
 use crate::connections::{
-    assemble, package_connection_names, Connection, ConnectionSources, NativeAccounts,
+    assemble, kept_tool_index, package_connections, Connection, ConnectionSources, NativeAccounts,
 };
 use crate::coordinator::ExecutionBackend;
 
@@ -43,7 +52,36 @@ pub fn connections_router<B: ExecutionBackend + Clone>() -> Router<AppState<B>> 
         )
         .route(
             "/api/v1/connections/folders/:id",
-            delete(folders::remove_folder_connection::<B>),
+            put(folders::repoint_folder_connection::<B>)
+                .delete(folders::remove_folder_connection::<B>),
+        )
+        .route(
+            "/api/v1/connections/:id",
+            delete(remove::remove_connection::<B>),
+        )
+        .route(
+            "/api/v1/connections/:id/agents",
+            get(agents::get_connection_agents::<B>),
+        )
+        .route(
+            "/api/v1/connections/:id/grants",
+            post(agents::grant_connection::<B>),
+        )
+        .route(
+            "/api/v1/connections/:id/check",
+            post(check::check_connection::<B>),
+        )
+        .route(
+            "/api/v1/connections/:id/pause",
+            post(pause::pause_connection::<B>),
+        )
+        .route(
+            "/api/v1/connections/:id/resume",
+            post(pause::resume_connection::<B>),
+        )
+        .route(
+            "/api/v1/connections/:id/tools/:tool/family",
+            put(family::set_tool_family::<B>),
         )
 }
 
@@ -67,9 +105,21 @@ pub(crate) async fn list_connections<B: ExecutionBackend + Clone>(
 
 /// Connected accounts of every native provider.
 pub(crate) async fn native_accounts() -> Result<Vec<NativeAccounts>, ApiError> {
-    let manager = crate::connectors_bridge::get_auth()
+    let manager = auth_manager().await?;
+    accounts_of(&manager).await
+}
+
+/// The auth manager the native connectors run with.
+pub(crate) async fn auth_manager() -> Result<std::sync::Arc<apollia_auth::AuthManager>, ApiError> {
+    crate::connectors_bridge::get_auth()
         .await
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+/// Connected accounts of every native provider in `manager`.
+pub(crate) async fn accounts_of(
+    manager: &apollia_auth::AuthManager,
+) -> Result<Vec<NativeAccounts>, ApiError> {
     let mut out = Vec::new();
     for provider in ConnectorProvider::ALL {
         let accounts = manager
@@ -86,23 +136,38 @@ pub(crate) async fn collect_connections<B: ExecutionBackend + Clone>(
     state: &AppState<B>,
     native_accounts: Vec<NativeAccounts>,
 ) -> Result<Vec<Connection>, ApiError> {
-    let mcp_configs = match &state.mcp_server_repo {
-        Some(repo) => repo
-            .lock()
-            .map_err(|_| {
+    let (mcp_configs, stored_tools) = match &state.mcp_server_repo {
+        Some(repo) => {
+            let repo = repo.lock().map_err(|_| {
                 api_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "repository lock poisoned",
                 )
-            })?
-            .list()
-            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))?,
-        None => Vec::new(),
+            })?;
+            let read = |e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e);
+            (
+                repo.list().map_err(read)?,
+                repo.stored_tools().map_err(read)?,
+            )
+        }
+        None => Default::default(),
     };
-    let mcp_statuses = match &state.mcp_handle {
-        Some(handle) => handle.status().await,
-        None => Vec::new(),
+    // A dormant server runs no session: its state is the one last found,
+    // kept, not a health read from a session.
+    let (mcp_statuses, mut mcp_index) = match &state.mcp_handle {
+        Some(handle) => (
+            handle
+                .status()
+                .await
+                .into_iter()
+                .filter(|s| s.connected)
+                .collect(),
+            handle.get_tool_index().await,
+        ),
+        None => (Vec::new(), Vec::new()),
     };
+    let kept = kept_tool_index(&mcp_configs, &mcp_statuses, &mcp_index, &stored_tools);
+    mcp_index.extend(kept);
     let descriptors = match &state.tool_registry_handle {
         Some(registry) => registry
             .list()
@@ -110,7 +175,7 @@ pub(crate) async fn collect_connections<B: ExecutionBackend + Clone>(
             .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, e))?,
         None => Vec::new(),
     };
-    let package_servers = package_connection_names(
+    let package_servers = package_connections(
         &state
             .data_dir
             .join(apollia_core::paths::DataFile::Agents.file_name()),
@@ -124,15 +189,38 @@ pub(crate) async fn collect_connections<B: ExecutionBackend + Clone>(
         mcp_configs,
         mcp_statuses,
         descriptors,
+        mcp_index,
         package_servers,
         native_accounts,
         imap_accounts,
         forbidden: state.connection_governance.forbidden().ids().clone(),
         folders,
+        states: crate::connections::state::kept_states(&state.data_dir),
+        paused: paused_connections(state),
     }))
 }
 
+/// The connections in pause: those governance holds, or, for a runtime
+/// mounted without its actor, those `governance.db` names.
+pub(crate) fn paused_connections<B: ExecutionBackend + Clone>(
+    state: &AppState<B>,
+) -> std::collections::HashSet<String> {
+    if let Some(governance) = &state.governance {
+        return governance.state().paused.clone();
+    }
+    let db = apollia_core::paths::DataFile::Governance.path(&state.data_dir);
+    apollia_permissions::read_paused_connections(&db).unwrap_or_else(|e| {
+        tracing::event!(tracing::Level::WARN, error = %e, "connections.paused.unreadable");
+        std::collections::HashSet::new()
+    })
+}
+
+pub(crate) mod agents;
+pub(crate) mod check;
+pub(crate) mod family;
 pub(crate) mod folders;
+pub(crate) mod pause;
+pub(crate) mod remove;
 
 #[cfg(test)]
 mod tests;

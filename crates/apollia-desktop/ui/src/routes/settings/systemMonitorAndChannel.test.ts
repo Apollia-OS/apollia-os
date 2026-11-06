@@ -99,8 +99,8 @@ const ENGINES: EnginesResponse = {
     {
       engine: "llama-server",
       tag: "b7001",
-      variant: "cuda",
-      path: "/home/u/.apollia/engines/llama-server/b7001/cuda",
+      variant: "cuda-12",
+      path: "/home/u/.apollia/engines/llama-server/b7001/cuda-12",
       source: "downloaded",
       version: "7001 (0ff1ce0)",
       in_service: true,
@@ -111,7 +111,7 @@ const ENGINES: EnginesResponse = {
   updates: [
     {
       engine: "llama-server",
-      variant: "cuda",
+      variant: "cuda-12",
       installed_tag: "b7001",
       latest_tag: "b7100",
       update_available: true,
@@ -120,9 +120,10 @@ const ENGINES: EnginesResponse = {
       installed_released: null,
     },
   ],
-  cuda_proposable: false,
   verifiable: true,
-  nvidia_card: null,
+  hardware: null,
+  available: [],
+  ratings: [],
   dictation: null,
 };
 

@@ -2,12 +2,14 @@
   import { onMount } from "svelte";
   import { t } from "svelte-i18n";
   import SettingsSubPage from "../../components/settings/SettingsSubPage.svelte";
+  import EngineHardware from "../../components/settings/system/EngineHardware.svelte";
   import EngineList from "../../components/settings/system/EngineList.svelte";
   import EngineSelection from "../../components/settings/system/EngineSelection.svelte";
   import {
     enginesStore,
     hardwareStore,
     settingsLoaders,
+    systemInfoStore,
   } from "$lib/stores/settings";
   import {
     chooseEngine,
@@ -21,14 +23,18 @@
   import { developerMode } from "$lib/stores/developerMode";
   import { changeEngineChannel, verifyEngineUpdates } from "$lib/settings/engineChannel";
   import type { EngineChannel } from "$lib/ipc/system";
+  import { engineManagement } from "$lib/settings/engineManagementLive";
 
   onMount(() => {
     void settingsLoaders.engines();
     void settingsLoaders.hardware();
+    void settingsLoaders.systemInfo();
     void hydrateEngineSettings();
+    void engineManagement.refresh();
   });
 
   const acceleratorKind = $derived($hardwareStore.data?.accelerator.kind ?? null);
+  const os = $derived($systemInfoStore.data?.os ?? null);
 
   async function selectEngine(format: EngineFormat, choice: EngineChoice): Promise<void> {
     const written = await chooseEngine(format, choice);
@@ -60,11 +66,14 @@
 </script>
 
 <SettingsSubPage route="engines" data-testid="engines-section">
+  {#if $enginesStore.data}
+    <EngineHardware hardware={$enginesStore.data.hardware ?? null} {acceleratorKind} />
+  {/if}
   <EngineList
     response={$enginesStore.data}
     loading={$enginesStore.loading}
     error={$enginesStore.error}
-    {acceleratorKind}
+    {os}
     developer={$developerMode}
     {checking}
     {checkError}

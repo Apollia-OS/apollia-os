@@ -275,6 +275,17 @@ jobs:
       # name builds nothing.
       # Windows: +crt-static through .cargo/config.toml plus
       # CMAKE_MSVC_RUNTIME_LIBRARY, to align /MT on the apollia-runner side.
+      #
+      # `ocr` compiles Tesseract and Leptonica into the binary, so a shipped
+      # build reads scanned pages and pictures in sources. Their sources are
+      # staged by the step below and checked against
+      # packaging/tesseract-sources-checksums.txt, so the build script finds
+      # them and downloads nothing. That directory is in no cache: every
+      # shipped build compiles the engine from the verified sources.
+      - name: Stage the verified Tesseract and Leptonica sources
+        shell: bash
+        run: bash packaging/fetch-tesseract-sources.sh
+
       - name: Build CLI
         shell: bash
         env:
@@ -282,7 +293,7 @@ jobs:
         run: |
           cargo build --release -p apollia-cli \
             --target ${{ matrix.triple }} \
-            --no-default-features
+            --no-default-features --features ocr
 
       # Build apollia-runner with the matching backend feature.
       # Extracts local-{cpu,cuda,rocm,vulkan,metal} from matrix.features.
@@ -322,6 +333,17 @@ jobs:
           if [ -f target/${{ matrix.triple }}/release/apollia-runner ]; then
             strip target/${{ matrix.triple }}/release/apollia-runner
           fi
+
+      # The size the engine adds is read against the binaries of the previous
+      # release, so the shipped one is recorded here, after the strip.
+      - name: Record the size of the binary
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.triple }}/release/apollia-os"
+          [ -f "$BIN" ] || BIN="$BIN.exe"
+          SIZE=$(wc -c < "$BIN" | tr -d ' ')
+          echo "ocr size: ${{ matrix.preset }}/$(basename "$BIN") $SIZE"
+          echo "ocr size: ${{ matrix.preset }}/$(basename "$BIN") $SIZE" >> "$GITHUB_STEP_SUMMARY"
 
       # ── Package self-contained ────────────────────────────────────────────
       # The archive name comes from the naming contract, the same file
@@ -481,7 +503,60 @@ jobs:
           echo "== doctor, machine readable"
           "${LAUNCH[@]}" doctor --json > doctor.json
           python3 -c "import json,sys; d=json.load(open('doctor.json')); n=len(d['checks']); print(f'{n} check(s)'); sys.exit(0 if n else 1)"
+          # A bundle built without `ocr` starts and answers like one built
+          # with it; only the recognition check of doctor tells them apart.
+          python3 -c "import json,sys; r=[c for c in json.load(open('doctor.json'))['checks'] if c.get('id')=='recognition']; ok=bool(r) and (r[0].get('detail') or {}).get('compiled') is True; print('recognition: ' + (r[0].get('message','') if r else 'absent')); ok or print('::error::the recognition engine is not compiled into this bundle'); sys.exit(0 if ok else 1)"
           rm -rf "$HOME_DIR" doctor.json
+
+      # The smoke says the recognition engine is compiled in; this says the
+      # bundle reads with it. Through the same launcher and under a throwaway
+      # home, the daemon indexes a scanned PDF and a picture and the word is
+      # found in its full-text index: once fetching the language itself, once
+      # with the network made unreachable and the language copied in first,
+      # then refusing a copy altered by one byte. The three blocking presets
+      # (macos-silicon, linux-x86-cpu, windows-x86-cpu) gate the release here;
+      # the other presets run it too and inherit their allow_fail.
+      # The address and the digest are read from the registry the product
+      # pins, so this step cannot drift from what the application downloads.
+      - name: Read a scanned page and a picture with the bundle, online and offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="target/${{ matrix.triple }}/bundle/apollia-os-${{ matrix.preset }}"
+          WORK="$(mktemp -d)"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            LAUNCHER="$(cygpath -w "$STAGE/apollia-os.bat")"
+            NATIVE="$(cygpath -w "$WORK")"
+          else
+            LAUNCHER="$STAGE/apollia-os.sh"
+            NATIVE="$WORK"
+          fi
+          # The script gives each daemon its own HOME under --home; this one
+          # keeps the step itself off the runner's profile, as the smoke does.
+          mkdir -p "$WORK/home"
+          export HOME="$WORK/home" USERPROFILE="$WORK/home"
+          # Python ends its line with CRLF on Windows; the stray CR would
+          # make the sum line unreadable to sha256sum.
+          read -r commit sum < <(python3 -I -c '
+          import sys, tomllib
+          with open(sys.argv[1], "rb") as f:
+              entry = next(e for e in tomllib.load(f)["ocr"] if e["language"] == "fra")
+          print(entry["commit"], entry["sha256"])
+          ' crates/apollia-llm/src/recommend/pinned_models.toml | tr -d '\r')
+          curl --http1.1 -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            -o "$WORK/fra.traineddata" \
+            "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${commit}/fra.traineddata"
+          if command -v sha256sum > /dev/null; then
+            echo "${sum}  $WORK/fra.traineddata" | sha256sum -c -
+          else
+            echo "${sum}  $WORK/fra.traineddata" | shasum -a 256 -c -
+          fi
+          echo "== online: the bundle fetches the language"
+          python3 scripts/release_ocr_e2e.py --launcher "$LAUNCHER" --home "$NATIVE/online"
+          echo "== offline: the language copied in, the network unreachable"
+          python3 scripts/release_ocr_e2e.py --launcher "$LAUNCHER" --home "$NATIVE/offline" \
+            --offline --language-file "$NATIVE/fra.traineddata"
+          rm -rf "$WORK"
 
       - name: Generate SBOM (CycloneDX)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
@@ -595,6 +670,14 @@ jobs:
             echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8"
           } >> "$GITHUB_ENV"
 
+      # `ocr` compiles Tesseract and Leptonica into the application. Their
+      # sources are staged here, checked against
+      # packaging/tesseract-sources-checksums.txt, so the build script finds
+      # them and downloads nothing; that directory is in no cache.
+      - name: Stage the verified Tesseract and Leptonica sources
+        shell: bash
+        run: bash packaging/fetch-tesseract-sources.sh
+
       - name: Build Tauri app
         working-directory: crates/apollia-desktop
         env:
@@ -612,10 +695,27 @@ jobs:
             PATCH=$(jq -c '.bundle.macOS.signingIdentity = null' <<<"$PATCH")
           fi
           if [ -n "$PATCH" ]; then
-            cargo tauri build --target aarch64-apple-darwin --config "$PATCH"
+            cargo tauri build --target aarch64-apple-darwin --features ocr --config "$PATCH"
           else
-            cargo tauri build --target aarch64-apple-darwin
+            cargo tauri build --target aarch64-apple-darwin --features ocr
           fi
+
+      # Tesseract carries this message whatever the system: a desktop binary
+      # without it was built without the engine of scanned pages, and the job
+      # stops here, before any installer is collected or uploaded.
+      - name: Check the recognition engine is in the desktop binary
+        shell: bash
+        run: |
+          BIN="target/aarch64-apple-darwin/release/apollia-desktop"
+          N=$(grep -a -c "Failed loading language" "$BIN" || true)
+          echo "Failed loading language: ${N:-0} occurrence(s) in $BIN"
+          if [ "${N:-0}" -eq 0 ]; then
+            echo "::error::$BIN carries no recognition engine: it was built without the ocr feature"
+            exit 1
+          fi
+          SIZE=$(wc -c < "$BIN" | tr -d ' ')
+          echo "ocr size: desktop-macos/apollia-desktop $SIZE"
+          echo "ocr size: desktop-macos/apollia-desktop $SIZE" >> "$GITHUB_STEP_SUMMARY"
 
       # The libpython relocation runs before bundling (beforeBundleCommand,
       # crates/apollia-desktop/scripts/patch-prebundle-libpython.sh), so what Tauri
@@ -768,6 +868,14 @@ jobs:
             echo 'TAURI_BUNDLE_CONFIG={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
           fi
 
+      # `ocr` compiles Tesseract and Leptonica into the application. Their
+      # sources are staged here, checked against
+      # packaging/tesseract-sources-checksums.txt, so the build script finds
+      # them and downloads nothing; that directory is in no cache.
+      - name: Stage the verified Tesseract and Leptonica sources
+        shell: bash
+        run: bash packaging/fetch-tesseract-sources.sh
+
       - name: Build Tauri app
         working-directory: crates/apollia-desktop
         env:
@@ -800,10 +908,27 @@ jobs:
           # instead of swallowing it: `failed to run linuxdeploy` twice with no
           # cause attached is what this flag exists to stop.
           if [ -n "${TAURI_BUNDLE_CONFIG:-}" ]; then
-            cargo tauri build --verbose --target x86_64-unknown-linux-gnu --config "$TAURI_BUNDLE_CONFIG"
+            cargo tauri build --verbose --target x86_64-unknown-linux-gnu --features ocr --config "$TAURI_BUNDLE_CONFIG"
           else
-            cargo tauri build --verbose --target x86_64-unknown-linux-gnu
+            cargo tauri build --verbose --target x86_64-unknown-linux-gnu --features ocr
           fi
+
+      # Tesseract carries this message whatever the system: a desktop binary
+      # without it was built without the engine of scanned pages, and the job
+      # stops here, before any installer is collected or uploaded.
+      - name: Check the recognition engine is in the desktop binary
+        shell: bash
+        run: |
+          BIN="target/x86_64-unknown-linux-gnu/release/apollia-desktop"
+          N=$(grep -a -c "Failed loading language" "$BIN" || true)
+          echo "Failed loading language: ${N:-0} occurrence(s) in $BIN"
+          if [ "${N:-0}" -eq 0 ]; then
+            echo "::error::$BIN carries no recognition engine: it was built without the ocr feature"
+            exit 1
+          fi
+          SIZE=$(wc -c < "$BIN" | tr -d ' ')
+          echo "ocr size: desktop-linux/apollia-desktop $SIZE"
+          echo "ocr size: desktop-linux/apollia-desktop $SIZE" >> "$GITHUB_STEP_SUMMARY"
 
       # Flat staging: actions/upload-artifact roots the artifact at the
       # longest common ancestor of its paths, so uploading deb/*.deb and
@@ -975,6 +1100,14 @@ jobs:
             echo 'TAURI_BUNDLE_CONFIG={"bundle":{"createUpdaterArtifacts":false}}' >> "$GITHUB_ENV"
           fi
 
+      # `ocr` compiles Tesseract and Leptonica into the application. Their
+      # sources are staged here, checked against
+      # packaging/tesseract-sources-checksums.txt, so the build script finds
+      # them and downloads nothing; that directory is in no cache.
+      - name: Stage the verified Tesseract and Leptonica sources
+        shell: bash
+        run: bash packaging/fetch-tesseract-sources.sh
+
       - name: Build Tauri app
         working-directory: crates/apollia-desktop
         shell: bash
@@ -997,10 +1130,27 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if [ -n "${TAURI_BUNDLE_CONFIG:-}" ]; then
-            cargo tauri build --target x86_64-pc-windows-msvc --config "$TAURI_BUNDLE_CONFIG"
+            cargo tauri build --target x86_64-pc-windows-msvc --features ocr --config "$TAURI_BUNDLE_CONFIG"
           else
-            cargo tauri build --target x86_64-pc-windows-msvc
+            cargo tauri build --target x86_64-pc-windows-msvc --features ocr
           fi
+
+      # Tesseract carries this message whatever the system: a desktop binary
+      # without it was built without the engine of scanned pages, and the job
+      # stops here, before any installer is collected or uploaded.
+      - name: Check the recognition engine is in the desktop binary
+        shell: bash
+        run: |
+          BIN="target/x86_64-pc-windows-msvc/release/apollia-desktop.exe"
+          N=$(grep -a -c "Failed loading language" "$BIN" || true)
+          echo "Failed loading language: ${N:-0} occurrence(s) in $BIN"
+          if [ "${N:-0}" -eq 0 ]; then
+            echo "::error::$BIN carries no recognition engine: it was built without the ocr feature"
+            exit 1
+          fi
+          SIZE=$(wc -c < "$BIN" | tr -d ' ')
+          echo "ocr size: desktop-windows/apollia-desktop.exe $SIZE"
+          echo "ocr size: desktop-windows/apollia-desktop.exe $SIZE" >> "$GITHUB_STEP_SUMMARY"
 
       # ── Code signing with signtool (gated by secrets) ──────────────────────
       # The PFX cert is passed as base64 and signed with signtool of the

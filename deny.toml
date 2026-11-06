@@ -8,6 +8,27 @@ unmaintained = "all"
 # revisited every release; remove once the upstream fix is released or the
 # dependency tree no longer pulls the affected version.
 ignore = [
+    # zip 4 and 8 (the latter through calamine): extraction advisories on
+    # ZipArchive::extract and ZipStreamReader::extract (SUID and SGID bits,
+    # symbolic links out of the destination, permissions through links).
+    # Apollia never calls either: the engine store writes each entry itself,
+    # keeps only the permission bits and refuses a link that leaves the
+    # archive (engine_store/archive.rs, set_mode and make_symlink), and the
+    # other readers only read entries in memory. Lift condition: zip 9
+    # across the workspace, calamine 0.37 included.
+    "RUSTSEC-2026-0367", # zip: SUID/SGID bits kept by extract
+    "RUSTSEC-2026-0368", # zip: extract follows links out of the destination
+    "RUSTSEC-2026-0369", # zip: extract applies permissions through links
+    # webpki-roots 0.26.11 is a semver shim that re-exports webpki-roots 1,
+    # which the lock resolves to 1.0.10, the patched version: the roots it
+    # serves are those of 1.0.10. It is pulled by ureq 2 through
+    # apollia-notifications. Lift condition: ureq 3, or no ureq 2 in the tree.
+    "RUSTSEC-2026-0381",
+    # basic-toml: unmaintained. Read at build time only, by the i18n-config
+    # proc-macro that age (the AgeFile secret backend) uses to embed its
+    # messages; nothing of it runs in the shipped binaries. Lift condition:
+    # age moves off i18n-embed-fl, or i18n-config off basic-toml.
+    "RUSTSEC-2026-0374",
     # Transitive from the tauri GTK backend (tao, wry, webkit2gtk), Linux
     # desktop only, no patch yet: the gtk-rs GTK3 bindings are unmaintained
     # upstream. Not encountered on macOS/Windows builds (kept for
@@ -23,15 +44,18 @@ ignore = [
     "RUSTSEC-2024-0419", # gtk3-macros: unmaintained (gtk-rs GTK3)
     "RUSTSEC-2024-0420", # gtk-sys: unmaintained (gtk-rs GTK3)
     "RUSTSEC-2024-0370", # proc-macro-error: unmaintained, via gtk3-macros
-    # zip 4 (apollia-runtime, apollia-sources) and zip 8 (calamine,
-    # office_oxide): the three advisories concern `ZipArchive::extract` and
+    # zip 4 (apollia-runtime, apollia-sources, apollia-tools) and zip 8
+    # (office_oxide): the four advisories concern `ZipArchive::extract` and
     # `ZipStreamReader::extract`, which write an archive to disk. Nothing in
-    # the tree extracts an archive: packages, workbooks and office documents
-    # are read entry by entry, in memory. The fix is zip 9, a major version.
-    # Lift condition: the workspace and calamine/office_oxide move to zip 9.
+    # the tree calls either: engines and packages are walked entry by entry
+    # with bounded sizes, links read by their bytes or refused, and
+    # workbooks and office documents are read in memory. calamine is on
+    # zip 9, which carries none of them. Lift condition: the workspace and
+    # office_oxide move to zip 9.
     "RUSTSEC-2026-0367", # zip: SUID/SGID bits kept on extraction
     "RUSTSEC-2026-0368", # zip: extracted symlinks may point outside the target
     "RUSTSEC-2026-0369", # zip: permissions applied through extracted symlinks
+    "RUSTSEC-2026-0429", # zip: extract aborts on a symlink with a huge declared size
     # zbus 5 (notify-rust, Linux desktop notifications): its name and value
     # crates were merged into zbus 6 and are no longer published apart. No
     # safe upgrade exists in zbus 5. Lift condition: notify-rust moves to
@@ -44,6 +68,11 @@ ignore = [
     # retry. Lift condition: async-openai migrates off backoff upstream.
     "RUSTSEC-2025-0012", # backoff: unmaintained
     "RUSTSEC-2024-0384", # instant: unmaintained, via backoff
+    # In apollia-connectors through async-imap (the IMAP connector). pin-utils
+    # carries no known flaw: it is a single macro that std::pin::pin! now
+    # covers, and async-imap 0.12.0, its latest release, still depends on it.
+    # Lift condition: async-imap drops pin-utils.
+    "RUSTSEC-2026-0441", # pin-utils: unmaintained, via async-imap
     # Transitive via urlpattern, pulled by tauri. The unic project is
     # unmaintained; urlpattern has not moved off it. Lift condition:
     # urlpattern or tauri drops the unic crates.
